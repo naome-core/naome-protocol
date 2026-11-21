@@ -26,7 +26,7 @@ The two pinned kits include canonical decoding rules, reference handling and six
 
 A stores the typed envelope as deterministic CBOR. B uses a canonical tagged JSON encoding. Re-encoding creates a new record identifier. A verified migration binds the exact old and new records and their dependencies. Detached signatures continue to name their original bytes. Legacy JSON-body records and typed measurements can coexist in the same archive.
 
-A selected snapshot includes its roots, forward dependencies, profiles and access descriptors. Include any detached attestations or notices the recipient must examine as additional roots. Export can omit restricted payloads and discloses the inventory's membership. For larger exchanges use `export --limit N` and resume with `--after ID`. Import verifies the packet and reconciles it atomically.
+A selected snapshot includes its roots, forward dependencies, profiles and access descriptors. Include any detached attestations or notices the recipient must examine as additional roots. Export can omit restricted payloads and discloses the inventory's membership. For larger exchanges use `export --limit N` and resume with `--after ID`. Import verifies the packet and reconciles it atomically. The whitepaper's offline exchange section specifies the JSON fields and snapshot digest. [Complete two-object exchange](spec/examples/exchange-v1.json)
 
 ## Reproduce the calibration trial
 
@@ -52,4 +52,4 @@ The two native codecs share one evaluator. The paper's independent-implementatio
 
 ## Source provenance
 
-Version 0.1.0 was extracted from `crates/naome-protocol` at commit `8eadd8fdd8fcf5bdf3af26a77f0e20faacdfef9a` in the original NAOME repository (now `naome-core/naome-network`). The source subtree was `ae7f157cca2acc157ca0e92fafc41bc855df2988`. The Rust sources, tests, specification and bootstrap kits retain their original bytes. The repository metadata, lockfile and workflows support a standalone build. [Source commit](https://github.com/naome-core/naome-network/commit/8eadd8fdd8fcf5bdf3af26a77f0e20faacdfef9a)
+Version 0.1.0 was extracted from `crates/naome-protocol` at commit `8eadd8fdd8fcf5bdf3af26a77f0e20faacdfef9a` in the original NAOME repository (now `naome-core/naome-network`). The source subtree was `ae7f157cca2acc157ca0e92fafc41bc855df2988`. At extraction, the Rust sources, tests, specification and bootstrap kits retained their original bytes. The repository metadata, lockfile and workflows support a standalone build. [Source commit](https://github.com/naome-core/naome-network/commit/8eadd8fdd8fcf5bdf3af26a77f0e20faacdfef9a)
