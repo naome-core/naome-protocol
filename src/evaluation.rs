@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const V0_1_0_EVALUATOR_ID: &str = "rep-rust-0.1.0";
+const FIRST_SCOPED_EVALUATOR_ID: &str = "rep-rust-0.1.2-dev";
+const WITHDRAWAL_APPLICABILITY: &str = "withdrawal applicability";
 pub(crate) const EVALUATOR_ID: &str = concat!("rep-rust-", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +85,22 @@ pub struct Receipt {
     pub frontier: BTreeSet<Id>,
 }
 impl Receipt {
+    pub(crate) fn excludes_withdrawal_for(&self, notice: Id, target: Id) -> bool {
+        let mut checks = self
+            .checks
+            .iter()
+            .filter(|check| {
+                check.test == WITHDRAWAL_APPLICABILITY
+                    && check.inputs.first() == Some(&notice)
+                    && check
+                        .inputs
+                        .get(2..)
+                        .is_some_and(|targets| targets.contains(&target))
+            })
+            .peekable();
+        checks.peek().is_some() && checks.all(|check| check.status == Status::NotApplicable)
+    }
+
     pub(crate) fn check(&mut self, name: &str, status: Status, basis: &str, ids: &[Id]) {
         self.dependencies.extend(ids);
         self.checks.push(Check {
@@ -97,13 +115,20 @@ impl Receipt {
         self.obligations.insert(reason.into());
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WithdrawalRules {
+    ScopeOnly,
+    FirstScoped,
+    Scoped,
+}
+
 pub struct Evaluation<'a> {
     store: &'a Archive,
     s: &'a Snapshot,
     docs: BTreeMap<Id, Document>,
     aliases: Equivalence,
     policy: Document,
-    scoped_withdrawals: bool,
+    withdrawal_rules: WithdrawalRules,
 }
 impl Evaluation<'_> {
     fn doc(&self, id: Id, kind: Kind) -> Result<&Document> {
@@ -141,12 +166,14 @@ impl Evaluation<'_> {
     ) -> Result<bool> {
         let mut open = false;
         for (&id, n) in &self.docs {
-            if n.kind != Kind::Notice
-                || n.scope != scope
-                || !n
-                    .roles("target")
-                    .any(|t| !self.aliases.endpoints(t).is_disjoint(premises))
-            {
+            if n.kind != Kind::Notice || n.scope != scope {
+                continue;
+            }
+            let targets: Vec<_> = n
+                .roles("target")
+                .filter(|&target| !self.aliases.endpoints(target).is_disjoint(premises))
+                .collect();
+            if targets.is_empty() {
                 continue;
             }
             let Ok(signature) = self.signed(id, &n.scope, "notice") else {
@@ -161,24 +188,27 @@ impl Evaluation<'_> {
             let reason: String = n.field("reason")?;
             ensure!(!reason.is_empty(), "missing notice reason");
             let action: String = n.field("action")?;
-            if self.scoped_withdrawals && action == "withdraw" {
-                match measurement.within_withdrawal(n) {
+            if self.withdrawal_rules != WithdrawalRules::ScopeOnly && action == "withdraw" {
+                let first_scoped = self.withdrawal_rules == WithdrawalRules::FirstScoped;
+                let mut inputs = vec![id, signature];
+                if !first_scoped {
+                    // Identify the targets checked for this use, including when only some
+                    // targets of a notice occur in the warrant.
+                    inputs.extend(targets);
+                }
+                match measurement.within_withdrawal(n, first_scoped) {
                     Ok(true) => {}
                     Ok(false) => {
                         out.check(
-                            "withdrawal applicability",
+                            WITHDRAWAL_APPLICABILITY,
                             Status::NotApplicable,
                             "measurement outside the withdrawn mode or event interval",
-                            &[id, signature],
+                            &inputs,
                         );
                         continue;
                     }
                     Err(error) => {
-                        out.unknown(
-                            "withdrawal applicability",
-                            &error.to_string(),
-                            &[id, signature],
-                        );
+                        out.unknown(WITHDRAWAL_APPLICABILITY, &error.to_string(), &inputs);
                         open = true;
                         continue;
                     }
@@ -422,9 +452,10 @@ pub(crate) fn assess_for_evaluator(
     q: &Query,
     evaluator: &str,
 ) -> Result<Receipt> {
-    let scoped_withdrawals = match evaluator {
-        EVALUATOR_ID => true,
-        V0_1_0_EVALUATOR_ID | "rep-rust-0.1.1" => false,
+    let withdrawal_rules = match evaluator {
+        EVALUATOR_ID => WithdrawalRules::Scoped,
+        FIRST_SCOPED_EVALUATOR_ID => WithdrawalRules::FirstScoped,
+        V0_1_0_EVALUATOR_ID | "rep-rust-0.1.1" => WithdrawalRules::ScopeOnly,
         _ => bail!("unsupported receipt evaluator"),
     };
     let mut out = Receipt::default();
@@ -502,7 +533,7 @@ pub(crate) fn assess_for_evaluator(
             docs,
             aliases,
             policy,
-            scoped_withdrawals,
+            withdrawal_rules,
         };
         let mut pro = false;
         let mut con = false;
@@ -542,7 +573,7 @@ pub(crate) fn assess_for_evaluator(
                     _ => None,
                 };
                 let measurement = reading
-                    .map(MeasurementUse::from_reading)
+                    .map(|reading| MeasurementUse::from_reading(reading, withdrawal_rules))
                     .unwrap_or_default();
                 ensure!(
                     !view.challenged(&c.scope, &premises.visited, measurement, &mut out)?,

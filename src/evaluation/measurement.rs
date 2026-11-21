@@ -1,4 +1,4 @@
-use super::{Evaluation, Receipt, Standing, Status};
+use super::{Evaluation, Receipt, Standing, Status, WithdrawalRules};
 use crate::{
     profile::{Document, Kind},
     wire::Id,
@@ -14,53 +14,55 @@ pub(super) struct MeasurementUse<'a> {
 }
 
 impl<'a> MeasurementUse<'a> {
-    pub(super) fn from_reading(reading: &'a Document) -> Self {
+    pub(super) fn from_reading(reading: &'a Document, rules: WithdrawalRules) -> Self {
+        let mode = reading.fields.get("mode").and_then(|v| v.as_str());
         Self {
-            mode: reading
-                .fields
-                .get("mode")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty()),
+            // The first scoped evaluator treated an empty direct reading as missing.
+            mode: mode.filter(|mode| rules != WithdrawalRules::FirstScoped || !mode.is_empty()),
             event: reading.fields.get("event").and_then(|v| v.as_i64()),
         }
     }
 
-    pub(super) fn within_withdrawal(self, notice: &Document) -> Result<bool> {
+    pub(super) fn within_withdrawal(self, notice: &Document, first_scoped: bool) -> Result<bool> {
         let mode = notice
             .fields
             .get("mode")
-            .map(|v| {
-                v.as_str()
-                    .filter(|s| !s.is_empty())
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|mode| !mode.is_empty())
                     .context("invalid withdrawal mode")
             })
-            .transpose()?;
-        let interval = if notice.fields.contains_key("interval") {
-            let [first, last] = notice.field::<[i64; 2]>("interval")?;
-            ensure!(first <= last, "reversed withdrawal interval");
-            Some(first..=last)
-        } else {
-            None
-        };
-        if mode
-            .zip(self.mode)
-            .is_some_and(|(required, actual)| required != actual)
-            || interval
-                .as_ref()
-                .zip(self.event)
-                .is_some_and(|(bounds, event)| !bounds.contains(&event))
-        {
-            return Ok(false);
+            .transpose();
+        let interval = notice
+            .fields
+            .get("interval")
+            .map(|_| {
+                let [first, last] = notice.field::<[i64; 2]>("interval")?;
+                ensure!(first <= last, "reversed withdrawal interval");
+                Ok(first..=last)
+            })
+            .transpose();
+
+        match (mode, interval) {
+            (Err(error), _) | (_, Err(error)) if first_scoped => Err(error),
+            (Ok(Some(required)), _) if self.mode.is_some_and(|mode| mode != required) => Ok(false),
+            (_, Ok(Some(bounds))) if self.event.is_some_and(|event| !bounds.contains(&event)) => {
+                Ok(false)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(mode), Ok(interval)) => {
+                ensure!(
+                    mode.is_none() || self.mode.is_some(),
+                    "withdrawal needs a measurement mode"
+                );
+                ensure!(
+                    interval.is_none() || self.event.is_some(),
+                    "withdrawal needs a measurement event"
+                );
+                Ok(true)
+            }
         }
-        ensure!(
-            mode.is_none() || self.mode.is_some(),
-            "withdrawal needs a measurement mode"
-        );
-        ensure!(
-            interval.is_none() || self.event.is_some(),
-            "withdrawal needs a measurement event"
-        );
-        Ok(true)
     }
 }
 
