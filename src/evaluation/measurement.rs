@@ -19,6 +19,7 @@ impl Evaluation<'_> {
         let targets = self.aliases.endpoints(target);
         let mut branches = BTreeMap::new();
         let mut seen = BTreeSet::new();
+        let mut correction_applies = false;
         for (&id, n) in &self.docs {
             if n.kind != Kind::Notice {
                 continue;
@@ -64,12 +65,34 @@ impl Evaluation<'_> {
                 "verified Ed25519 signature and matching laboratory evidence",
                 &[id, sig, report],
             );
+            correction_applies = true;
+            // A correction is discovered at the notice horizon, outside the original argument.
+            // Its warrant includes the laboratory evidence and the attestation actually used.
+            let premises = self
+                .store
+                .explain(self.s, &[id, sig], "read", self.s.objects.len(), 48);
+            out.frontier.extend(premises.frontier.keys());
+            if !premises.frontier.is_empty() {
+                out.unknown(
+                    "calibration correction",
+                    "correction has missing or restricted inputs",
+                    &[id, report],
+                );
+                continue;
+            }
+            if self.challenged(scope, &premises.visited, out)? {
+                continue;
+            }
             let aliases = self.aliases.endpoints(id);
             if seen.is_disjoint(&aliases) {
                 branches.insert(id, n.field("bias")?);
             }
             seen.extend(aliases);
         }
+        ensure!(
+            !correction_applies || !branches.is_empty(),
+            "no applicable calibration correction retains its warrant"
+        );
         Ok(branches.into_iter().collect())
     }
     pub(super) fn measurement(

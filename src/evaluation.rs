@@ -128,19 +128,14 @@ impl Evaluation<'_> {
         }
         bail!("no admissible {role} signature")
     }
-    fn check_challenges(
-        &self,
-        c: &Document,
-        lineage: &BTreeSet<Id>,
-        out: &mut Receipt,
-    ) -> Result<()> {
+    fn challenged(&self, scope: &str, premises: &BTreeSet<Id>, out: &mut Receipt) -> Result<bool> {
         let mut open = false;
         for (&id, n) in &self.docs {
             if n.kind != Kind::Notice
-                || n.scope != c.scope
+                || n.scope != scope
                 || !n
                     .roles("target")
-                    .any(|t| !self.aliases.endpoints(t).is_disjoint(lineage))
+                    .any(|t| !self.aliases.endpoints(t).is_disjoint(premises))
             {
                 continue;
             }
@@ -167,8 +162,7 @@ impl Evaluation<'_> {
             ));
             open = true;
         }
-        ensure!(!open, "argument under an admitted notice");
-        Ok(())
+        Ok(open)
     }
     fn signed_tests(&self, c: &Document, a: &Document, out: &mut Receipt) -> Result<Vec<Standing>> {
         #[derive(Deserialize)]
@@ -466,19 +460,35 @@ pub fn assess(store: &Archive, s: &Snapshot, q: &Query) -> Result<Receipt> {
         let mut con = false;
         for &arg in &q.arguments {
             let evidence = store.explain(s, &[arg], "read", q.budget, 48);
+            // Preserve the archival provenance used to replay historical receipts.
             out.dependencies.extend(&evidence.visited);
-            out.frontier.extend(evidence.frontier.keys());
+            let argument = view.doc(arg, Kind::Argument);
+            let recorded_reading = argument
+                .as_ref()
+                .ok()
+                .filter(|a| {
+                    a.fields.get("method").and_then(Value::as_str) == Some("recorded-difference")
+                })
+                .and_then(|a| a.one("reading").ok());
+            let premises = match recorded_reading {
+                Some(reading) => store.explain_recorded_reading(s, arg, reading, q.budget),
+                None => evidence,
+            };
+            out.frontier.extend(premises.frontier.keys());
             let result = (|| -> Result<Vec<Standing>> {
                 ensure!(
-                    evidence.frontier.is_empty(),
+                    premises.frontier.is_empty(),
                     "argument has missing or restricted inputs"
                 );
-                let a = view.doc(arg, Kind::Argument)?;
+                let a = argument?;
                 ensure!(
                     a.subject == c.subject && a.scope == c.scope && a.one("claim")? == q.target,
                     "argument targets a different claim"
                 );
-                view.check_challenges(&c, &evidence.visited, &mut out)?;
+                ensure!(
+                    !view.challenged(&c.scope, &premises.visited, &mut out)?,
+                    "argument under an admitted notice"
+                );
                 view.warrant(&c, a, arg, &mut out)
             })();
             match result {
