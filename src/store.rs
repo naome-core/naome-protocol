@@ -294,7 +294,22 @@ impl Archive {
         budget: usize,
         depth: usize,
     ) -> Closure {
-        self.dependency_closure(roots, budget, depth, |id| self.resolve(s, id, purpose))
+        self.dependency_closure(roots, budget, depth, None, |id| {
+            self.resolve(s, id, purpose)
+        })
+    }
+    /// The argument consumes the stored value of this reading. Its own explicit
+    /// premises still apply, even when they also appear in the reading's provenance.
+    pub(crate) fn explain_recorded_reading(
+        &self,
+        s: &Snapshot,
+        argument: Id,
+        reading: Id,
+        budget: usize,
+    ) -> Closure {
+        self.dependency_closure(&[argument], budget, 48, Some(reading), |id| {
+            self.resolve(s, id, "read")
+        })
     }
     pub(crate) fn explain_for_training(
         &self,
@@ -302,7 +317,7 @@ impl Archive {
         roots: &[Id],
         access: &TrainingAccess<'_>,
     ) -> Closure {
-        self.dependency_closure(roots, s.objects.len(), 48, |id| {
+        self.dependency_closure(roots, s.objects.len(), 48, None, |id| {
             self.resolve_for_training(s, id, access)
         })
     }
@@ -311,6 +326,7 @@ impl Archive {
         roots: &[Id],
         budget: usize,
         depth: usize,
+        value_only: Option<Id>,
         resolve: impl Fn(Id) -> Result<Vec<u8>>,
     ) -> Closure {
         let mut result = Closure::default();
@@ -331,7 +347,11 @@ impl Archive {
                     return Ok(vec![]);
                 };
                 let r = Record::decode(&bytes, f)?;
-                Ok(r.inputs().collect())
+                Ok(if Some(id) == value_only {
+                    vec![r.profile, r.access]
+                } else {
+                    r.inputs().collect()
+                })
             })();
             match next {
                 Ok(inputs) => {
