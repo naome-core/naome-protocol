@@ -321,7 +321,7 @@ impl TrainingReview<'_> {
         ensure!(
             matches!(
                 evaluator.as_str(),
-                crate::evaluation::EVALUATOR_ID | "rep-rust-0.1.0"
+                crate::evaluation::EVALUATOR_ID | crate::evaluation::V0_1_0_EVALUATOR_ID
             ),
             "unsupported receipt evaluator"
         );

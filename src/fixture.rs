@@ -1,5 +1,8 @@
 use crate::{
-    evaluation::{Query, Receipt, Standing, assess, deposit_receipt},
+    evaluation::{
+        EVALUATOR_ID, Query, Receipt, Standing, V0_1_0_EVALUATOR_ID, assess, deposit_receipt,
+        deposit_receipt_for_evaluator,
+    },
     learning::{Example, TrainingRequest},
     profile::{Document, Kind, Link, PUBLIC, attest, link},
     store::{Archive, Snapshot},
@@ -215,11 +218,17 @@ fn seed_measurements(store: &Archive, f: Format, legacy: bool) -> Result<Investi
     }
     let s = store.snapshot("East", [feature_cutoff].into())?;
     let s0 = s.id()?;
+    // The published legacy archive includes signatures over the original evaluator's receipts.
+    let evaluator = if legacy {
+        V0_1_0_EVALUATOR_ID
+    } else {
+        EVALUATOR_ID
+    };
     let mut receipts = vec![];
     let mut labels = vec![];
     for q in &queries {
         let receipt = assess(store, &s, q)?;
-        let id = deposit_receipt(store, &s, q, &receipt, f)?;
+        let id = deposit_receipt_for_evaluator(store, &s, q, &receipt, f, evaluator)?;
         sign(store, f, id, SCOPE, "assessor", 4)?;
         receipts.push(id);
         let receipt_head = store.snapshot("East receipts", [s0].into())?;
@@ -245,7 +254,7 @@ fn seed_measurements(store: &Archive, f: Format, legacy: bool) -> Result<Investi
         result.result == Some(Standing::Supported),
         "control readback mismatch"
     );
-    let id = deposit_receipt(store, &s, &control_query, &result, f)?;
+    let id = deposit_receipt_for_evaluator(store, &s, &control_query, &result, f, evaluator)?;
     let control_label = store.label(
         &store.snapshot("control readback", [s0].into())?,
         id,

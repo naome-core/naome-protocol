@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) const V0_1_0_EVALUATOR_ID: &str = "rep-rust-0.1.0";
 pub(crate) const EVALUATOR_ID: &str = concat!("rep-rust-", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -573,9 +574,19 @@ pub fn deposit_receipt(
     r: &Receipt,
     f: Format,
 ) -> Result<Id> {
+    deposit_receipt_for_evaluator(store, s, q, r, f, EVALUATOR_ID)
+}
+pub(crate) fn deposit_receipt_for_evaluator(
+    store: &Archive,
+    s: &Snapshot,
+    q: &Query,
+    r: &Receipt,
+    f: Format,
+    evaluator: &str,
+) -> Result<Id> {
     store.blob(&serde_json::to_vec(s)?, Id::blob(PUBLIC))?;
     store.document(
-        &receipt_document(store, s, q, r, EVALUATOR_ID)?,
+        &receipt_document(store, s, q, r, evaluator)?,
         f,
         Id::blob(PUBLIC),
     )
