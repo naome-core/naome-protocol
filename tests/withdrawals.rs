@@ -2,8 +2,9 @@
 
 use anyhow::{Context, Result};
 use naome_protocol::{
-    evaluation::{Query, Standing, assess},
+    evaluation::{Query, Standing, Status, assess, deposit_receipt},
     fixture::{self, Investigation, put},
+    learning::{Example, TrainingRequest},
     profile::{Kind, PUBLIC, link},
     store::Archive,
     wire::{Format, Id},
@@ -432,4 +433,157 @@ fn incomplete_applicability_keeps_the_warrant_open() -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[test]
+fn a_known_mismatch_excludes_a_withdrawal_with_an_invalid_restriction() -> Result<()> {
+    for fields in [
+        json!({"mode":"radial","interval":[5,3]}),
+        json!({"mode":"","interval":[2,3]}),
+    ] {
+        let archive = Archive::memory()?;
+        let format = Format::A;
+        let case = fixture::seed(&archive, format)?;
+        let query = threshold_query(&archive, &case, format)?;
+        let before = archive.snapshot("before", Default::default())?;
+        let original = assess(&archive, &before, &query)?;
+        assert_eq!(original.result, Some(Standing::Supported));
+        let notice = signed_withdrawal(&archive, format, case.calibration, fields)?;
+        let after = archive.snapshot("withdrawal", [before.id()?].into())?;
+        let result = assess(&archive, &after, &query)?;
+        assert_eq!(result.result, original.result);
+        assert_eq!(result.branches, original.branches);
+        assert!(
+            result.checks.iter().any(
+                |check| check.status == Status::NotApplicable && check.inputs.contains(&notice)
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_recorded_empty_mode_excludes_a_withdrawal_in_a_named_mode() -> Result<()> {
+    for format in [Format::A, Format::B] {
+        let archive = Archive::memory()?;
+        let case = fixture::seed(&archive, format)?;
+        let original_query = threshold_query(&archive, &case, format)?;
+        let query = measurement_at(&archive, &case, &original_query, format, "", 1)?;
+        let before = archive.snapshot("empty recorded mode", Default::default())?;
+        let original = assess(&archive, &before, &query)?;
+        assert_eq!(original.result, Some(Standing::Supported));
+        let notice =
+            signed_withdrawal(&archive, format, case.calibration, json!({"mode":"axial"}))?;
+        let after = archive.snapshot("axial withdrawal", [before.id()?].into())?;
+        let result = assess(&archive, &after, &query)?;
+        assert_eq!(result.result, original.result);
+        assert_eq!(result.branches, original.branches);
+        assert!(
+            result.checks.iter().any(
+                |check| check.status == Status::NotApplicable && check.inputs.contains(&notice)
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn scoped_withdrawal_rechecks_label_and_feature_uses_independently() -> Result<()> {
+    let archive = Archive::memory()?;
+    let format = Format::A;
+    let case = fixture::seed(&archive, format)?;
+    let original = threshold_query(&archive, &case, format)?;
+    let radial = measurement_at(&archive, &case, &original, format, "radial", 1)?;
+    fixture::sign(
+        &archive,
+        format,
+        radial.arguments[0],
+        SCOPE,
+        "data-origin",
+        7,
+    )?;
+    let before = archive.snapshot("before", Default::default())?;
+    let plan = archive
+        .read(&before, original.arguments[0], "read")?
+        .one("plan")?;
+
+    let make_label = |query: &Query| -> Result<Id> {
+        let result = assess(&archive, &before, query)?;
+        assert_eq!(result.result, Some(Standing::Supported));
+        let id = deposit_receipt(&archive, &before, query, &result, format)?;
+        let assessed = archive.snapshot("assessed", [before.id()?].into())?;
+        archive.label(&assessed, id, "synthetic", None, None, format)
+    };
+    let axial_label = make_label(&original)?;
+    let radial_label = make_label(&radial)?;
+    let labeled = archive.snapshot("labeled", [before.id()?].into())?;
+
+    let mut request = TrainingRequest {
+        feature_cutoff: before.id()?,
+        label_head: labeled.id()?,
+        policy: radial.policy,
+        standing: Default::default(),
+        forecast_plan: None,
+        mappings: vec![],
+        project: None,
+        examples: vec![Example {
+            features: vec![plan],
+            label: radial_label,
+            partition: "train".into(),
+        }],
+        independent_roles: Default::default(),
+        binary: true,
+    };
+    assert_eq!(
+        archive.training_manifest(&request, format)?.included,
+        [radial_label]
+    );
+    signed_withdrawal(
+        &archive,
+        format,
+        case.calibration,
+        json!({"mode":"axial","interval":[1,1]}),
+    )?;
+    request.label_head = archive
+        .snapshot("axial withdrawal", [labeled.id()?].into())?
+        .id()?;
+    assert_eq!(
+        archive.training_manifest(&request, format)?.included,
+        [radial_label]
+    );
+
+    request.examples[0].label = axial_label;
+    assert!(
+        archive.training_manifest(&request, format)?.withheld[&axial_label]
+            .contains("reassessment")
+    );
+
+    request.examples[0].label = radial_label;
+    request.examples[0].features.push(case.calibration);
+    assert!(
+        archive.training_manifest(&request, format)?.withheld[&radial_label]
+            .contains("training dependency")
+    );
+    Ok(())
+}
+
+fn signed_withdrawal(
+    archive: &Archive,
+    format: Format,
+    target: Id,
+    mut fields: serde_json::Value,
+) -> Result<Id> {
+    fields["action"] = json!("withdraw");
+    fields["reason"] = json!("limited calibration use");
+    let id = put(
+        archive,
+        format,
+        Kind::Notice,
+        SUBJECT,
+        SCOPE,
+        fields,
+        vec![link("target", target)],
+    )?;
+    fixture::sign(archive, format, id, SCOPE, "notice", 9)?;
+    Ok(id)
 }

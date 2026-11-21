@@ -396,25 +396,27 @@ impl TrainingReview<'_> {
             }
         }
         let mut axes = BTreeSet::from([("claim".to_owned(), canonical(aliases, claim))]);
-        let mut checked = BTreeSet::new();
-        for (s, roots) in [
-            (before, ex.features.as_slice()),
-            (after, std::slice::from_ref(&ex.label)),
-        ] {
-            let closure = store.explain_for_training(s, roots, access);
-            ensure!(
-                closure.frontier.is_empty(),
-                "unavailable, late, or prohibited training input"
-            );
-            for id in closure.visited {
-                if !checked.insert(id) || id.format().is_none() {
-                    continue;
-                }
-                let doc = store.read_for_training(s, id, access)?;
-                for edge in doc.inputs {
-                    if request.independent_roles.contains(&edge.role) {
-                        axes.insert((edge.role, canonical(aliases, edge.target)));
-                    }
+        let features = store.explain_for_training(before, &ex.features, access);
+        let label = store.explain_for_training(after, &[ex.label], access);
+        ensure!(
+            features.frontier.is_empty() && label.frontier.is_empty(),
+            "unavailable, late, or prohibited training input"
+        );
+        for id in features
+            .visited
+            .union(&label.visited)
+            .copied()
+            .filter(|id| id.format().is_some())
+        {
+            let horizon = if features.visited.contains(&id) {
+                before
+            } else {
+                after
+            };
+            let doc = store.read_for_training(horizon, id, access)?;
+            for edge in doc.inputs {
+                if request.independent_roles.contains(&edge.role) {
+                    axes.insert((edge.role, canonical(aliases, edge.target)));
                 }
             }
         }
@@ -437,13 +439,21 @@ impl TrainingReview<'_> {
                 "label requires reassessment at the requested notice horizon"
             );
             for (&id, notice) in &trust.notices {
-                if notice
-                    .roles("target")
-                    .any(|id| !aliases.endpoints(id).is_disjoint(&checked))
+                if current.applicable_notices.contains(&id) {
+                    continue;
+                }
+                let affects_training = notice.roles("target").any(|target| {
+                    let endpoints = aliases.endpoints(target);
+                    // A warrant's exclusion applies to its label use. Features
+                    // and other dependencies still require their own justification.
+                    !endpoints.is_disjoint(&features.visited)
+                        || (!endpoints.is_disjoint(&label.visited)
+                            && !current.excludes_withdrawal_for(id, target))
+                });
+                if affects_training
                     && !trust
                         .signatures(aliases, id, &notice.scope, "notice")
                         .is_empty()
-                    && !current.applicable_notices.contains(&id)
                 {
                     anyhow::bail!("an admitted notice affects a training dependency");
                 }
