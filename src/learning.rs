@@ -315,8 +315,24 @@ impl TrainingReview<'_> {
             "label replay exceeds local extraction budget"
         );
         let replay = crate::evaluation::assess(store, &historical, &original)?;
-        let expected = crate::evaluation::receipt_document(store, &historical, &original, &replay)?
-            .encode(Id::blob(PUBLIC))?;
+        // Reconstruct the archived identity with its producing evaluator after
+        // independently replaying the query using the current rules.
+        let evaluator: String = receipt.field("evaluator")?;
+        ensure!(
+            matches!(
+                evaluator.as_str(),
+                crate::evaluation::EVALUATOR_ID | "rep-rust-0.1.0"
+            ),
+            "unsupported receipt evaluator"
+        );
+        let expected = crate::evaluation::receipt_document(
+            store,
+            &historical,
+            &original,
+            &replay,
+            &evaluator,
+        )?
+        .encode(Id::blob(PUBLIC))?;
         let endpoints = aliases.endpoints(receipt_id);
         ensure!(
             [Format::A, Format::B]
