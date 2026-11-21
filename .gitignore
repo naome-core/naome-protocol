@@ -2,3 +2,4 @@
 /.local/release-audit/
 /evidence.sqlite*
 __pycache__/
+.DS_Store
