@@ -1,0 +1,264 @@
+#![cfg(feature = "cli")]
+
+use anyhow::Result;
+use naome_protocol::{
+    executor::{Dispatch, Request},
+    fixture::{self, put},
+    profile::{Kind, PUBLIC, READ_ONLY, link},
+    store::Archive,
+    wire::{Format, Id},
+};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
+use tempfile::tempdir;
+
+#[test]
+fn ambiguous_execution_survives_restart_and_shared_reservations() -> Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().join("state");
+    let a = Archive::open(&path)?;
+    a.resource("samples", 1)?;
+    let f = Format::A;
+    let key = fixture::fixture_key(17);
+    let trusted = BTreeSet::from([hex::encode(key.verifying_key().to_bytes())]);
+    let auth = put(
+        &a,
+        f,
+        Kind::Authority,
+        "sample",
+        "lab",
+        json!({"actor":"station","operation":"observe","valid":[10,20],"ceilings":{"samples":1}}),
+        vec![],
+    )?;
+    let sig = fixture::sign(&a, f, auth, "lab", "executor", 17)?;
+    let decision = |name: &str| {
+        put(
+            &a,
+            f,
+            Kind::Decision,
+            "sample",
+            "lab",
+            json!({"operation":"observe","attempt":name}),
+            vec![link("authority", auth)],
+        )
+    };
+    let mut req = Request {
+        attempt: "1".into(),
+        actor: "station".into(),
+        subject: "sample".into(),
+        operation: "observe".into(),
+        decision: decision("1")?,
+        authority: auth,
+        signature: sig,
+        costs: BTreeMap::from([("samples".into(), 1)]),
+    };
+    let second = decision("2")?;
+    let s = a.snapshot("station", BTreeSet::new())?;
+    drop(a);
+    let mut a = Archive::open(&path)?;
+    assert!(a.reserve(&s, &req, &trusted, 21).is_err());
+    // General read access does not grant the public authority required for dispatch.
+    let approved = req.decision;
+    req.decision = a.document(&a.read(&s, approved, "read")?, f, Id::blob(READ_ONLY))?;
+    let restricted = a.snapshot("readable decision", [s.id()?].into())?;
+    assert!(a.read(&restricted, req.decision, "read").is_ok());
+    assert!(a.reserve(&restricted, &req, &trusted, 12).is_err());
+    req.decision = approved;
+    assert_eq!(a.reserve(&s, &req, &trusted, 12)?, Dispatch::Reserved);
+    drop(a);
+    let mut a = Archive::open(&path)?;
+    assert_eq!(
+        a.reserve(&s, &req, &trusted, 13)?,
+        Dispatch::AlreadyRecorded {
+            state: "execution-unknown".into(),
+            witness: None
+        }
+    );
+    let witness = put(
+        &a,
+        f,
+        Kind::Occurrence,
+        "sample",
+        "lab",
+        json!({"execution":"observed","attempt":"1"}),
+        vec![link("decision", req.decision)],
+    )?;
+    let signed = fixture::sign(&a, f, witness, "lab", "readback", 17)?;
+    let s = a.snapshot("station", [s.id()?].into())?;
+    a.reconcile_attempt(&s, "1", witness, signed, &trusted)?;
+    assert!(matches!(
+        a.reserve(&s, &req, &trusted, 13)?,
+        Dispatch::AlreadyRecorded {
+            witness: Some(_),
+            ..
+        }
+    ));
+    req.decision = second;
+    req.attempt = "2".into();
+    assert!(a.reserve(&s, &req, &trusted, 13).is_err());
+    Ok(())
+}
+
+#[test]
+fn capture_compute_close_and_retry_without_redispatch() -> Result<()> {
+    let mut a = Archive::memory()?;
+    let f = Format::B;
+    let public = Id::blob(PUBLIC);
+    let bytes = b"abcabcab";
+    let descriptor = a.capture(&bytes[..], "text/plain", 3, public, f)?;
+    let question = put(
+        &a,
+        f,
+        Kind::Question,
+        "sample",
+        "session",
+        json!({"purpose":"verify retained bytes"}),
+        vec![],
+    )?;
+    let plan = put(
+        &a,
+        f,
+        Kind::Plan,
+        "sample",
+        "session",
+        json!({"planned_count":1,"stopping":"one-payload","predicate":"exact-bytes"}),
+        vec![link("descriptor", descriptor), link("question", question)],
+    )?;
+    let key = fixture::fixture_key(8);
+    let keys = [hex::encode(key.verifying_key().to_bytes())].into();
+    let auth = put(
+        &a,
+        f,
+        Kind::Authority,
+        "sample",
+        "session",
+        json!({"actor":"analyst","operation":"verify-payload","valid":[0,100],"ceilings":{"bytes":8}}),
+        vec![],
+    )?;
+    let sig = fixture::sign(&a, f, auth, "session", "executor", 8)?;
+    let d = put(
+        &a,
+        f,
+        Kind::Decision,
+        "sample",
+        "session",
+        json!({"attempt":"capture-1","operation":"verify-payload"}),
+        vec![link("authority", auth), link("plan", plan)],
+    )?;
+    a.resource("bytes", 8)?;
+    let s = a.snapshot("fixture", BTreeSet::new())?;
+    let mut output = vec![];
+    a.materialize(&s, descriptor, "read", 8, &mut output)?;
+    assert_eq!(output, bytes);
+    assert!(
+        a.materialize(&s, descriptor, "read", 7, std::io::sink())
+            .is_err()
+    );
+    let mut altered = a.read(&s, descriptor, "read")?;
+    altered.inputs.swap(0, 1);
+    let invalid = a.document(&altered, f, public)?;
+    assert!(
+        a.materialize(
+            &a.snapshot("altered", BTreeSet::new())?,
+            invalid,
+            "read",
+            8,
+            std::io::sink()
+        )
+        .is_err()
+    );
+    let req = Request {
+        attempt: "capture-1".into(),
+        actor: "analyst".into(),
+        subject: "sample".into(),
+        operation: "verify-payload".into(),
+        decision: d,
+        authority: auth,
+        signature: sig,
+        costs: [("bytes".into(), 8)].into(),
+    };
+    let first = a.execute_payload_check(&s, &req, &keys, &key, 50, f)?;
+    assert_eq!(first.state, "observed");
+    let closed = first.closure.unwrap();
+    let again = a.execute_payload_check(&s, &req, &keys, &key, 51, f)?;
+    assert_eq!(again.closure, Some(closed));
+    let head = a.snapshot("complete", [s.id()?].into())?;
+    assert_eq!(
+        a.read(&head, closed, "read")?.field::<String>("result")?,
+        "success"
+    );
+    Ok(())
+}
+
+#[test]
+fn finite_observation_value_uses_posterior_best_decisions() -> Result<()> {
+    use naome_protocol::investigation::ObservationModel;
+    let m = ObservationModel {
+        losses: vec![vec![0, 10], vec![10, 0]],
+        joint_masses: vec![vec![1, 0], vec![0, 1]],
+        loss_unit: "points".into(),
+        acquisition_cost: 1,
+    };
+    let value = m.evaluate()?;
+    assert_eq!(
+        (
+            value.prior_loss_numerator,
+            value.posterior_loss_numerator,
+            value.net_gain_numerator,
+            value.denominator
+        ),
+        (10, 0, 8, 2)
+    );
+    let uninformative = ObservationModel {
+        joint_masses: vec![vec![1, 1]],
+        ..m
+    };
+    assert_eq!(uninformative.evaluate()?.net_gain_numerator, -2);
+    Ok(())
+}
+
+#[test]
+fn planner_keeps_infeasible_and_uninformative_alternatives() -> Result<()> {
+    use naome_protocol::investigation::Selection;
+    let a = Archive::memory()?;
+    let f = Format::A;
+    let q = put(
+        &a,
+        f,
+        Kind::Question,
+        "reference",
+        "one event",
+        json!({"losses":[[0,10],[10,0]],"prior_masses":[1,1]}),
+        vec![],
+    )?;
+    let plan = |cost: u64, joint: Value| {
+        put(
+            &a,
+            f,
+            Kind::Plan,
+            "reference",
+            "one event",
+            json!({"action_type":"observation","objective":"decision loss","costs":{"samples":cost},"observation_model":{"losses":[[0,10],[10,0]],"joint_masses":joint,"loss_unit":"points","acquisition_cost":1}}),
+            vec![link("question", q)],
+        )
+    };
+    let chosen = plan(1, json!([[1, 0], [0, 1]]))?;
+    let other = plan(1, json!([[1, 1]]))?;
+    let costly = plan(3, json!([[1, 0], [0, 1]]))?;
+    let s = a.snapshot("selection", BTreeSet::new())?;
+    let selection = a.select(
+        &s,
+        &Selection {
+            question: q,
+            proposals: [chosen, other, costly].into(),
+            ceilings: [("samples".into(), 1)].into(),
+            objective: "decision loss".into(),
+            loss_unit: "points".into(),
+        },
+        f,
+    )?;
+    let d = a.read(&a.snapshot("result", [s.id()?].into())?, selection, "read")?;
+    assert_eq!(d.one("selected")?, chosen);
+    assert_eq!(d.roles("proposal").count(), 3);
+    Ok(())
+}
