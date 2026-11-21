@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) const EVALUATOR_ID: &str = concat!("rep-rust-", env!("CARGO_PKG_VERSION"));
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -572,13 +574,18 @@ pub fn deposit_receipt(
     f: Format,
 ) -> Result<Id> {
     store.blob(&serde_json::to_vec(s)?, Id::blob(PUBLIC))?;
-    store.document(&receipt_document(store, s, q, r)?, f, Id::blob(PUBLIC))
+    store.document(
+        &receipt_document(store, s, q, r, EVALUATOR_ID)?,
+        f,
+        Id::blob(PUBLIC),
+    )
 }
 pub(crate) fn receipt_document(
     store: &Archive,
     s: &Snapshot,
     q: &Query,
     r: &Receipt,
+    evaluator: &str,
 ) -> Result<Document> {
     let head = s.id()?;
     let mut edges = vec![
@@ -617,7 +624,7 @@ pub(crate) fn receipt_document(
         "result": r.result,
         "original_transcript": r,
         "original_query": q,
-        "evaluator": concat!("rep-rust-",env!("CARGO_PKG_VERSION")),
+        "evaluator": evaluator,
     });
     Document::new(Kind::Assessment, subject, scope, fields, edges)
 }

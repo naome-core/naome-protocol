@@ -78,6 +78,63 @@ fn learning_cutoff_permissions_independence_and_false_labels() -> Result<()> {
 }
 
 #[test]
+fn prior_release_receipts_must_replay_before_their_labels_can_be_used() -> Result<()> {
+    let archive = Archive::memory()?;
+    let format = Format::A;
+    let case = fixture::seed(&archive, format)?;
+    let evidence = archive.head(case.published)?;
+    let original = archive.read(&evidence, case.receipts[2], "read")?;
+    assert_eq!(
+        original.fields["evaluator"],
+        json!(concat!("rep-rust-", env!("CARGO_PKG_VERSION")))
+    );
+    let plan = archive
+        .read(&evidence, case.queries[2].arguments[0], "read")?
+        .one("plan")?;
+    for (evaluator, alter_transcript, accepted) in [
+        ("rep-rust-0.1.0", false, true),
+        ("rep-rust-0.1.0", true, false),
+        ("unknown-evaluator", false, false),
+    ] {
+        let mut receipt = original.clone();
+        receipt.fields.insert("evaluator".into(), json!(evaluator));
+        if alter_transcript {
+            receipt.fields.get_mut("original_transcript").unwrap()["horizon_complete"] =
+                json!(false);
+        }
+        let id = archive.document(&receipt, format, Id::blob(PUBLIC))?;
+        let receipts = archive.snapshot("received assessments", [case.published].into())?;
+        let label = archive.label(&receipts, id, "synthetic", None, None, format)?;
+        let labels = archive.snapshot("received labels", [receipts.id()?].into())?;
+        let request = TrainingRequest {
+            policy: case.policy,
+            feature_cutoff: case.feature_cutoff,
+            label_head: labels.id()?,
+            examples: vec![Example {
+                features: vec![plan],
+                label,
+                partition: "train".into(),
+            }],
+            standing: naome_protocol::learning::LabelStanding::Historical,
+            forecast_plan: None,
+            mappings: vec![],
+            project: None,
+            independent_roles: BTreeSet::new(),
+            binary: true,
+        };
+        let manifest = archive.training_manifest(&request, format)?;
+        assert_eq!(
+            manifest.included.contains(&label),
+            accepted,
+            "{:?}",
+            manifest.withheld
+        );
+        assert_eq!(manifest.withheld.contains_key(&label), !accepted);
+    }
+    Ok(())
+}
+
+#[test]
 fn adoption_compares_frozen_arms_and_rejects_exposure() -> Result<()> {
     use naome_protocol::adoption::Adoption;
     let a = Archive::memory()?;
