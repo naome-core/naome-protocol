@@ -600,3 +600,18 @@ fn withdrawals_leave_historic_proofs_and_unaffected_arguments_available() -> Res
     );
     Ok(())
 }
+
+#[test]
+fn legacy_calibration_fixture_retains_its_published_identity() -> Result<()> {
+    let archive = Archive::memory()?;
+    let case = fixture::seed_legacy(&archive, Format::A)?;
+    assert_eq!(
+        case.published.to_string(),
+        "1:1:b7826ed27f6f1fdc30fad29e48727cc2fef11b9c7316669f3fef7018700ef0a9"
+    );
+    assert_eq!(
+        case.receipts[2].to_string(),
+        "1:0:ee829956a6e4e9a2469d51ed8385c85b493ca9f286c6ea132d85fa05c16bded4"
+    );
+    Ok(())
+}
