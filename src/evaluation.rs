@@ -1,6 +1,6 @@
 mod measurement;
 mod science;
-use measurement::Predicate;
+use measurement::{MeasurementUse, Predicate};
 
 use crate::{
     migration::Equivalence,
@@ -103,6 +103,7 @@ pub struct Evaluation<'a> {
     docs: BTreeMap<Id, Document>,
     aliases: Equivalence,
     policy: Document,
+    scoped_withdrawals: bool,
 }
 impl Evaluation<'_> {
     fn doc(&self, id: Id, kind: Kind) -> Result<&Document> {
@@ -131,7 +132,13 @@ impl Evaluation<'_> {
         }
         bail!("no admissible {role} signature")
     }
-    fn challenged(&self, scope: &str, premises: &BTreeSet<Id>, out: &mut Receipt) -> Result<bool> {
+    fn challenged(
+        &self,
+        scope: &str,
+        premises: &BTreeSet<Id>,
+        measurement: MeasurementUse<'_>,
+        out: &mut Receipt,
+    ) -> Result<bool> {
         let mut open = false;
         for (&id, n) in &self.docs {
             if n.kind != Kind::Notice
@@ -154,6 +161,29 @@ impl Evaluation<'_> {
             let reason: String = n.field("reason")?;
             ensure!(!reason.is_empty(), "missing notice reason");
             let action: String = n.field("action")?;
+            if self.scoped_withdrawals && action == "withdraw" {
+                match measurement.within_withdrawal(n) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        out.check(
+                            "withdrawal applicability",
+                            Status::NotApplicable,
+                            "measurement outside the withdrawn mode or event interval",
+                            &[id, signature],
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        out.unknown(
+                            "withdrawal applicability",
+                            &error.to_string(),
+                            &[id, signature],
+                        );
+                        open = true;
+                        continue;
+                    }
+                }
+            }
             out.applicable_notices.insert(id);
             out.check("scoped notice", Status::Pass, &reason, &[id, signature]);
             ensure!(
@@ -383,6 +413,20 @@ impl Evaluation<'_> {
     }
 }
 pub fn assess(store: &Archive, s: &Snapshot, q: &Query) -> Result<Receipt> {
+    assess_for_evaluator(store, s, q, EVALUATOR_ID)
+}
+
+pub(crate) fn assess_for_evaluator(
+    store: &Archive,
+    s: &Snapshot,
+    q: &Query,
+    evaluator: &str,
+) -> Result<Receipt> {
+    let scoped_withdrawals = match evaluator {
+        EVALUATOR_ID => true,
+        V0_1_0_EVALUATOR_ID | "rep-rust-0.1.1" => false,
+        _ => bail!("unsupported receipt evaluator"),
+    };
     let mut out = Receipt::default();
     let target = store.read(s, q.target, "read");
     let score = target
@@ -458,6 +502,7 @@ pub fn assess(store: &Archive, s: &Snapshot, q: &Query) -> Result<Receipt> {
             docs,
             aliases,
             policy,
+            scoped_withdrawals,
         };
         let mut pro = false;
         let mut con = false;
@@ -488,8 +533,19 @@ pub fn assess(store: &Archive, s: &Snapshot, q: &Query) -> Result<Receipt> {
                     a.subject == c.subject && a.scope == c.scope && a.one("claim")? == q.target,
                     "argument targets a different claim"
                 );
+                // Both measurement warrants read this occurrence. Simultaneous bounds
+                // also verifies that every gauge agrees on mode and event.
+                let reading = match a.fields.get("method").and_then(Value::as_str) {
+                    Some("recorded-difference" | "simultaneous-bounds") => {
+                        a.roles("reading").next().and_then(|id| view.docs.get(&id))
+                    }
+                    _ => None,
+                };
+                let measurement = reading
+                    .map(MeasurementUse::from_reading)
+                    .unwrap_or_default();
                 ensure!(
-                    !view.challenged(&c.scope, &premises.visited, &mut out)?,
+                    !view.challenged(&c.scope, &premises.visited, measurement, &mut out)?,
                     "argument under an admitted notice"
                 );
                 view.warrant(&c, a, arg, &mut out)

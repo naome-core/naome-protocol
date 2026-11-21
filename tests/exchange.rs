@@ -2,11 +2,32 @@ use anyhow::Result;
 use naome_protocol::{
     kit,
     profile::{Document, Kind, PUBLIC, link},
-    store::Archive,
+    store::{Archive, Bundle},
     wire::{Format, Id, Record, Term},
 };
 use serde_json::json;
 use std::collections::BTreeSet;
+
+#[test]
+fn published_offline_exchange_matches_native_export_and_import() -> Result<()> {
+    let example = Bundle::read(&include_bytes!("../spec/examples/exchange-v1.json")[..])?;
+    let source = Archive::memory()?;
+    let id = source.blob(b"OK\n", Id::blob(PUBLIC))?;
+    let head = source.selected_snapshot("bench", BTreeSet::new(), [id].into())?;
+    assert_eq!(
+        serde_json::to_value(source.export(&head, "read")?)?,
+        serde_json::to_value(&example)?
+    );
+
+    let mut recipient = Archive::memory()?;
+    let imported = recipient.import(&example)?;
+    assert_eq!(imported, head.id()?);
+    assert_eq!(
+        recipient.resolve(&recipient.head(imported)?, id, "read")?,
+        b"OK\n"
+    );
+    Ok(())
+}
 
 #[test]
 fn both_kits_and_published_identifiers() -> Result<()> {

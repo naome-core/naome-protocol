@@ -1,5 +1,5 @@
 use crate::{
-    evaluation::{Query, Receipt, assess, default_byte_limit},
+    evaluation::{Query, Receipt, assess_for_evaluator, default_byte_limit},
     profile::{Document, Kind, PROFILE, PUBLIC, attest, link},
     store::{Archive, Bundle, Snapshot},
     wire::{Format, Id},
@@ -29,7 +29,8 @@ impl Archive {
         ensure!(r.kind == Kind::Assessment, "expected assessment");
         let original: Query = r.field("original_query")?;
         let horizon = self.head(r.one("snapshot")?)?;
-        let verified: Receipt = assess(self, &horizon, &original)?;
+        let evaluator: String = r.field("evaluator")?;
+        let verified: Receipt = assess_for_evaluator(self, &horizon, &original, &evaluator)?;
         ensure!(
             Some(&serde_json::to_value(&verified)?) == r.fields.get("original_transcript")
                 && verified.horizon_complete

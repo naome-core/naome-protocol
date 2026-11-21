@@ -236,3 +236,200 @@ fn only_arguments_using_the_withdrawn_reading_lose_support() -> Result<()> {
     assert_eq!(surviving.branches, [json!({"raw_difference":"250"})]);
     Ok(())
 }
+
+/// Each instrument mode has a certificate derived from the same reference.
+fn measurement_at(
+    archive: &Archive,
+    case: &Investigation,
+    query: &Query,
+    format: Format,
+    mode: &str,
+    event: i64,
+) -> Result<Query> {
+    let source = archive.head(case.s0)?;
+    let public = Id::blob(PUBLIC);
+    let mut certificate = archive.read(&source, case.calibration, "read")?;
+    certificate.fields.insert("mode".into(), json!(mode));
+    certificate.inputs.push(link("reference", case.calibration));
+    let calibration = archive.document(&certificate, format, public)?;
+    let mut argument = archive.read(&source, query.arguments[0], "read")?;
+    argument.fields.insert("event".into(), json!(event));
+    argument.fields.insert("mode".into(), json!(mode));
+    for edge in &mut argument.inputs {
+        match edge.role.as_str() {
+            "calibration" => edge.target = calibration,
+            "reading" | "guarantee" => {
+                let mut input = archive.read(&source, edge.target, "read")?;
+                if edge.role == "reading" {
+                    input.fields.insert("mode".into(), json!(mode));
+                    input.fields.insert("event".into(), json!(event));
+                }
+                for parent in &mut input.inputs {
+                    if parent.role == "calibration" {
+                        parent.target = calibration;
+                    }
+                }
+                edge.target = archive.document(&input, format, public)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(Query {
+        arguments: vec![archive.document(&argument, format, public)?],
+        ..query.clone()
+    })
+}
+
+#[test]
+fn scoped_withdrawal_preserves_other_measurement_modes_and_events() -> Result<()> {
+    for format in [Format::A, Format::B] {
+        let archive = Archive::memory()?;
+        let case = fixture::seed(&archive, format)?;
+        let query = threshold_query(&archive, &case, format)?;
+        let mut measurements = Vec::new();
+        for (mode, event, affected) in [
+            ("axial", 2, false),
+            ("axial", 3, true),
+            ("axial", 5, true),
+            ("axial", 6, false),
+            ("radial", 4, false),
+        ] {
+            measurements.push((
+                measurement_at(&archive, &case, &query, format, mode, event)?,
+                affected,
+            ));
+        }
+        let before = archive.snapshot("calibrated", Default::default())?;
+        let notice = put(
+            &archive,
+            format,
+            Kind::Notice,
+            SUBJECT,
+            SCOPE,
+            json!({"action":"withdraw","reason":"axial drift","mode":"axial","interval":[3,5]}),
+            vec![link("target", case.calibration)],
+        )?;
+        fixture::sign(&archive, format, notice, SCOPE, "notice", 9)?;
+        let after = archive.snapshot("limited withdrawal", [before.id()?].into())?;
+        for (query, affected) in measurements {
+            let prior = assess(&archive, &before, &query)?;
+            assert_eq!(prior.result, Some(Standing::Supported));
+            let receipt = assess(&archive, &after, &query)?;
+            assert!(receipt.horizon_complete && receipt.visible_notices.contains(&notice));
+            assert_eq!(receipt.applicable_notices.contains(&notice), affected);
+            if affected {
+                assert_eq!(receipt.result, Some(Standing::Unresolved));
+                assert!(receipt.branches.is_empty());
+            } else {
+                assert_eq!(receipt.result, prior.result);
+                assert_eq!(receipt.branches, prior.branches);
+                assert!(receipt.obligations.is_empty());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn correction_evidence_withdrawals_use_the_measurement_context() -> Result<()> {
+    let archive = Archive::memory()?;
+    let format = Format::B;
+    let case = fixture::seed(&archive, format)?;
+    let query = threshold_query(&archive, &case, format)?;
+    let correction = fixture::notice(&archive, format, case.calibration, 80, 1)?;
+    let corrected = archive.snapshot("corrected", Default::default())?;
+    let report = archive
+        .read(&corrected, correction, "read")?
+        .one("evidence")?;
+    let withdraw_report = |mut fields: serde_json::Value| -> Result<Id> {
+        fields["action"] = json!("withdraw");
+        fields["reason"] = json!("limited laboratory withdrawal");
+        let id = put(
+            &archive,
+            format,
+            Kind::Notice,
+            SUBJECT,
+            SCOPE,
+            fields,
+            vec![link("target", report)],
+        )?;
+        fixture::sign(&archive, format, id, SCOPE, "notice", 9)?;
+        Ok(id)
+    };
+    let outside = withdraw_report(json!({"mode":"radial"}))?;
+    let radial = archive.snapshot("radial withdrawal", [corrected.id()?].into())?;
+    let retained = assess(&archive, &radial, &query)?;
+    assert_eq!(retained.result, Some(Standing::Refuted));
+    assert_eq!(retained.applicable_notices, [correction].into());
+    assert!(retained.visible_notices.contains(&outside));
+
+    let inside = withdraw_report(json!({"interval":[1,1]}))?;
+    let final_head = archive.snapshot("one event withdrawn", [radial.id()?].into())?;
+    let affected = assess(&archive, &final_head, &query)?;
+    assert_eq!(affected.result, Some(Standing::Unresolved));
+    assert_eq!(affected.applicable_notices, [correction, inside].into());
+    assert_eq!(
+        assess(&archive, &radial, &query)?.branches,
+        retained.branches
+    );
+    Ok(())
+}
+
+#[test]
+fn incomplete_applicability_keeps_the_warrant_open() -> Result<()> {
+    let archive = Archive::memory()?;
+    let format = Format::A;
+    let case = fixture::seed(&archive, format)?;
+    let mut query = threshold_query(&archive, &case, format)?;
+    query.target = raw_claim(&archive, format)?;
+    let reading = put(
+        &archive,
+        format,
+        Kind::Occurrence,
+        SUBJECT,
+        SCOPE,
+        json!({"positions":[0,260],"unit":"um"}),
+        vec![],
+    )?;
+    query.arguments = vec![raw_argument(&archive, format, query.target, reading, 1)?];
+    let before = archive.snapshot("unqualified reading", Default::default())?;
+    assert_eq!(
+        assess(&archive, &before, &query)?.result,
+        Some(Standing::Supported)
+    );
+
+    for (limits, reason) in [
+        (
+            json!({"mode":"axial"}),
+            "withdrawal needs a measurement mode",
+        ),
+        (json!({"interval":[5,3]}), "reversed withdrawal interval"),
+    ] {
+        let mut fields = limits;
+        fields["action"] = json!("withdraw");
+        fields["reason"] = json!("restricted use");
+        let notice = put(
+            &archive,
+            format,
+            Kind::Notice,
+            SUBJECT,
+            SCOPE,
+            fields,
+            vec![link("target", reading)],
+        )?;
+        fixture::sign(&archive, format, notice, SCOPE, "notice", 9)?;
+        let head = archive.snapshot("limited notice", [before.id()?].into())?;
+        let receipt = assess(&archive, &head, &query)?;
+        assert_eq!(receipt.result, Some(Standing::Unresolved));
+        assert!(!receipt.applicable_notices.contains(&notice));
+        assert!(
+            receipt
+                .checks
+                .iter()
+                .any(|c| c.status == naome_protocol::evaluation::Status::Unknown
+                    && c.inputs.contains(&notice)
+                    && c.basis == reason)
+        );
+    }
+    Ok(())
+}
