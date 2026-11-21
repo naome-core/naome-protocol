@@ -94,6 +94,8 @@ fn prior_release_receipts_must_replay_before_their_labels_can_be_used() -> Resul
     for (evaluator, alter_transcript, accepted) in [
         ("rep-rust-0.1.0", false, true),
         ("rep-rust-0.1.0", true, false),
+        ("rep-rust-0.1.1", false, true),
+        ("rep-rust-0.1.1", true, false),
         ("unknown-evaluator", false, false),
     ] {
         let mut receipt = original.clone();

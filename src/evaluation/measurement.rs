@@ -3,9 +3,66 @@ use crate::{
     profile::{Document, Kind},
     wire::Id,
 };
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct MeasurementUse<'a> {
+    mode: Option<&'a str>,
+    event: Option<i64>,
+}
+
+impl<'a> MeasurementUse<'a> {
+    pub(super) fn from_reading(reading: &'a Document) -> Self {
+        Self {
+            mode: reading
+                .fields
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty()),
+            event: reading.fields.get("event").and_then(|v| v.as_i64()),
+        }
+    }
+
+    pub(super) fn within_withdrawal(self, notice: &Document) -> Result<bool> {
+        let mode = notice
+            .fields
+            .get("mode")
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| !s.is_empty())
+                    .context("invalid withdrawal mode")
+            })
+            .transpose()?;
+        let interval = if notice.fields.contains_key("interval") {
+            let [first, last] = notice.field::<[i64; 2]>("interval")?;
+            ensure!(first <= last, "reversed withdrawal interval");
+            Some(first..=last)
+        } else {
+            None
+        };
+        if mode
+            .zip(self.mode)
+            .is_some_and(|(required, actual)| required != actual)
+            || interval
+                .as_ref()
+                .zip(self.event)
+                .is_some_and(|(bounds, event)| !bounds.contains(&event))
+        {
+            return Ok(false);
+        }
+        ensure!(
+            mode.is_none() || self.mode.is_some(),
+            "withdrawal needs a measurement mode"
+        );
+        ensure!(
+            interval.is_none() || self.event.is_some(),
+            "withdrawal needs a measurement event"
+        );
+        Ok(true)
+    }
+}
 
 impl Evaluation<'_> {
     fn applicable(
@@ -80,7 +137,15 @@ impl Evaluation<'_> {
                 );
                 continue;
             }
-            if self.challenged(scope, &premises.visited, out)? {
+            if self.challenged(
+                scope,
+                &premises.visited,
+                MeasurementUse {
+                    mode: Some(mode),
+                    event: Some(event),
+                },
+                out,
+            )? {
                 continue;
             }
             let aliases = self.aliases.endpoints(id);

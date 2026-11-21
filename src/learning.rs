@@ -314,17 +314,9 @@ impl TrainingReview<'_> {
                 && original.byte_limit <= crate::evaluation::default_byte_limit(),
             "label replay exceeds local extraction budget"
         );
-        let replay = crate::evaluation::assess(store, &historical, &original)?;
-        // Reconstruct the archived identity with its producing evaluator after
-        // independently replaying the query using the current rules.
         let evaluator: String = receipt.field("evaluator")?;
-        ensure!(
-            matches!(
-                evaluator.as_str(),
-                crate::evaluation::EVALUATOR_ID | crate::evaluation::V0_1_0_EVALUATOR_ID
-            ),
-            "unsupported receipt evaluator"
-        );
+        let replay =
+            crate::evaluation::assess_for_evaluator(store, &historical, &original, &evaluator)?;
         let expected = crate::evaluation::receipt_document(
             store,
             &historical,
