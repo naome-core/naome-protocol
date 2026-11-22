@@ -1,4 +1,8 @@
-use crate::{migration::Equivalence, profile::Document, wire::Id};
+use crate::{
+    migration::Equivalence,
+    profile::{Document, Kind},
+    wire::Id,
+};
 use anyhow::{Context, Result, anyhow, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -52,6 +56,14 @@ impl<'a> MeasurementUse<'a> {
             mode: Some(mode),
             event: Some(event),
         }
+    }
+
+    pub(crate) fn complete(self) -> bool {
+        self.mode.is_some() && self.event.is_some()
+    }
+
+    pub(crate) fn matches_mode(self, mode: &str) -> bool {
+        self.mode == Some(mode)
     }
 
     fn outside_mode(self, required: &str) -> bool {
@@ -167,7 +179,7 @@ impl<'a> Notice<'a> {
         )
     }
 
-    pub(super) fn calibration_applies(
+    pub(crate) fn calibration_applies(
         self,
         scope: &str,
         measurement: MeasurementUse<'_>,
@@ -180,6 +192,23 @@ impl<'a> Notice<'a> {
             && !measurement.outside_interval(interval))
     }
 
+    pub(crate) fn calibration_evidence<'b>(
+        self,
+        read: impl FnOnce(Id) -> Result<&'b Document>,
+    ) -> Result<Id> {
+        let id = self.0.one("evidence")?;
+        let report = read(id)?;
+        require_micrometres(self.0)?;
+        require_micrometres(report)?;
+        ensure!(
+            report.kind == Kind::Occurrence
+                && report.scope == self.0.scope
+                && report.field::<i64>("bias")? == self.0.field::<i64>("bias")?,
+            "notice evidence disagrees"
+        );
+        Ok(id)
+    }
+
     pub(crate) fn calibration_limits(self) -> Result<CalibrationLimits<'a>> {
         Ok(CalibrationLimits {
             notice: self,
@@ -187,6 +216,96 @@ impl<'a> Notice<'a> {
             interval: self.0.field("interval")?,
         })
     }
+}
+
+/// A source notice whose target may be carried over a physical identity link.
+pub(crate) struct LinkedCalibrationNotice<'a> {
+    notice: Notice<'a>,
+    pub source: Id,
+    pub withdrawal: bool,
+}
+
+impl<'a> LinkedCalibrationNotice<'a> {
+    pub(crate) fn parse(document: &'a Document) -> Option<Self> {
+        let notice = Notice(document);
+        if document.roles("calibration").next().is_some() {
+            return Some(Self {
+                notice,
+                source: document.one("calibration").ok()?,
+                withdrawal: false,
+            });
+        }
+        if document
+            .fields
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            != Some("withdraw")
+        {
+            return None;
+        }
+        Some(Self {
+            notice,
+            source: document.one("target").ok()?,
+            withdrawal: true,
+        })
+    }
+
+    pub(crate) fn signature_role(&self) -> &'static str {
+        if self.withdrawal {
+            "notice"
+        } else {
+            "calibration"
+        }
+    }
+
+    pub(crate) fn applicability(&self, measurement: MeasurementUse<'_>) -> WithdrawalApplicability {
+        use WithdrawalApplicability::{Applies, Excluded, Unknown};
+        let scope = &self.notice.0.scope;
+        if self.withdrawal {
+            self.notice
+                .withdrawal(scope, measurement, WithdrawalRules::Scoped)
+        } else {
+            match self.notice.calibration_limits() {
+                Ok(limits) if limits.mode.is_empty() || limits.interval[0] > limits.interval[1] => {
+                    Unknown(anyhow!("invalid linked calibration correction scope"))
+                }
+                Ok(limits)
+                    if measurement.outside_mode(&limits.mode)
+                        || measurement.outside_interval(limits.interval) =>
+                {
+                    Excluded
+                }
+                Ok(_) => Applies,
+                Err(error) => Unknown(error),
+            }
+        }
+    }
+
+    pub(crate) fn verify_evidence<'b>(
+        &self,
+        read: impl FnOnce(Id) -> Result<&'b Document>,
+    ) -> Result<Option<Id>> {
+        if self.withdrawal {
+            ensure!(
+                !self.notice.0.field::<String>("reason")?.trim().is_empty(),
+                "missing notice reason"
+            );
+            Ok(None)
+        } else {
+            self.notice.calibration_evidence(read).map(Some)
+        }
+    }
+}
+
+pub(super) fn require_micrometres(doc: &Document) -> Result<()> {
+    // Older records use the profile's implicit micrometre grid.
+    ensure!(
+        doc.fields
+            .get("unit")
+            .is_none_or(|unit| unit.as_str() == Some("um")),
+        "declared unit disagrees with the micrometre grid"
+    );
+    Ok(())
 }
 
 fn touches(id: Id, aliases: &Equivalence, premises: &BTreeSet<Id>) -> bool {

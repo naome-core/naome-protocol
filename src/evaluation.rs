@@ -1,16 +1,18 @@
+pub(crate) mod calibration_identity;
 pub(crate) mod correction;
 mod inventory;
 mod measurement;
 mod science;
+use calibration_identity::CalibrationIdentities;
 use correction::{
     MeasurementUse, Notice, WithdrawalApplicability, WithdrawalChecks, WithdrawalRules,
 };
-pub(crate) use inventory::ReadInventory;
+pub(crate) use inventory::{EvidenceView, ReadInventory};
 use measurement::Predicate;
 
 use crate::{
     migration::Equivalence,
-    profile::{Document, Kind, PUBLIC, link, verify_attestation},
+    profile::{Document, Kind, PUBLIC, link},
     store::{Archive, Snapshot},
     wire::{Format, Id},
 };
@@ -24,6 +26,7 @@ const FIRST_SCOPED_EVALUATOR_ID: &str = "rep-rust-0.1.2-dev";
 const WITHDRAWAL_APPLICABILITY: &str = "withdrawal applicability";
 // This identifier versions the receipt semantics. Package releases can reuse it.
 const RULES_V1: &str = "rep-rust-rules-1";
+pub(crate) const CALIBRATION_IDENTITY_EVALUATOR_ID: &str = "rep-rust-rules-2";
 pub(crate) const EVALUATOR_ID: &str = RULES_V1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,28 +132,39 @@ struct EvaluatorRules {
     ids: &'static [&'static str],
     withdrawal: WithdrawalRules,
     resolve_required_withdrawals: bool,
+    physical_identity: bool,
 }
 
 const REPLAY_RULES: &[EvaluatorRules] = &[
     EvaluatorRules {
+        ids: &[CALIBRATION_IDENTITY_EVALUATOR_ID],
+        withdrawal: WithdrawalRules::Scoped,
+        resolve_required_withdrawals: true,
+        physical_identity: true,
+    },
+    EvaluatorRules {
         ids: &[RULES_V1],
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
+        physical_identity: false,
     },
     EvaluatorRules {
         ids: &["rep-rust-0.1.2", "rep-rust-0.1.2-dev.1"],
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: false,
+        physical_identity: false,
     },
     EvaluatorRules {
         ids: &[FIRST_SCOPED_EVALUATOR_ID],
         withdrawal: WithdrawalRules::FirstScoped,
         resolve_required_withdrawals: false,
+        physical_identity: false,
     },
     EvaluatorRules {
         ids: &[V0_1_0_EVALUATOR_ID, "rep-rust-0.1.1"],
         withdrawal: WithdrawalRules::ScopeOnly,
         resolve_required_withdrawals: false,
+        physical_identity: false,
     },
 ];
 
@@ -168,6 +182,7 @@ pub struct Evaluation<'a> {
     aliases: Equivalence,
     policy: Document,
     withdrawal_rules: WithdrawalRules,
+    calibration_identities: CalibrationIdentities,
 }
 impl Evaluation<'_> {
     fn doc(&self, id: Id, kind: Kind) -> Result<&Document> {
@@ -179,29 +194,20 @@ impl Evaluation<'_> {
         ensure!(d.kind == kind, "wrong input kind");
         Ok(d)
     }
+    fn evidence_view(&self) -> EvidenceView<'_> {
+        EvidenceView {
+            store: self.store,
+            snapshot: self.s,
+            inventory: self.inventory,
+            aliases: &self.aliases,
+        }
+    }
     fn signed(&self, id: Id, scope: &str, role: &str) -> Result<Id> {
         let keys: BTreeMap<String, BTreeSet<String>> = self.policy.field("keys")?;
         let trusted = keys.get(role).context("no admitted authority for role")?;
-        for endpoint in self.aliases.endpoints(id) {
-            if self.store.resolve(self.s, endpoint, "read").is_err() {
-                continue;
-            }
-            for (sig, document) in self.inventory.attestations(endpoint) {
-                if verify_attestation(
-                    document,
-                    endpoint,
-                    scope,
-                    role,
-                    "research-policy-1",
-                    trusted,
-                )
-                .is_ok()
-                {
-                    return Ok(sig);
-                }
-            }
-        }
-        bail!("no admissible {role} signature")
+        self.evidence_view()
+            .signature(id, scope, role, trusted)
+            .with_context(|| format!("no admissible {role} signature"))
     }
     fn challenged(
         &self,
@@ -486,8 +492,18 @@ impl Evaluation<'_> {
         }
     }
 }
+pub(crate) fn query_evaluator(store: &Archive, s: &Snapshot, q: &Query) -> &'static str {
+    if store.read(s, q.policy, "read").is_ok_and(|policy| {
+        policy.kind == Kind::Policy && policy.fields.contains_key("foreign_calibration_keys")
+    }) {
+        CALIBRATION_IDENTITY_EVALUATOR_ID
+    } else {
+        EVALUATOR_ID
+    }
+}
+
 pub fn assess(store: &Archive, s: &Snapshot, q: &Query) -> Result<Receipt> {
-    assess_for_evaluator(store, s, q, EVALUATOR_ID)
+    assess_for_evaluator(store, s, q, query_evaluator(store, s, q))
 }
 
 pub(crate) fn assess_for_evaluator(
@@ -554,6 +570,20 @@ pub(crate) fn assess_with_inventory(
                 "previous receipt covers another target"
             );
         }
+        let calibration_identities = if rules.physical_identity {
+            CalibrationIdentities::admit(
+                &EvidenceView {
+                    store,
+                    snapshot: s,
+                    inventory,
+                    aliases: &aliases,
+                },
+                &policy,
+                q.budget,
+            )?
+        } else {
+            CalibrationIdentities::default()
+        };
         let view = Evaluation {
             store,
             s,
@@ -561,6 +591,7 @@ pub(crate) fn assess_with_inventory(
             aliases,
             policy,
             withdrawal_rules,
+            calibration_identities,
         };
         let mut pro = false;
         let mut con = false;
@@ -687,7 +718,7 @@ pub fn deposit_receipt(
     r: &Receipt,
     f: Format,
 ) -> Result<Id> {
-    deposit_receipt_for_evaluator(store, s, q, r, f, EVALUATOR_ID)
+    deposit_receipt_for_evaluator(store, s, q, r, f, query_evaluator(store, s, q))
 }
 pub(crate) fn deposit_receipt_for_evaluator(
     store: &Archive,

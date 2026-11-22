@@ -1,10 +1,12 @@
 use crate::{
     evaluation::{
-        Assessment, EVALUATOR_ID, ReadInventory, assess_with_inventory,
+        Assessment, EvidenceView, ReadInventory, assess_with_inventory,
+        calibration_identity::CalibrationIdentities,
         correction::{MeasurementUse, Notice, WithdrawalRules},
+        query_evaluator,
     },
     migration::Equivalence,
-    profile::{Document, Kind, PUBLIC, link, verify_attestation},
+    profile::{CALIBRATION_EVENT_IDENTITY, Document, Kind, PUBLIC, link, verify_attestation},
     store::{Archive, Snapshot},
     wire::{Format, Id},
 };
@@ -430,7 +432,13 @@ impl TrainingReview<'_> {
             let Assessment {
                 receipt: current,
                 withdrawals,
-            } = assess_with_inventory(store, after, &original, EVALUATOR_ID, &mut trust.inventory)?;
+            } = assess_with_inventory(
+                store,
+                after,
+                &original,
+                query_evaluator(store, after, &original),
+                &mut trust.inventory,
+            )?;
             ensure!(
                 current.horizon_complete
                     && current.frontier.is_empty()
@@ -662,6 +670,19 @@ impl Archive {
         mappings: &[Id],
         budget: usize,
     ) -> Result<Impact> {
+        self.impact_with_policy(s, notice, mappings, budget, None)
+    }
+
+    /// Trace a correction. An explicit recipient policy admits physical identity
+    /// links for this snapshot in addition to the format mappings.
+    pub fn impact_with_policy(
+        &self,
+        s: &Snapshot,
+        notice: Id,
+        mappings: &[Id],
+        budget: usize,
+        policy: Option<Id>,
+    ) -> Result<Impact> {
         let n = self.read(s, notice, "read")?;
         ensure!(n.kind == Kind::Notice, "expected notice");
         let mut eq = Equivalence::default();
@@ -682,23 +703,32 @@ impl Archive {
         };
         let withdrawal =
             !calibration && n.fields.get("action").and_then(Value::as_str) == Some("withdraw");
-        let mut docs = BTreeMap::new();
+        let mut inventory = ReadInventory::default();
         let mut frontier = BTreeSet::new();
         for (i, &id) in s.objects.iter().enumerate() {
-            if i >= budget {
+            if i >= budget || (id.format().is_some() && !inventory.read(self, s, id, true)) {
                 frontier.insert(id);
-                continue;
             }
-            if id.format().is_some() {
-                match self.read(s, id, "read") {
-                    Ok(d) => {
-                        docs.insert(id, d);
-                    }
-                    Err(_) => {
-                        frontier.insert(id);
-                    }
-                }
-            }
+        }
+        let docs = &inventory.documents;
+        let mut foreign_uses = BTreeSet::new();
+        if let Some(policy_id) = policy
+            && frontier.is_empty()
+        {
+            let policy = self.read(s, policy_id, "read")?;
+            ensure!(
+                policy.kind == Kind::Policy && policy.scope == "research-policy-1",
+                "unsupported impact policy"
+            );
+            let evidence = EvidenceView {
+                store: self,
+                snapshot: s,
+                inventory: &inventory,
+                aliases: &eq,
+            };
+            let identities = CalibrationIdentities::admit(&evidence, &policy, budget)?;
+            foreign_uses =
+                identities.affected_uses(&evidence, notice, &n, budget, &mut frontier)?;
         }
         let argument_excluded = |argument: &Document| {
             argument.kind == Kind::Argument
@@ -714,7 +744,7 @@ impl Archive {
         let mut dependents = BTreeMap::<Id, Vec<Id>>::new();
         let mut excluded_uses = BTreeSet::new();
         let mut direct = BTreeSet::new();
-        for (&id, d) in &docs {
+        for (&id, d) in docs {
             if matches!(
                 d.kind,
                 Kind::Notice | Kind::Mapping | Kind::Attestation | Kind::Policy
@@ -761,6 +791,15 @@ impl Archive {
                 direct.insert(id);
             }
             for edge in &d.inputs {
+                if matches!(
+                    edge.role.as_str(),
+                    "source-calibration" | "recipient-calibration"
+                ) && d.kind == Kind::Claim
+                    && d.fields.get("predicate").and_then(Value::as_str)
+                        == Some(CALIBRATION_EVENT_IDENTITY)
+                {
+                    continue;
+                }
                 if initial.contains(&edge.target)
                     && correction.as_ref().is_some_and(|limits| limits.excludes(d))
                 {
@@ -770,8 +809,11 @@ impl Archive {
             }
         }
         let mut reached_without_impact = BTreeSet::new();
-        let mut affected = initial.clone();
-        let mut pending: Vec<_> = initial.iter().copied().collect();
+        let mut affected = initial
+            .union(&foreign_uses)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut pending: Vec<_> = affected.iter().copied().collect();
         while let Some(id) = pending.pop() {
             let propagates = affected.contains(&id);
             if let Some(children) = dependents.get(&id) {

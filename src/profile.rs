@@ -24,6 +24,8 @@ pub(crate) fn supported_profile(id: Id) -> Option<&'static [u8]> {
 pub const PUBLIC: &[u8] = br#"{"purposes":["read","train"],"version":1}"#;
 pub const READ_ONLY: &[u8] = br#"{"purposes":["read"],"version":1}"#;
 
+pub(crate) const CALIBRATION_EVENT_IDENTITY: &str = "calibration-event-identity";
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[repr(u64)]
