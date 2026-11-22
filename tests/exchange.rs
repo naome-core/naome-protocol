@@ -29,6 +29,40 @@ fn published_offline_exchange_matches_native_export_and_import() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "cli")]
+#[test]
+fn cli_export_preserves_exchange_bytes_and_existing_files() -> Result<()> {
+    use std::{fs, process::Command};
+
+    let directory = tempfile::tempdir()?;
+    let db = directory.path().join("source.sqlite");
+    let path = directory.path().join("exchange.json");
+    let source = Archive::open(&db)?;
+    let id = source.blob(b"OK\n", Id::blob(PUBLIC))?;
+    let head = source.selected_snapshot("bench", BTreeSet::new(), [id].into())?;
+    let example = Bundle::read(&include_bytes!("../spec/examples/exchange-v1.json")[..])?;
+    let bytes = serde_json::to_vec(&example)?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rep"));
+    command
+        .arg("--db")
+        .arg(&db)
+        .arg("export")
+        .arg(head.id()?.to_string())
+        .arg(&path);
+    let first = command.output()?;
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(fs::read(&path)?, bytes);
+
+    fs::write(&path, b"keep this file")?;
+    assert!(!command.output()?.status.success());
+    assert_eq!(fs::read(&path)?, b"keep this file");
+    Ok(())
+}
+
 #[test]
 fn both_kits_and_published_identifiers() -> Result<()> {
     for (f, len, digest) in [

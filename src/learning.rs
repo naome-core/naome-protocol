@@ -1,4 +1,7 @@
 use crate::{
+    evaluation::{
+        EVALUATOR_ID, MeasurementUse, ReadInventory, WithdrawalRules, assess_with_inventory,
+    },
     migration::Equivalence,
     profile::{Document, Kind, PUBLIC, link, verify_attestation},
     store::{Archive, Snapshot},
@@ -125,43 +128,19 @@ struct ValidatedExample {
 
 struct TrainingTrust {
     keys: BTreeMap<String, BTreeSet<String>>,
-    attestations: BTreeMap<Id, Vec<(Id, Document)>>,
-    notices: BTreeMap<Id, Document>,
-    notice_search_complete: bool,
+    inventory: ReadInventory,
 }
 
 impl TrainingTrust {
-    fn load(store: &Archive, head: &Snapshot, policy: Id) -> Result<Self> {
+    fn load(store: &Archive, head: &Snapshot, policy: Id, retain_for_replay: bool) -> Result<Self> {
         let policy = store.read(head, policy, "read")?;
         ensure!(
             policy.kind == Kind::Policy && policy.scope == "research-policy-1",
             "unsupported training policy"
         );
-        let mut attestations = BTreeMap::<Id, Vec<_>>::new();
-        let mut notices = BTreeMap::new();
-        let mut notice_search_complete = true;
-        for &id in &head.objects {
-            if id.format().is_none() {
-                continue;
-            }
-            match store.read(head, id, "read") {
-                Ok(doc) if doc.kind == Kind::Attestation => {
-                    if let Ok(original) = doc.one("signed-original") {
-                        attestations.entry(original).or_default().push((id, doc));
-                    }
-                }
-                Ok(doc) if doc.kind == Kind::Notice => {
-                    notices.insert(id, doc);
-                }
-                Err(_) => notice_search_complete &= !store.may_be_notice(head, id),
-                _ => (),
-            }
-        }
         Ok(Self {
             keys: policy.field("keys")?,
-            attestations,
-            notices,
-            notice_search_complete,
+            inventory: ReadInventory::load(store, head, retain_for_replay)?,
         })
     }
 
@@ -178,13 +157,14 @@ impl TrainingTrust {
         aliases
             .endpoints(target)
             .into_iter()
-            .filter_map(|id| self.attestations.get(&id).map(|docs| (id, docs)))
-            .flat_map(|(id, docs)| {
-                docs.iter().filter_map(move |(sig, doc)| {
-                    verify_attestation(doc, id, scope, role, "research-policy-1", keys)
-                        .ok()
-                        .map(|()| *sig)
-                })
+            .flat_map(|id| {
+                self.inventory
+                    .attestations(id)
+                    .filter_map(move |(sig, doc)| {
+                        verify_attestation(doc, id, scope, role, "research-policy-1", keys)
+                            .ok()
+                            .map(|()| sig)
+                    })
             })
             .collect()
     }
@@ -248,12 +228,14 @@ struct TrainingReview<'a> {
     after: &'a Snapshot,
     request: &'a TrainingRequest,
     aliases: &'a Equivalence,
-    trust: &'a TrainingTrust,
+    trust: TrainingTrust,
+    // A bounded working set for the most recently replayed historical inventory.
+    historical: Option<(Id, Snapshot, ReadInventory)>,
     access: &'a crate::profile::TrainingAccess<'a>,
 }
 
 impl TrainingReview<'_> {
-    fn validate(&self, ex: &Example) -> Result<ValidatedExample> {
+    fn validate(&mut self, ex: &Example) -> Result<ValidatedExample> {
         let Self {
             store,
             before,
@@ -261,8 +243,9 @@ impl TrainingReview<'_> {
             request,
             aliases,
             trust,
+            historical,
             access,
-        } = *self;
+        } = self;
         let l = store.read_for_training(after, ex.label, access)?;
         ensure!(l.kind == Kind::Label, "expected label");
         let value = l.fields.get("value").context("missing label value")?;
@@ -304,27 +287,30 @@ impl TrainingReview<'_> {
             aliases.endpoints(original.policy).contains(&request.policy),
             "receipt policy differs from admitted training policy"
         );
-        let historical = store.head(receipt.one("snapshot")?)?;
-        ensure!(
-            historical.objects.is_subset(&after.objects),
-            "receipt inventory outside label horizon"
-        );
+        let receipt_head = receipt.one("snapshot")?;
         ensure!(
             original.budget <= 100_000
                 && original.byte_limit <= crate::evaluation::default_byte_limit(),
             "label replay exceeds local extraction budget"
         );
         let evaluator: String = receipt.field("evaluator")?;
-        let replay =
-            crate::evaluation::assess_for_evaluator(store, &historical, &original, &evaluator)?;
-        let expected = crate::evaluation::receipt_document(
-            store,
-            &historical,
-            &original,
-            &replay,
-            &evaluator,
-        )?
-        .encode(Id::blob(PUBLIC))?;
+        if historical
+            .as_ref()
+            .is_none_or(|(head, _, _)| *head != receipt_head)
+        {
+            let snapshot = store.head(receipt_head)?;
+            ensure!(
+                snapshot.objects.is_subset(&after.objects),
+                "receipt inventory outside label horizon"
+            );
+            *historical = Some((receipt_head, snapshot, ReadInventory::for_replay()));
+        }
+        let (_, historical, inventory) =
+            historical.as_mut().context("missing receipt inventory")?;
+        let replay = assess_with_inventory(store, historical, &original, &evaluator, inventory)?;
+        let expected =
+            crate::evaluation::receipt_document(store, historical, &original, &replay, &evaluator)?
+                .encode(Id::blob(PUBLIC))?;
         let endpoints = aliases.endpoints(receipt_id);
         ensure!(
             [Format::A, Format::B]
@@ -358,9 +344,9 @@ impl TrainingReview<'_> {
                 "registered forecast plan unavailable at feature cutoff"
             );
             for &id in &original.arguments {
-                let argument = store.read_for_training(&historical, id, access)?;
+                let argument = store.read_for_training(historical, id, access)?;
                 let witness_id = argument.one("release")?;
-                let witness = store.read_for_training(&historical, witness_id, access)?;
+                let witness = store.read_for_training(historical, witness_id, access)?;
                 ensure!(
                     witness.kind == Kind::Occurrence
                         && witness.subject == receipt.subject
@@ -374,7 +360,7 @@ impl TrainingReview<'_> {
                 let signature = trust
                     .signatures(aliases, witness_id, &witness.scope, "release")
                     .into_iter()
-                    .find(|id| store.resolve_for_training(&historical, *id, access).is_ok())
+                    .find(|id| store.resolve_for_training(historical, *id, access).is_ok())
                     .context("no admitted release signature at the receipt horizon")?;
                 let mut outcomes = argument
                     .inputs
@@ -409,9 +395,9 @@ impl TrainingReview<'_> {
             .filter(|id| id.format().is_some())
         {
             let horizon = if features.visited.contains(&id) {
-                before
+                *before
             } else {
-                after
+                *after
             };
             let doc = store.read_for_training(horizon, id, access)?;
             for edge in doc.inputs {
@@ -422,14 +408,15 @@ impl TrainingReview<'_> {
         }
         if request.standing == LabelStanding::Current {
             ensure!(
-                trust.notice_search_complete,
+                trust.inventory.notice_search_complete(),
                 "requested notice horizon has unreadable notices or records of unknown kind"
             );
             let mut original = original;
             original.mappings.extend(request.mappings.iter().copied());
             original.mappings.sort_unstable();
             original.mappings.dedup();
-            let current = crate::evaluation::assess(store, after, &original)?;
+            let current =
+                assess_with_inventory(store, after, &original, EVALUATOR_ID, &mut trust.inventory)?;
             ensure!(
                 current.horizon_complete
                     && current.frontier.is_empty()
@@ -438,7 +425,8 @@ impl TrainingReview<'_> {
                         == canonical_set(aliases, &replay.applicable_notices),
                 "label requires reassessment at the requested notice horizon"
             );
-            for (&id, notice) in &trust.notices {
+            for &id in &trust.inventory.notices {
+                let notice = &trust.inventory.documents[&id];
                 if current.applicable_notices.contains(&id) {
                     continue;
                 }
@@ -488,7 +476,7 @@ impl Archive {
         for mapping in d.roles("mapping") {
             aliases.add(self.verify_mapping(s, mapping)?);
         }
-        let trust = TrainingTrust::load(self, s, d.one("policy")?)?;
+        let trust = TrainingTrust::load(self, s, d.one("policy")?, false)?;
         let origins = trust.origin(self, s, &d, &aliases, origin, None)?;
         let value = label_value(&d.field("original_transcript")?, check, condition)?;
         let predicate = check.map(str::to_owned).unwrap_or(d.field("predicate")?);
@@ -512,6 +500,17 @@ impl Archive {
         )
     }
     pub fn training_manifest(&self, request: &TrainingRequest, f: Format) -> Result<Extraction> {
+        // Hold a stable custody view across cached reads and the manifest write.
+        let transaction = self
+            .db
+            .is_autocommit()
+            .then(|| {
+                rusqlite::Transaction::new_unchecked(
+                    &self.db,
+                    rusqlite::TransactionBehavior::Immediate,
+                )
+            })
+            .transpose()?;
         let before = self.head(request.feature_cutoff)?;
         let after = self.head(request.label_head)?;
         ensure!(
@@ -522,15 +521,21 @@ impl Archive {
         for &id in &request.mappings {
             aliases.add(self.verify_mapping(&after, id)?);
         }
-        let trust = TrainingTrust::load(self, &after, request.policy)?;
+        let trust = TrainingTrust::load(
+            self,
+            &after,
+            request.policy,
+            request.standing == LabelStanding::Current,
+        )?;
         let access = crate::profile::TrainingAccess::new(request.project.as_deref())?;
-        let review = TrainingReview {
+        let mut review = TrainingReview {
             store: self,
             before: &before,
             after: &after,
             request,
             aliases: &aliases,
-            trust: &trust,
+            trust,
+            historical: None,
             access: &access,
         };
         let mut partitions: BTreeMap<(String, Id), String> = BTreeMap::new();
@@ -615,8 +620,12 @@ impl Archive {
             }),
             links,
         )?;
+        let manifest = self.document(&d, f, Id::blob(PUBLIC))?;
+        if let Some(transaction) = transaction {
+            transaction.commit()?;
+        }
         Ok(Extraction {
-            manifest: self.document(&d, f, Id::blob(PUBLIC))?,
+            manifest,
             included,
             withheld,
         })
@@ -634,15 +643,19 @@ impl Archive {
         for &m in mappings {
             eq.add(self.verify_mapping(s, m)?);
         }
-        let (initial, filter) = if n.roles("calibration").next().is_some() {
+        let calibration = n.roles("calibration").next().is_some();
+        let (initial, correction) = if calibration {
             (
                 eq.endpoints(n.one("calibration")?),
                 Some((n.field::<String>("mode")?, n.field::<[i64; 2]>("interval")?)),
             )
         } else {
-            (eq.endpoints(n.one("target")?), None)
+            let targets: BTreeSet<_> = n.roles("target").flat_map(|id| eq.endpoints(id)).collect();
+            ensure!(!targets.is_empty(), "missing notice target");
+            (targets, None)
         };
-        let mut affected = initial.clone();
+        let withdrawal =
+            !calibration && n.fields.get("action").and_then(Value::as_str) == Some("withdraw");
         let mut docs = BTreeMap::new();
         let mut frontier = BTreeSet::new();
         for (i, &id) in s.objects.iter().enumerate() {
@@ -661,52 +674,80 @@ impl Archive {
                 }
             }
         }
-        loop {
-            let count = affected.len();
-            for (&id, d) in &docs {
-                if matches!(
-                    d.kind,
-                    Kind::Notice | Kind::Mapping | Kind::Attestation | Kind::Policy
-                ) || affected.contains(&id)
-                {
-                    continue;
-                }
-                // Changing differential bias changes the scientific scores and bounds. Both branches
-                // still replay the pinned integer operation; this label describes replay alone.
-                if d.kind == Kind::Label
-                    && d.fields.get("check").and_then(|v| v.as_str()) == Some("arithmetic replay")
-                    && n.field::<i64>("bias").is_ok()
-                {
-                    continue;
-                }
-                if d.inputs.iter().any(|e| {
-                    if !affected.contains(&e.target) {
-                        return false;
+        let argument_excluded = |argument: &Document| {
+            argument.kind == Kind::Argument
+                && MeasurementUse::for_argument(
+                    argument,
+                    |id| docs.get(&id),
+                    WithdrawalRules::Scoped,
+                )
+                .is_some_and(|measurement| {
+                    argument.scope != n.scope
+                        || matches!(measurement.within_withdrawal(&n, false), Ok(false))
+                })
+        };
+        let mut dependents = BTreeMap::<Id, Vec<Id>>::new();
+        for (&id, d) in &docs {
+            if matches!(
+                d.kind,
+                Kind::Notice | Kind::Mapping | Kind::Attestation | Kind::Policy
+            ) {
+                continue;
+            }
+            // A different differential bias can change scores and bounds while arithmetic replay passes.
+            if d.kind == Kind::Label
+                && d.fields.get("check").and_then(Value::as_str) == Some("arithmetic replay")
+                && n.field::<i64>("bias").is_ok()
+            {
+                continue;
+            }
+            if withdrawal {
+                let excluded = match d.kind {
+                    Kind::Argument => argument_excluded(d),
+                    Kind::Occurrence if d.fields.contains_key("gauge") => matches!(
+                        MeasurementUse::from_reading(d, WithdrawalRules::Scoped)
+                            .within_withdrawal(&n, false),
+                        Ok(false)
+                    ),
+                    Kind::Assessment => {
+                        let mut arguments = d.roles("argument").peekable();
+                        arguments.peek().is_some()
+                            && arguments.all(|id| docs.get(&id).is_some_and(&argument_excluded))
+                            && !d.inputs.iter().any(|edge| {
+                                edge.role != "dependency" && initial.contains(&edge.target)
+                            })
                     }
-                    if initial.contains(&e.target)
-                        && let Some((mode, [first, last])) = &filter
-                    {
-                        if d.scope != n.scope {
-                            return false;
-                        }
-                        if let Some(v) = d.fields.get("mode")
-                            && v.as_str() != Some(mode.as_str())
-                        {
-                            return false;
-                        }
-                        if let Ok(event) = d.field::<i64>("event")
-                            && !(*first..=*last).contains(&event)
-                        {
-                            return false;
-                        }
-                    }
-                    true
-                }) {
-                    affected.insert(id);
+                    _ => false,
+                };
+                if excluded {
+                    continue;
                 }
             }
-            if affected.len() == count {
-                break;
+            for edge in &d.inputs {
+                if initial.contains(&edge.target)
+                    && let Some((mode, [first, last])) = &correction
+                    && (d.scope != n.scope
+                        || d.fields
+                            .get("mode")
+                            .is_some_and(|v| v.as_str() != Some(mode))
+                        || d.field::<i64>("event")
+                            .is_ok_and(|event| !(*first..=*last).contains(&event)))
+                {
+                    continue;
+                }
+                dependents.entry(edge.target).or_default().push(id);
+            }
+        }
+        let mut affected = initial.clone();
+        let mut pending: Vec<_> = initial.iter().copied().collect();
+        while let Some(id) = pending.pop() {
+            if let Some(children) = dependents.get(&id) {
+                pending.extend(
+                    children
+                        .iter()
+                        .copied()
+                        .filter(|&child| affected.insert(child)),
+                );
             }
         }
         let mut by_kind: BTreeMap<String, BTreeSet<Id>> = BTreeMap::new();

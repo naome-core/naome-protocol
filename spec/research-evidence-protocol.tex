@@ -3,7 +3,7 @@
 \usepackage{amsmath,amssymb,tabularx,booktabs,xcolor,enumitem,fancyhdr,verbatim,hyperref}
 \definecolor{ink}{HTML}{172D37}
 \definecolor{accent}{HTML}{00665C}
-\newcommand{\edition}{1.7}
+\newcommand{\edition}{1.8}
 \hypersetup{colorlinks=true,linkcolor=accent,urlcolor=accent,linktoc=all,
   pdftitle={NAOME: A Protocol for Scientific Knowledge Creation},
   pdfsubject={Research Evidence Protocol, white paper edition \edition. Conditional validity of scientific claims and reassessment when assumptions change.},
@@ -658,12 +658,12 @@ A claim and an outcome reference the same target profile. A named outcome author
 Projects supply the domain mapping from native data, including the scientific assumptions and how selectors refer to the original bytes. The reference implementation validates declared target types and attestations. Sample selection, instrument calibration, consent authority and the accuracy of scientific interpretation still depend on the underlying evidence and the recipient's policy.
 
 \partpage{Reference implementation and release evidence}\label{app:release}
-Edition \edition{} accompanies \texttt{naome-protocol} \href{https://github.com/naome-core/naome-protocol/releases/tag/v0.1.2}{v0.1.2}. The \href{https://github.com/naome-core/naome-protocol/tree/v0.1.2}{tagged source} contains the Rust library, the offline \texttt{rep} command and the tests described here. The preceding published baseline was \href{https://github.com/naome-core/naome-protocol/tree/v0.1.1}{v0.1.1}.
+Edition \edition{} accompanies \texttt{naome-protocol} \href{https://github.com/naome-core/naome-protocol/releases/tag/v0.1.3}{v0.1.3}. The \href{https://github.com/naome-core/naome-protocol/tree/v0.1.3}{tagged source} contains the Rust library, the offline \texttt{rep} command and the tests described here. The preceding published baseline was \href{https://github.com/naome-core/naome-protocol/tree/v0.1.2}{v0.1.2}.
 
 \topic{What was executed}
 In a local computational case, the executor reads the authorised plan, checks the bytes of a named payload, and writes an occurrence and a signed readback. It then records a closure linking the plan, decision and occurrence. These records are produced by executing the check. The question, plan and authority are inputs supplied to the case.
 
-In both native formats, five measurements use the same reference. A withdrawal covers axial events 3 through 5. At events 3 and 5 the physical claim becomes unresolved. Axial events 2 and 6 and radial event 4 retain their original bounds and supported verdict. Further tests cover a stored empty mode and a known mismatch paired with an invalid restriction. A current training label survives an inapplicable withdrawal when its features remain eligible. Earlier receipts identify their evaluator for historical replay.
+In both native formats, five measurements use the same reference. A withdrawal covers axial events 3 through 5. At events 3 and 5 the physical claim becomes unresolved. Axial events 2 and 6 and radial event 4 retain their original bounds and supported verdict. Further tests cover a stored empty mode and a known mismatch paired with an invalid restriction. A current training label survives an inapplicable withdrawal when its features remain eligible. The impact search excludes the three unaffected measurement arguments. A required withdrawal can be resolved by a signed applicability check that establishes an exclusion. Historical replay uses the evaluator recorded in the receipt. New evaluator identifiers version assessment rules independently of package releases.
 
 Two local archives use the native encodings of Appendix~\ref{app:exchange}. For the original transition and both calibration notices, the implementation recomputed the scores and scientific results in Sections~\ref{sec:archive} and~\ref{sec:bar}. The projection producer replayed the corrected receipt and signed the permitted hull. A fresh recipient received the hull, scoring predicates and public verification context. The source retained the link to the underlying measurements. The recipient could apply both scoring rules and identified the missing warrant for each physical claim.
 

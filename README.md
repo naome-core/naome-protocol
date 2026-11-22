@@ -44,7 +44,7 @@ The trial exercises 24 queries across six exchanged inventories. For the origina
 
 Every read, export or training use is evaluated against the object's access descriptor. Configure trust roots and policies independently of imported evidence. The trial uses public synthetic keys. The operator controls database files and signing seeds.
 
-A training request binds a policy, a feature-cutoff inventory, a label inventory, examples and partitions. Use `independent_roles` for shared origins such as a specimen or patient. Prospective use requires a signed release witness for the concealed outcomes. A scoped training grant requires its project identity and a valid time window. Current-standing extraction withholds a label affected by a correction. Historical extraction preserves its earlier judgment and still checks current use permission. [Executable learning cases](tests/learning.rs)
+A training request binds a policy, a feature-cutoff inventory, a label inventory, examples and partitions. Use `independent_roles` for shared origins such as a specimen or patient. Prospective use requires a signed release witness for the concealed outcomes. A scoped training grant requires its project identity and a valid time window. Current-standing extraction withholds a label affected by a correction. Historical extraction replays the receipt with its recorded evaluator and checks current use permission. Evaluator identifiers track assessment rules independently of the package version. [Executable learning cases](tests/learning.rs)
 
 Measurement readings, thresholds and calibration biases use a micrometre grid. The evaluator converts integer guarantee radii in `um` or `mm` exactly. An unsupported guarantee unit leaves the physical claim open.
 

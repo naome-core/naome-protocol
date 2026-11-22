@@ -312,9 +312,16 @@ fn scoped_withdrawal_preserves_other_measurement_modes_and_events() -> Result<()
         )?;
         fixture::sign(&archive, format, notice, SCOPE, "notice", 9)?;
         let after = archive.snapshot("limited withdrawal", [before.id()?].into())?;
-        for (query, affected) in measurements {
+        let impact = archive.impact(&after, notice, &[], after.objects.len())?;
+        assert!(impact.frontier.is_empty());
+        for (mut query, affected) in measurements {
+            assert_eq!(
+                impact.by_kind["argument"].contains(&query.arguments[0]),
+                affected
+            );
             let prior = assess(&archive, &before, &query)?;
             assert_eq!(prior.result, Some(Standing::Supported));
+            query.required_notices.push(notice);
             let receipt = assess(&archive, &after, &query)?;
             assert!(receipt.horizon_complete && receipt.visible_notices.contains(&notice));
             assert_eq!(receipt.applicable_notices.contains(&notice), affected);
@@ -420,8 +427,15 @@ fn incomplete_applicability_keeps_the_warrant_open() -> Result<()> {
         )?;
         fixture::sign(&archive, format, notice, SCOPE, "notice", 9)?;
         let head = archive.snapshot("limited notice", [before.id()?].into())?;
-        let receipt = assess(&archive, &head, &query)?;
+        let impact = archive.impact(&head, notice, &[], head.objects.len())?;
+        assert!(impact.by_kind["argument"].contains(&query.arguments[0]));
+        let required = Query {
+            required_notices: vec![notice],
+            ..query.clone()
+        };
+        let receipt = assess(&archive, &head, &required)?;
         assert_eq!(receipt.result, Some(Standing::Unresolved));
+        assert!(!receipt.horizon_complete);
         assert!(!receipt.applicable_notices.contains(&notice));
         assert!(
             receipt

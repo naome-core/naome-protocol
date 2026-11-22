@@ -11,7 +11,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -264,6 +264,13 @@ fn publish<T>(path: &Path, write: impl FnOnce(&mut File) -> Result<T>) -> Result
 fn output(path: &Path, data: &[u8]) -> Result<()> {
     publish(path, |f| Ok(f.write_all(data)?))
 }
+fn output_json(path: &Path, data: &impl Serialize) -> Result<()> {
+    publish(path, |file| {
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, data)?;
+        Ok(writer.flush()?)
+    })
+}
 pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
     let public = Id::blob(PUBLIC);
     match &command {
@@ -443,7 +450,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             } else {
                 db.export(&s, &purpose)?
             };
-            output(&path, &serde_json::to_vec(&packet)?)?;
+            output_json(&path, &packet)?;
             print(
                 json!({"head":packet.head,"continuation":packet.continuation,"packets":packet.packets.len()}),
             )
@@ -456,7 +463,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             output: path,
         } => {
             let disclosure = db.project_hull(&db.head(head)?, receipt, &signing_key(&key)?, f)?;
-            output(&path, &serde_json::to_vec(&disclosure.packet)?)?;
+            output_json(&path, &disclosure.packet)?;
             print(
                 json!({"head":disclosure.packet.head,"queries":disclosure.queries,"private_mapping":disclosure.private_mapping}),
             )
