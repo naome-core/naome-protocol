@@ -1,92 +1,14 @@
-use super::{Evaluation, Receipt, Standing, Status, WithdrawalRules};
+use super::{
+    Evaluation, Receipt, Standing, Status,
+    correction::{MeasurementUse, Notice, WithdrawalChecks},
+};
 use crate::{
     profile::{Document, Kind},
     wire::Id,
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
-
-#[derive(Clone, Copy, Default)]
-pub(crate) struct MeasurementUse<'a> {
-    mode: Option<&'a str>,
-    event: Option<i64>,
-}
-
-impl<'a> MeasurementUse<'a> {
-    pub(crate) fn from_reading(reading: &'a Document, rules: WithdrawalRules) -> Self {
-        let mode = reading.fields.get("mode").and_then(|v| v.as_str());
-        Self {
-            // The first scoped evaluator treated an empty direct reading as missing.
-            mode: mode.filter(|mode| rules != WithdrawalRules::FirstScoped || !mode.is_empty()),
-            event: reading.fields.get("event").and_then(|v| v.as_i64()),
-        }
-    }
-
-    pub(crate) fn for_argument(
-        argument: &Document,
-        reading: impl FnOnce(Id) -> Option<&'a Document>,
-        rules: WithdrawalRules,
-    ) -> Option<Self> {
-        match argument
-            .fields
-            .get("method")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("recorded-difference" | "simultaneous-bounds") => Some(
-                argument
-                    .roles("reading")
-                    .next()
-                    .and_then(reading)
-                    .map(|doc| Self::from_reading(doc, rules))
-                    .unwrap_or_default(),
-            ),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn within_withdrawal(self, notice: &Document, first_scoped: bool) -> Result<bool> {
-        let mode = notice
-            .fields
-            .get("mode")
-            .map(|value| {
-                value
-                    .as_str()
-                    .filter(|mode| !mode.is_empty())
-                    .context("invalid withdrawal mode")
-            })
-            .transpose();
-        let interval = notice
-            .fields
-            .get("interval")
-            .map(|_| {
-                let [first, last] = notice.field::<[i64; 2]>("interval")?;
-                ensure!(first <= last, "reversed withdrawal interval");
-                Ok(first..=last)
-            })
-            .transpose();
-
-        match (mode, interval) {
-            (Err(error), _) | (_, Err(error)) if first_scoped => Err(error),
-            (Ok(Some(required)), _) if self.mode.is_some_and(|mode| mode != required) => Ok(false),
-            (_, Ok(Some(bounds))) if self.event.is_some_and(|event| !bounds.contains(&event)) => {
-                Ok(false)
-            }
-            (Err(error), _) | (_, Err(error)) => Err(error),
-            (Ok(mode), Ok(interval)) => {
-                ensure!(
-                    mode.is_none() || self.mode.is_some(),
-                    "withdrawal needs a measurement mode"
-                );
-                ensure!(
-                    interval.is_none() || self.event.is_some(),
-                    "withdrawal needs a measurement event"
-                );
-                Ok(true)
-            }
-        }
-    }
-}
 
 impl Evaluation<'_> {
     fn applicable(
@@ -96,8 +18,10 @@ impl Evaluation<'_> {
         event: i64,
         scope: &str,
         out: &mut Receipt,
+        withdrawals: &mut WithdrawalChecks,
     ) -> Result<Vec<(Id, i64)>> {
         let targets = self.aliases.endpoints(target);
+        let measurement = MeasurementUse::measured(mode, event);
         let mut branches = BTreeMap::new();
         let mut seen = BTreeSet::new();
         let mut correction_applies = false;
@@ -107,12 +31,7 @@ impl Evaluation<'_> {
             if !n.roles("calibration").any(|k| targets.contains(&k)) {
                 continue;
             }
-            let [first, last]: [i64; 2] = n.field("interval")?;
-            if n.scope != scope
-                || n.field::<String>("mode")? != mode
-                || event < first
-                || event > last
-            {
+            if !Notice(n).calibration_applies(scope, measurement)? {
                 out.check(
                     "notice applicability",
                     Status::NotApplicable,
@@ -159,15 +78,7 @@ impl Evaluation<'_> {
                 );
                 continue;
             }
-            if self.challenged(
-                scope,
-                &premises.visited,
-                MeasurementUse {
-                    mode: Some(mode),
-                    event: Some(event),
-                },
-                out,
-            )? {
+            if self.challenged(scope, &premises.visited, measurement, out, withdrawals)? {
                 continue;
             }
             let aliases = self.aliases.endpoints(id);
@@ -187,6 +98,7 @@ impl Evaluation<'_> {
         c: &Document,
         a: &Document,
         out: &mut Receipt,
+        withdrawals: &mut WithdrawalChecks,
     ) -> Result<Vec<Standing>> {
         let plan = self.doc(a.one("plan")?, Kind::Plan)?;
         require_micrometres(plan)?;
@@ -284,7 +196,7 @@ impl Evaluation<'_> {
             &[a.one("release")?],
         );
         out.check("scope and exposure",Status::Pass,"same displacement, shared calibration, simultaneous absolute guarantees and controlled release",&[cal_id,a.one("plan")?,a.one("release")?,a.one("guarantee")?,a.one("stability")?]);
-        let corrected = self.applicable(cal_id, &mode, event, &c.scope, out)?;
+        let corrected = self.applicable(cal_id, &mode, event, &c.scope, out, withdrawals)?;
         let mut biases: Vec<_> = corrected.into_iter().map(|(id, b)| (Some(id), b)).collect();
         if biases.is_empty() {
             biases.push((None, cal.field("bias")?))

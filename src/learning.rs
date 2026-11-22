@@ -1,6 +1,7 @@
 use crate::{
     evaluation::{
-        EVALUATOR_ID, MeasurementUse, ReadInventory, WithdrawalRules, assess_with_inventory,
+        Assessment, EVALUATOR_ID, ReadInventory, assess_with_inventory,
+        correction::{MeasurementUse, Notice, WithdrawalRules},
     },
     migration::Equivalence,
     profile::{Document, Kind, PUBLIC, link, verify_attestation},
@@ -317,7 +318,8 @@ impl TrainingReview<'_> {
         }
         let (_, historical, inventory) =
             historical.as_mut().context("missing receipt inventory")?;
-        let replay = assess_with_inventory(store, historical, &original, &evaluator, inventory)?;
+        let replay =
+            assess_with_inventory(store, historical, &original, &evaluator, inventory)?.receipt;
         let expected =
             crate::evaluation::receipt_document(store, historical, &original, &replay, &evaluator)?
                 .encode(Id::blob(PUBLIC))?;
@@ -425,8 +427,10 @@ impl TrainingReview<'_> {
             original.mappings.extend(request.mappings.iter().copied());
             original.mappings.sort_unstable();
             original.mappings.dedup();
-            let current =
-                assess_with_inventory(store, after, &original, EVALUATOR_ID, &mut trust.inventory)?;
+            let Assessment {
+                receipt: current,
+                withdrawals,
+            } = assess_with_inventory(store, after, &original, EVALUATOR_ID, &mut trust.inventory)?;
             ensure!(
                 current.horizon_complete
                     && current.frontier.is_empty()
@@ -440,14 +444,16 @@ impl TrainingReview<'_> {
                 if current.applicable_notices.contains(&id) {
                     continue;
                 }
-                let affects_training = notice.roles("target").any(|target| {
-                    let endpoints = aliases.endpoints(target);
-                    // A warrant's exclusion applies to its label use. Features
-                    // and other dependencies still require their own justification.
-                    !endpoints.is_disjoint(&features.visited)
-                        || (!endpoints.is_disjoint(&label.visited)
-                            && !current.excludes_withdrawal_for(id, target))
-                });
+                // A warrant's exclusion applies to the label's use. An
+                // independent feature cannot reuse that exclusion.
+                let correction = Notice(notice);
+                let affects_training = correction
+                    .matching_targets(aliases, &features.visited)
+                    .next()
+                    .is_some()
+                    || correction
+                        .matching_targets(aliases, &label.visited)
+                        .any(|target| !withdrawals.excludes_target(id, target));
                 if affects_training
                     && !trust
                         .signatures(aliases, id, &notice.scope, "notice")
@@ -662,14 +668,15 @@ impl Archive {
         for &m in mappings {
             eq.add(self.verify_mapping(s, m)?);
         }
+        let correction_notice = Notice(&n);
         let calibration = n.roles("calibration").next().is_some();
         let (initial, correction) = if calibration {
             (
                 eq.endpoints(n.one("calibration")?),
-                Some((n.field::<String>("mode")?, n.field::<[i64; 2]>("interval")?)),
+                Some(correction_notice.calibration_limits()?),
             )
         } else {
-            let targets: BTreeSet<_> = n.roles("target").flat_map(|id| eq.endpoints(id)).collect();
+            let targets = correction_notice.target_endpoints(&eq);
             ensure!(!targets.is_empty(), "missing notice target");
             (targets, None)
         };
@@ -701,8 +708,7 @@ impl Archive {
                     WithdrawalRules::Scoped,
                 )
                 .is_some_and(|measurement| {
-                    argument.scope != n.scope
-                        || matches!(measurement.within_withdrawal(&n, false), Ok(false))
+                    correction_notice.excludes_current_withdrawal(&argument.scope, measurement)
                 })
         };
         let mut dependents = BTreeMap::<Id, Vec<Id>>::new();
@@ -725,11 +731,11 @@ impl Archive {
             if withdrawal {
                 let excluded = match d.kind {
                     Kind::Argument => argument_excluded(d),
-                    Kind::Occurrence if d.fields.contains_key("gauge") => matches!(
-                        MeasurementUse::from_reading(d, WithdrawalRules::Scoped)
-                            .within_withdrawal(&n, false),
-                        Ok(false)
-                    ),
+                    Kind::Occurrence if d.fields.contains_key("gauge") => correction_notice
+                        .excludes_current_withdrawal(
+                            &d.scope,
+                            MeasurementUse::from_reading(d, WithdrawalRules::Scoped),
+                        ),
                     Kind::Assessment => {
                         let mut arguments = d.roles("argument").peekable();
                         arguments.peek().is_some()
@@ -749,20 +755,14 @@ impl Archive {
             if !calibration
                 && initial.contains(&id)
                 && matches!(d.kind, Kind::Argument | Kind::Claim)
-                && d.scope == n.scope
+                && correction_notice.in_scope(&d.scope)
                 && !excluded_uses.contains(&id)
             {
                 direct.insert(id);
             }
             for edge in &d.inputs {
                 if initial.contains(&edge.target)
-                    && let Some((mode, [first, last])) = &correction
-                    && (d.scope != n.scope
-                        || d.fields
-                            .get("mode")
-                            .is_some_and(|v| v.as_str() != Some(mode))
-                        || d.field::<i64>("event")
-                            .is_ok_and(|event| !(*first..=*last).contains(&event)))
+                    && correction.as_ref().is_some_and(|limits| limits.excludes(d))
                 {
                     continue;
                 }

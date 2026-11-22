@@ -300,6 +300,15 @@ fn scoped_withdrawal_preserves_other_measurement_modes_and_events() -> Result<()
                 affected,
             ));
         }
+        let outside_scope = put(
+            &archive,
+            format,
+            Kind::Occurrence,
+            SUBJECT,
+            "another-transition",
+            json!({"gauge":"A","mode":"axial","event":4}),
+            vec![link("calibration", case.calibration)],
+        )?;
         let before = archive.snapshot("calibrated", Default::default())?;
         let notice = put(
             &archive,
@@ -314,6 +323,12 @@ fn scoped_withdrawal_preserves_other_measurement_modes_and_events() -> Result<()
         let after = archive.snapshot("limited withdrawal", [before.id()?].into())?;
         let impact = archive.impact(&after, notice, &[], after.objects.len())?;
         assert!(impact.frontier.is_empty());
+        assert!(
+            !impact
+                .by_kind
+                .get("occurrence")
+                .is_some_and(|ids| ids.contains(&outside_scope))
+        );
         for (mut query, affected) in measurements {
             assert_eq!(
                 impact.by_kind["argument"].contains(&query.arguments[0]),
@@ -367,9 +382,10 @@ fn scoped_withdrawal_reaches_delegated_use_of_an_unaffected_receipt() -> Result<
             Kind::Argument,
             SUBJECT,
             SCOPE,
-            json!({"method":"delegated"}),
+            json!({"method":"delegated","origin":"synthetic"}),
             vec![link("claim", radial.target), link("receipt", receipt)],
         )?;
+        fixture::sign(&archive, format, argument, SCOPE, "data-origin", 7)?;
         let delegated = Query {
             arguments: vec![argument],
             ..radial.clone()
@@ -380,13 +396,26 @@ fn scoped_withdrawal_reaches_delegated_use_of_an_unaffected_receipt() -> Result<
         let delegated_receipt =
             deposit_receipt(&archive, &before, &delegated, &original_delegate, format)?;
 
+        let assessed = archive.snapshot("delegated assessment", [before.id()?].into())?;
+        let delegated_label = archive.label(
+            &assessed,
+            delegated_receipt,
+            "synthetic",
+            None,
+            None,
+            format,
+        )?;
+        let plan = archive
+            .read(&before, radial.arguments[0], "read")?
+            .one("plan")?;
+
         let notice = signed_withdrawal(
             &archive,
             format,
             case.calibration,
             json!({"mode":"axial","interval":[3,5]}),
         )?;
-        let after = archive.snapshot("axial withdrawal", [before.id()?].into())?;
+        let after = archive.snapshot("axial withdrawal", [assessed.id()?].into())?;
         let radial_recheck = assess(&archive, &after, &radial)?;
         assert_eq!(radial_recheck.result, Some(Standing::Supported));
         assert!(!radial_recheck.applicable_notices.contains(&notice));
@@ -397,6 +426,29 @@ fn scoped_withdrawal_reaches_delegated_use_of_an_unaffected_receipt() -> Result<
                 .checks
                 .iter()
                 .any(|check| { check.status == Status::Unknown && check.inputs.contains(&notice) })
+        );
+
+        let mixed = Query {
+            arguments: vec![radial.arguments[0], argument],
+            required_notices: vec![notice],
+            ..radial.clone()
+        };
+        let mixed_recheck = assess(&archive, &after, &mixed)?;
+        // Pin the mixed-use receipt from the release branch before the refactor.
+        let expected = match format {
+            Format::A => "1:0:0a229dacbf1fe81d1056804a122abd0d168f7bfc53e6b2247fc3f57b4a5da3ae",
+            Format::B => "2:0:b6a1dd05768f738b9abc01413e51ac5ac3342955db7e62a14cde476dc071c4d8",
+        };
+        assert_eq!(
+            deposit_receipt(&archive, &after, &mixed, &mixed_recheck, format)?,
+            expected.parse()?
+        );
+        assert_eq!(mixed_recheck.result, Some(Standing::Unresolved));
+        assert!(!mixed_recheck.horizon_complete);
+        assert!(
+            mixed_recheck
+                .obligations
+                .contains("required notice applicability unknown")
         );
 
         let impact = archive.impact(&after, notice, &[], after.objects.len())?;
@@ -410,11 +462,45 @@ fn scoped_withdrawal_reaches_delegated_use_of_an_unaffected_receipt() -> Result<
         assert!(!impact.by_kind["argument"].contains(&radial.arguments[0]));
         assert!(impact.by_kind["assessment"].contains(&delegated_receipt));
         assert!(!impact.by_kind["assessment"].contains(&receipt));
-        assert!(
-            !impact
-                .by_kind
-                .get("label")
-                .is_some_and(|ids| ids.contains(&radial_label))
+        assert!(impact.by_kind["label"].contains(&delegated_label));
+        assert!(!impact.by_kind["label"].contains(&radial_label));
+
+        let mut request = TrainingRequest {
+            feature_cutoff: before.id()?,
+            label_head: after.id()?,
+            policy: radial.policy,
+            standing: Default::default(),
+            forecast_plan: None,
+            mappings: vec![],
+            project: None,
+            examples: [radial_label, delegated_label]
+                .into_iter()
+                .map(|label| Example {
+                    features: vec![plan],
+                    label,
+                    partition: "train".into(),
+                })
+                .collect(),
+            independent_roles: Default::default(),
+            binary: true,
+        };
+        let current = archive.training_manifest(&request, format)?;
+        assert_eq!(current.included, [radial_label]);
+        assert!(current.withheld[&delegated_label].contains("reassessment"));
+
+        request.standing = naome_protocol::learning::LabelStanding::Historical;
+        let historical = archive.training_manifest(&request, format)?;
+        assert_eq!(historical.included, [radial_label, delegated_label]);
+        assert!(historical.withheld.is_empty());
+        assert_eq!(
+            deposit_receipt(
+                &archive,
+                &before,
+                &delegated,
+                &assess(&archive, &before, &delegated)?,
+                format
+            )?,
+            delegated_receipt
         );
     }
     Ok(())
