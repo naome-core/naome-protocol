@@ -4,7 +4,7 @@ use crate::{
         Embedder, MAX_MEDIA_BYTES, MediaInput, SearchInput, SearchMode, SearchOptions,
         SearchPreparation, SearchReport, text_media,
     },
-    store::Archive,
+    store::{Archive, IndexPreparation},
     wire::Id,
 };
 use anyhow::{Context, Result, ensure};
@@ -54,7 +54,7 @@ pub struct FindArguments {
     #[arg(long)]
     #[serde(default)]
     prepare: bool,
-    /// Rebuild the selected snapshot's view of the derived cache.
+    /// Rebuild and prepare the selected snapshot's view of the derived cache.
     #[arg(long)]
     #[serde(default)]
     rebuild_index: bool,
@@ -166,9 +166,6 @@ impl LocalSearch {
         args: PrepareSearchArguments,
     ) -> Result<SearchPreparation> {
         let snapshot = archive.search_head(args.head)?;
-        if args.rebuild_index {
-            archive.clear_search_index(snapshot.id()?)?;
-        }
         let model = if args.lexical {
             None
         } else {
@@ -177,40 +174,40 @@ impl LocalSearch {
                 .map(|path| self.model(path, args.model.python))
                 .transpose()?
         };
-        archive.prepare_search(&snapshot, args.index_budget, model)
+        archive.prepare_search_index(&snapshot, args.index_budget, model, args.rebuild_index)
     }
 
     pub fn find(&mut self, archive: &Archive, args: FindArguments) -> Result<SearchReport> {
         let snapshot = archive.search_head(args.head)?;
-        let bytes = args
-            .input
-            .as_deref()
-            .map(|path| load(path, MAX_MEDIA_BYTES as usize))
-            .transpose()?;
-        let input = match (
-            args.query.as_deref(),
-            args.input.as_deref(),
-            bytes.as_deref(),
-        ) {
-            (Some(query), None, None) => SearchInput::Text(query),
-            (None, Some(path), Some(bytes)) => {
-                let media = args
+        let bytes;
+        let input = match (args.query.as_deref(), args.input.as_deref()) {
+            (Some(query), None) => {
+                ensure!(
+                    args.media_type.is_none(),
+                    "a media type requires --input FILE"
+                );
+                SearchInput::Text(query)
+            }
+            (None, Some(path)) => {
+                bytes = load(path, MAX_MEDIA_BYTES as usize)?;
+                match args
                     .media_type
                     .as_deref()
-                    .or_else(|| infer_media_type(path));
-                if media.is_some_and(text_media) || media.is_none() {
-                    let text = std::str::from_utf8(bytes)
-                        .context("query file requires supported media or UTF-8 text")?;
-                    ensure!(
-                        !text.contains('\0'),
-                        "query file requires supported media or UTF-8 text"
-                    );
-                    SearchInput::TextFile(text)
-                } else {
-                    SearchInput::Media(MediaInput {
-                        media_type: media.context("missing query media type")?,
-                        bytes,
-                    })
+                    .or_else(|| infer_media_type(path))
+                {
+                    Some(media_type) if !text_media(media_type) => SearchInput::Media(MediaInput {
+                        media_type,
+                        bytes: &bytes,
+                    }),
+                    _ => {
+                        let text = std::str::from_utf8(&bytes)
+                            .context("query file requires supported media or UTF-8 text")?;
+                        ensure!(
+                            !text.contains('\0'),
+                            "query file requires supported media or UTF-8 text"
+                        );
+                        SearchInput::TextFile(text)
+                    }
                 }
             }
             _ => anyhow::bail!("expected a search query or --input FILE"),
@@ -233,26 +230,23 @@ impl LocalSearch {
             index_budget: args.index_budget,
             vector_budget: args.vector_budget,
         };
-        if args.rebuild_index {
-            archive.clear_search_index(snapshot.id()?)?;
-        }
-        if matches!(input, SearchInput::Text(text) if text.trim().parse::<Id>().is_ok()) {
-            return archive.search_prepared(&snapshot, input, options, None);
-        }
-        let model = if mode == SearchMode::Lexical {
+        let model = if mode == SearchMode::Lexical || input.exact_id().is_some() {
             None
         } else {
             let directory =
                 directory.context("configure --model or NAOME_SEARCH_MODEL for semantic search")?;
             Some(self.model(directory, args.model.python)?)
         };
-        if args.prepare {
-            return archive.find_input(&snapshot, input, options, model);
-        }
-        if !matches!(input, SearchInput::Media(_)) {
-            archive.prepare_search(&snapshot, args.index_budget, None)?;
-        }
-        archive.search_prepared(&snapshot, input, options, model)
+        let preparation = if args.prepare || args.rebuild_index {
+            IndexPreparation::Full {
+                rebuild: args.rebuild_index,
+            }
+        } else if matches!(input, SearchInput::Media(_)) {
+            IndexPreparation::Existing
+        } else {
+            IndexPreparation::Lexical
+        };
+        archive.lookup_search(&snapshot, input, options, model, preparation)
     }
 
     /// Serve one typed search request and response per JSON line.

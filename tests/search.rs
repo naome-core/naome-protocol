@@ -27,17 +27,104 @@ fn claim(archive: &Archive, subject: &str, text: &str, access: Id, format: Forma
 
 #[cfg(feature = "cli")]
 #[test]
+fn invalid_cli_search_preserves_the_index_and_session_validation() -> Result<()> {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("archive.sqlite");
+    let archive = Archive::open(&database)?;
+    let id = claim(
+        &archive,
+        "Readings",
+        "instrument calibration",
+        Id::blob(PUBLIC),
+        Format::A,
+    )?;
+    let snapshot = archive.snapshot("readings", BTreeSet::new())?;
+    let nao = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nao"));
+        command
+            .current_dir(directory.path())
+            .arg("--db")
+            .arg(&database)
+            .env_remove("NAOME_SEARCH_MODEL");
+        command
+    };
+    let run = |args: &[&str]| nao().args(args).output();
+    let connection = rusqlite::Connection::open(&database)?;
+    assert!(
+        !run(&["find", "calibration", "--limit", "0"])?
+            .status
+            .success()
+    );
+    let index_created: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='rep_search_schema')",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(!index_created);
+
+    let prepared = archive.prepare_search(&snapshot, 100, None)?;
+    assert!(prepared.index_complete);
+    let model = "missing model";
+    for args in [
+        &["find", "calibration", "--limit", "0", "--rebuild-index"][..],
+        &["find", "calibration", "--model", model, "--rebuild-index"][..],
+        &["prepare-search", "--index-budget", "0", "--rebuild-index"][..],
+        &["prepare-search", "--model", model, "--rebuild-index"][..],
+    ] {
+        let result = run(args)?;
+        assert!(!result.status.success(), "{args:?}");
+        let report = archive.search_prepared(
+            &snapshot,
+            naome_protocol::search::SearchInput::Text("calibration"),
+            SearchOptions::default(),
+            None,
+        )?;
+        assert!(report.index_complete, "{args:?}");
+        assert_eq!(report.hits.first().map(|hit| hit.id), Some(id), "{args:?}");
+    }
+
+    let mut session = nao()
+        .arg("search-session")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let mut input = session.stdin.take().expect("piped session input");
+    writeln!(
+        input,
+        r#"{{"op":"find","query":"calibration","media_type":"text/plain"}}"#
+    )?;
+    writeln!(input, r#"{{"op":"find","query":"calibration"}}"#)?;
+    drop(input);
+    let session = session.wait_with_output()?;
+    assert!(session.status.success());
+    let output: Vec<serde_json::Value> = String::from_utf8(session.stdout)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<serde_json::Result<_>>()?;
+    assert_eq!(output.len(), 2);
+    assert_eq!(output[0]["error"], "a media type requires --input FILE");
+    assert_eq!(output[1]["ok"]["hits"][0]["id"], json!(id));
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
+#[test]
 fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
     use sha2::{Digest, Sha256};
     use std::{fs, process::Command};
 
-    // Created by rep built from v0.1.2 (c546fba6ed08403c045b3438fd7ad446de258c5f)
+    // Created with the v0.1.2 CLI (c546fba6ed08403c045b3438fd7ad446de258c5f)
     // using put (both formats), capture (40-byte chunks), snapshot, and publish.
     let directory = tempfile::tempdir()?;
     let db = directory.path().join("upgraded.sqlite");
     fs::write(&db, include_bytes!("fixtures/search-upgrade-v0.1.2.sqlite"))?;
     let run = |args: &[&str]| -> Result<serde_json::Value> {
-        let output = Command::new(env!("CARGO_BIN_EXE_rep"))
+        let output = Command::new(env!("CARGO_BIN_EXE_nao"))
             .arg("--db")
             .arg(&db)
             .args(args)
@@ -51,7 +138,7 @@ fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
         Ok(serde_json::from_slice(&output.stdout)?)
     };
     assert_eq!(run(&["heads"])?, json!([V012_HEAD]));
-    let unsupported = Command::new(env!("CARGO_BIN_EXE_rep"))
+    let unsupported = Command::new(env!("CARGO_BIN_EXE_nao"))
         .arg("--db")
         .arg(&db)
         .args(["find", "anything", "--mode", "hybrid"])
@@ -739,7 +826,7 @@ fn previous_caches_are_rebuilt_without_changing_the_archive() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let database = directory.path().join("archive.sqlite");
         fs::write(&database, cached)?;
-        let mut session = Command::new(env!("CARGO_BIN_EXE_rep"))
+        let mut session = Command::new(env!("CARGO_BIN_EXE_nao"))
             .arg("--db")
             .arg(&database)
             .arg("search-session")

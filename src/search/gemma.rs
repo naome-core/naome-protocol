@@ -91,6 +91,7 @@ impl EmbeddingGemma {
         Ok(worker)
     }
 
+    #[cfg(feature = "cli")]
     pub(crate) fn is_available(&self) -> bool {
         self.input.is_some()
     }

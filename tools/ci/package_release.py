@@ -1,4 +1,4 @@
-"""Stage a native REP download and exercise the executable from the archive."""
+"""Stage a native nao download and exercise the executable from the archive."""
 
 import argparse
 import hashlib
@@ -18,9 +18,15 @@ PUBLISHED_PROFILES = {
 }
 
 
-def verify(rep, directory, version):
+def verify(nao, directory, version):
+    version_line = subprocess.check_output([nao, "--version"], cwd=directory, text=True, timeout=60)
+    help_text = subprocess.check_output([nao, "--help"], cwd=directory, text=True, timeout=60)
+    usage = next((line for line in help_text.splitlines() if line.startswith("Usage: ")), "")
+    if version_line.strip() != f"nao {version}" or not usage.startswith("Usage: nao "):
+        raise ValueError(f"unexpected packaged version or help: {version_line.strip()!r}, {usage!r}")
+
     def run(*args):
-        return json.loads(subprocess.check_output([rep, *args], cwd=directory, timeout=60))
+        return json.loads(subprocess.check_output([nao, *args], cwd=directory, timeout=60))
 
     capabilities = run("capabilities")
     if capabilities["version"] != version:
@@ -39,7 +45,7 @@ def verify(rep, directory, version):
         resolved = f"{mode} reading.txt"
         run("export", head, exchange, *options)
         run("--db", receiver, "import", exchange, *options)
-        subprocess.run([rep, "--db", receiver, "resolve", head, object_id, resolved],
+        subprocess.run([nao, "--db", receiver, "resolve", head, object_id, resolved],
                        cwd=directory, timeout=60, check=True)
         if (directory / resolved).read_bytes() != reading:
             raise ValueError(f"{mode} exchange changed the payload")
@@ -47,7 +53,7 @@ def verify(rep, directory, version):
     run("keygen", "signing seed")
     if (directory / "signing seed").stat().st_size != 32:
         raise ValueError("key generation did not write a 32-byte seed")
-    print(f"Verified {rep.name}: published profiles, both exchange formats, and key generation")
+    print(f"Verified {nao.name}: published profiles, both exchange formats, and key generation")
 
 
 def package(target, model):
@@ -58,13 +64,13 @@ def package(target, model):
         raise ValueError(f"expected a native {target} runner, found {host}")
     with (ROOT / "Cargo.toml").open("rb") as manifest:
         version = tomllib.load(manifest)["package"]["version"]
-    name = "rep.exe" if os.name == "nt" else "rep"
+    name = "nao.exe" if os.name == "nt" else "nao"
     archive_format = "zip" if os.name == "nt" else "gztar"
     target_directory = ROOT / "target"
     build_directory = target_directory / os.environ.get("CARGO_BUILD_TARGET", "")
     output = target_directory / "distribution"
     output.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="rep-release-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="nao-release-") as temporary:
         root = Path(temporary)
         staging = root / "staging"
         staging.mkdir()
@@ -73,19 +79,19 @@ def package(target, model):
             shutil.copy2(path, staging)
 
         package_path = Path(shutil.make_archive(
-            str(root / f"rep-v{version}-{target}"), archive_format, root_dir=staging
+            str(root / f"nao-v{version}-{target}"), archive_format, root_dir=staging
         ))
         unpacked = root / "Test workspace µ"
         if archive_format == "gztar":
             shutil.unpack_archive(package_path, unpacked, filter="data")
         else:
             shutil.unpack_archive(package_path, unpacked)
-        rep = unpacked / name
-        verify(rep, unpacked, version)
+        nao = unpacked / name
+        verify(nao, unpacked, version)
         if model:
             from search_qualification import qualify
 
-            qualify(rep)
+            qualify(nao)
         with package_path.open("rb") as contents:
             digest = hashlib.file_digest(contents, "sha256").hexdigest()
         (output / f"{package_path.name}.sha256").write_bytes(

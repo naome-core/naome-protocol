@@ -49,23 +49,24 @@ def create_fixtures(directory):
     page.save(directory / "nitrate.pdf")
 
 
-def verify_packaged_search(rep, root, environment):
+def verify_packaged_search(nao, root, environment):
     def run(*args):
-        return json.loads(subprocess.check_output([rep, *args], cwd=root, env=environment, timeout=420))
+        return json.loads(subprocess.check_output([nao, *args], cwd=root, env=environment, timeout=420))
 
     media = Path(environment["NAOME_MEDIA_FIXTURES"]) / "bridge.png"
     object_id = run("capture", media, "image/png")
     head = run("snapshot", "packaged model search", "--root", object_id)
-    for query in [["Golden Gate Brücke in San Francisco"], ["--input", media]]:
-        report = run("find", "--head", head, "--mode", "semantic", "--prepare", *query)
+    for query in [["--prepare", "Golden Gate Brücke in San Francisco"],
+                  ["--rebuild-index", "--input", media]]:
+        report = run("find", "--head", head, "--mode", "semantic", *query)
         hits = report["hits"]
         if not report["semantic_index_complete"] or not hits or hits[0]["id"] != object_id:
             raise ValueError(f"packaged model search did not retrieve the bridge image: {report}")
     print("Verified multilingual text and image queries through the packaged CLI")
 
 
-def qualify(rep=None):
-    with tempfile.TemporaryDirectory(prefix="rep-search-qualification-") as temporary:
+def qualify(nao=None):
+    with tempfile.TemporaryDirectory(prefix="nao-search-qualification-") as temporary:
         root = Path(temporary)
         environment = os.environ.copy()
         if "NAOME_SEARCH_MODEL" not in environment:
@@ -85,8 +86,8 @@ def qualify(rep=None):
             check=True,
             env=environment,
         )
-        if rep is not None:
-            verify_packaged_search(rep, root, environment)
+        if nao is not None:
+            verify_packaged_search(nao, root, environment)
 
 
 if __name__ == "__main__":

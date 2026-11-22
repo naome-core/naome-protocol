@@ -58,6 +58,15 @@ pub enum SearchInput<'a> {
     Media(MediaInput<'a>),
 }
 
+impl SearchInput<'_> {
+    pub(crate) fn exact_id(self) -> Option<Id> {
+        match self {
+            Self::Text(query) => query.trim().parse().ok(),
+            Self::TextFile(_) | Self::Media(_) => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct MediaInput<'a> {
     pub media_type: &'a str,

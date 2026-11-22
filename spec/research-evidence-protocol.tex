@@ -518,7 +518,7 @@ Conformance has three independently declared capabilities. A \emph{carrier} chec
 \clearpage
 \pdfbookmark[2]{Offline exchange file, version 1}{offlineexchange}
 \subsection*{Offline exchange file, version 1}\label{sec:exchangefile}
-The file used by \texttt{rep export} and \texttt{rep import} is a UTF-8 JSON object. The required members are \texttt{snapshot}, \texttt{head}, \texttt{packets} and \texttt{omitted}. The optional \texttt{continuation} holds a cursor. Receivers reject unknown object members. Whitespace and object-member order in the exchange file are immaterial.
+The file used by \texttt{nao export} and \texttt{nao import} is a UTF-8 JSON object. The required members are \texttt{snapshot}, \texttt{head}, \texttt{packets} and \texttt{omitted}. The optional \texttt{continuation} holds a cursor. Receivers reject unknown object members. Whitespace and object-member order in the exchange file are immaterial.
 
 \topic{How to reproduce the snapshot identifier}
 Encode the snapshot as compact UTF-8 JSON in the exact field order \texttt{version}, \texttt{source}, \texttt{parents}, \texttt{objects}, without a final newline. Version is the integer 1 and source is a nonempty string. Parents and objects are sets of identifiers. Write each set once in ascending order by numeric suite, numeric class, then the 32 digest octets. An identifier string is the two unsigned decimal numbers and 64 lowercase hexadecimal digits separated by colons, without leading zeroes on the numbers.
@@ -658,7 +658,7 @@ A claim and an outcome reference the same target profile. A named outcome author
 Projects supply the domain mapping from native data, including the scientific assumptions and how selectors refer to the original bytes. The reference implementation validates declared target types and attestations. Sample selection, instrument calibration, consent authority and the accuracy of scientific interpretation still depend on the underlying evidence and the recipient's policy.
 
 \partpage{Reference implementation and release evidence}\label{app:release}
-Edition \edition{} accompanies \texttt{naome-protocol} \href{https://github.com/naome-core/naome-protocol/releases/tag/v0.1.2}{v0.1.2}. The \href{https://github.com/naome-core/naome-protocol/tree/v0.1.2}{tagged source} contains the Rust library, the offline \texttt{rep} command and the tests described here. The preceding published baseline was \href{https://github.com/naome-core/naome-protocol/tree/v0.1.1}{v0.1.1}.
+Edition \edition{} accompanies \texttt{naome-protocol} \href{https://github.com/naome-core/naome-protocol/releases/tag/v0.1.2}{v0.1.2}. The \href{https://github.com/naome-core/naome-protocol/tree/v0.1.2}{tagged source} contains the Rust library, the offline command-line tool and the tests described here. Starting with v0.1.6, the command is named \texttt{nao}. The preceding published baseline was \href{https://github.com/naome-core/naome-protocol/tree/v0.1.1}{v0.1.1}.
 
 \topic{What was executed}
 In a local computational case, the executor reads the authorised plan, checks the bytes of a named payload, and writes an occurrence and a signed readback. It then records a closure linking the plan, decision and occurrence. These records are produced by executing the check. The question, plan and authority are inputs supplied to the case.

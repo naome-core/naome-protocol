@@ -2,6 +2,8 @@ mod exchange;
 mod search_index;
 pub mod sharing;
 pub use exchange::{Bundle, Packet};
+#[cfg(feature = "cli")]
+pub(crate) use search_index::IndexPreparation;
 
 use crate::profile::TrainingAccess;
 use crate::{
@@ -237,9 +239,21 @@ impl Archive {
         mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
     ) -> Result<Document> {
         let format = id.format().context("expected record")?;
-        let r = Record::decode(&resolve(id)?, format)?;
+        let bytes = resolve(id)?;
+        Self::decode_document(format, &bytes, resolve)
+    }
+
+    fn decode_document(
+        format: Format,
+        bytes: &[u8],
+        resolve_profile: impl FnOnce(Id) -> Result<Vec<u8>>,
+    ) -> Result<Document> {
+        let r = Record::decode(bytes, format)?;
         let profile = supported_profile(r.profile).context("unsupported profile")?;
-        ensure!(resolve(r.profile)? == profile, "inconsistent profile bytes");
+        ensure!(
+            resolve_profile(r.profile)? == profile,
+            "inconsistent profile bytes"
+        );
         Document::decode(&r)
     }
     fn id_set(&self, sql: &str) -> Result<BTreeSet<Id>> {
