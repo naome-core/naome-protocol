@@ -22,6 +22,12 @@ use vectors::{embed_query, missing_vectors};
 
 const MAX_QUERY_PASSAGES: usize = 24;
 
+pub(crate) enum IndexPreparation {
+    Existing,
+    Lexical,
+    Full { rebuild: bool },
+}
+
 struct Passage {
     text: String,
     location: SearchLocation,
@@ -87,11 +93,27 @@ impl Archive {
     /// Clear one snapshot's derived search data. The next search rebuilds it.
     pub fn clear_search_index(&self, head: Id) -> Result<()> {
         self.init_search()?;
-        self.db.execute(
-            "DELETE FROM rep_search_heads WHERE head=?",
-            [head.to_string()],
-        )?;
+        self.clear_index_view(&head.to_string())
+    }
+
+    fn clear_index_view(&self, head: &str) -> Result<()> {
+        self.db
+            .execute("DELETE FROM rep_search_heads WHERE head=?", [head])?;
         Ok(())
+    }
+
+    fn prepare_lexical_index(
+        &self,
+        snapshot: &Snapshot,
+        head: &str,
+        budget: usize,
+        rebuild: bool,
+    ) -> Result<()> {
+        self.init_search()?;
+        if rebuild {
+            self.clear_index_view(head)?;
+        }
+        self.refresh_search(snapshot, head, budget)
     }
 
     pub fn find(
@@ -111,7 +133,12 @@ impl Archive {
         options: SearchOptions<'_>,
         model: Option<&mut dyn Embedder>,
     ) -> Result<SearchReport> {
-        self.lookup_search(snapshot, input, options, model, true)
+        let preparation = if options.mode == SearchMode::Lexical {
+            IndexPreparation::Lexical
+        } else {
+            IndexPreparation::Full { rebuild: false }
+        };
+        self.lookup_search(snapshot, input, options, model, preparation)
     }
 
     /// Query the prepared lexical and embedding cache.
@@ -122,7 +149,7 @@ impl Archive {
         options: SearchOptions<'_>,
         model: Option<&mut dyn Embedder>,
     ) -> Result<SearchReport> {
-        self.lookup_search(snapshot, input, options, model, false)
+        self.lookup_search(snapshot, input, options, model, IndexPreparation::Existing)
     }
 
     /// Prepare a bounded slice independently of any query.
@@ -132,11 +159,20 @@ impl Archive {
         budget: usize,
         model: Option<&mut dyn Embedder>,
     ) -> Result<SearchPreparation> {
+        self.prepare_search_index(snapshot, budget, model, false)
+    }
+
+    pub(crate) fn prepare_search_index(
+        &self,
+        snapshot: &Snapshot,
+        budget: usize,
+        model: Option<&mut dyn Embedder>,
+        rebuild: bool,
+    ) -> Result<SearchPreparation> {
         ensure!(budget > 0, "positive index budget required");
         let head = snapshot.id()?;
         let key = head.to_string();
-        self.init_search()?;
-        self.refresh_search(snapshot, &key, budget)?;
+        self.prepare_lexical_index(snapshot, &key, budget, rebuild)?;
         let model_key = if let Some(model) = model {
             let id = model.id().to_string();
             self.refresh_search_vectors(snapshot, &key, model, budget)?;
@@ -162,13 +198,13 @@ impl Archive {
         })
     }
 
-    fn lookup_search(
+    pub(crate) fn lookup_search(
         &self,
         snapshot: &Snapshot,
         input: SearchInput<'_>,
         options: SearchOptions<'_>,
         model: Option<&mut dyn Embedder>,
-        prepare: bool,
+        preparation: IndexPreparation,
     ) -> Result<SearchReport> {
         let (text, media, limited) = match input {
             SearchInput::Text(query) => {
@@ -205,7 +241,6 @@ impl Archive {
                 (Vec::new(), Some(media), false)
             }
         };
-        let query = text.first().copied().unwrap_or_default();
         ensure!(
             (1..=100).contains(&options.limit),
             "search limit must be between 1 and 100"
@@ -232,12 +267,15 @@ impl Archive {
             hits: Vec::new(),
         };
 
-        if matches!(input, SearchInput::Text(_))
-            && let Ok(id) = query.parse::<Id>()
-        {
+        if let Some(id) = input.exact_id() {
             let read = self.db.unchecked_transaction()?;
-            if self.resolve(snapshot, id, "read").is_ok() {
-                let document = self.read(snapshot, id, "read").ok();
+            if let Ok(bytes) = self.resolve(snapshot, id, "read") {
+                let document = id.format().and_then(|format| {
+                    Self::decode_document(format, &bytes, |profile| {
+                        self.resolve(snapshot, profile, "read")
+                    })
+                    .ok()
+                });
                 if options
                     .kind
                     .is_none_or(|kind| document.as_ref().is_some_and(|d| d.kind == kind))
@@ -264,20 +302,18 @@ impl Archive {
         }
 
         let mode = options.mode;
-        let model = if mode == SearchMode::Lexical {
+        let mut model = if mode == SearchMode::Lexical {
             None
         } else {
             Some(model.context("semantic search requires a configured local embedding model")?)
         };
         let head = head.to_string();
-        if prepare {
-            self.init_search()?;
-            self.refresh_search(snapshot, &head, options.index_budget)?;
-        } else if !prepared_cache_available(&self.db)? {
+        if matches!(preparation, IndexPreparation::Existing) && !prepared_cache_available(&self.db)?
+        {
             report.semantic_index_complete = model.as_ref().map(|_| false);
             return Ok(report);
         }
-        let query_vectors = if let Some(model) = model {
+        let query_vectors = if let Some(model) = model.as_deref_mut() {
             report.model = Some(model.id());
             let minimum = model.minimum_similarity();
             ensure!(
@@ -287,13 +323,22 @@ impl Archive {
             report.minimum_similarity = Some(minimum);
             let (query_vectors, limited) = embed_query(model, &text, media)?;
             report.query_limited |= limited;
-            if prepare {
-                self.refresh_search_vectors(snapshot, &head, model, options.index_budget)?;
-            }
             Some(query_vectors)
         } else {
             None
         };
+        match preparation {
+            IndexPreparation::Existing => {}
+            IndexPreparation::Lexical => {
+                self.prepare_lexical_index(snapshot, &head, options.index_budget, false)?;
+            }
+            IndexPreparation::Full { rebuild } => {
+                self.prepare_lexical_index(snapshot, &head, options.index_budget, rebuild)?;
+                if let Some(model) = model {
+                    self.refresh_search_vectors(snapshot, &head, model, options.index_budget)?;
+                }
+            }
+        }
         let read = self.db.unchecked_transaction()?;
         (report.index_complete, report.limited_coverage) = coverage(&read, &head)?;
         let model_key = report.model.map(|id| id.to_string());

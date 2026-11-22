@@ -56,8 +56,9 @@ def verify_packaged_search(rep, root, environment):
     media = Path(environment["NAOME_MEDIA_FIXTURES"]) / "bridge.png"
     object_id = run("capture", media, "image/png")
     head = run("snapshot", "packaged model search", "--root", object_id)
-    for query in [["Golden Gate Brücke in San Francisco"], ["--input", media]]:
-        report = run("find", "--head", head, "--mode", "semantic", "--prepare", *query)
+    for query in [["--prepare", "Golden Gate Brücke in San Francisco"],
+                  ["--rebuild-index", "--input", media]]:
+        report = run("find", "--head", head, "--mode", "semantic", *query)
         hits = report["hits"]
         if not report["semantic_index_complete"] or not hits or hits[0]["id"] != object_id:
             raise ValueError(f"packaged model search did not retrieve the bridge image: {report}")
