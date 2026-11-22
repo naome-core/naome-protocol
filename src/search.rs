@@ -213,6 +213,10 @@ pub struct SearchReport {
     pub semantic_index_complete: Option<bool>,
     pub vector_budget_exhausted: bool,
     pub vector_products: usize,
+    /// Candidate keys advanced during scoring. Counting the eligible scope is separate.
+    pub vector_rows_examined: usize,
+    /// Stored vector payloads materialized for scoring, including reranking.
+    pub vector_rows_loaded: usize,
     pub limited_coverage: bool,
     pub query_limited: bool,
     pub hits: Vec<SearchHit>,

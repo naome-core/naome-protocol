@@ -1,5 +1,5 @@
 use super::{
-    Archive, IndexedRecord, Snapshot,
+    Archive, IndexedRecord, Passage, Snapshot,
     extract::{normalize, terms},
 };
 use crate::{profile::Document, wire::Id};
@@ -7,8 +7,9 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::ops::Bound::{Excluded, Unbounded};
 
-pub(super) const INDEX_VERSION: u32 = 2;
+pub(super) const INDEX_VERSION: u32 = 3;
 const BATCH: usize = 16;
+const TEXT_BATCH: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct State {
@@ -31,6 +32,10 @@ impl Archive {
             Some(INDEX_VERSION) => {}
             Some(1) => {
                 tx.execute_batch(include_str!("replace_v1.sql"))?;
+                tx.execute_batch(include_str!("schema.sql"))?;
+            }
+            Some(2) => {
+                tx.execute_batch(include_str!("replace_v2.sql"))?;
                 tx.execute_batch(include_str!("schema.sql"))?;
             }
             None => tx.execute_batch(include_str!("schema.sql"))?,
@@ -99,6 +104,54 @@ impl Archive {
             tx.commit()?;
             budget -= indexed.len();
         }
+        self.refresh_text(snapshot, head, budget.min(TEXT_BATCH))
+    }
+
+    fn refresh_text(&self, snapshot: &Snapshot, head: &str, budget: usize) -> Result<()> {
+        for _ in 0..budget {
+            let revision = revision(&self.db)?;
+            let Some((entry, object, cursor, length)) = self
+                .db
+                .query_row(
+                    "SELECT t.entry,e.object,t.cursor,t.length FROM rep_search_visibility v
+                 JOIN rep_search_text t ON t.entry=v.entry
+                 JOIN rep_search_entries e ON e.id=t.entry
+                 WHERE v.head=? AND t.cursor<t.length ORDER BY e.object LIMIT 1",
+                    [head],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .optional()?
+            else {
+                break;
+            };
+            let indexed = self.index_text_window(
+                snapshot,
+                object.parse()?,
+                usize::try_from(cursor)?,
+                usize::try_from(length)?,
+            );
+            let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
+            if self::revision(&tx)? != revision {
+                break;
+            }
+            let (passages, next) = indexed?;
+            let changed = tx.execute(
+                "UPDATE rep_search_text SET cursor=?2 WHERE entry=?1 AND cursor=?3
+                   AND EXISTS(SELECT 1 FROM rep_search_visibility WHERE head=?4 AND entry=?1)",
+                params![entry, i64::try_from(next)?, cursor, head],
+            )?;
+            if changed != 0 {
+                write_passages(&tx, entry, &passages)?;
+            }
+            tx.commit()?;
+        }
         Ok(())
     }
 }
@@ -106,7 +159,7 @@ impl Archive {
 pub(super) fn prepared_cache_available(db: &Connection) -> Result<bool> {
     match installed_version(db)? {
         Some(INDEX_VERSION) => Ok(true),
-        None | Some(1) => Ok(false),
+        None | Some(1 | 2) => Ok(false),
         Some(_) => anyhow::bail!("unsupported local search index version"),
     }
 }
@@ -155,7 +208,9 @@ fn state(db: &Connection, head: &str) -> Result<Option<State>> {
 pub(super) fn coverage(db: &Connection, head: &str) -> Result<(bool, bool)> {
     Ok(db.query_row(
         "SELECT coalesce((SELECT finished FROM rep_search_heads WHERE head=?1), 0)
-                AND NOT EXISTS(SELECT 1 FROM rep_search_waiting WHERE head=?1 AND ready),
+                AND NOT EXISTS(SELECT 1 FROM rep_search_waiting WHERE head=?1 AND ready)
+                AND NOT EXISTS(SELECT 1 FROM rep_search_text t
+                    JOIN rep_search_visibility v ON v.entry=t.entry WHERE v.head=?1 AND t.cursor<t.length),
                 EXISTS(SELECT 1 FROM rep_search_gaps WHERE head=?1)",
         [head],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -230,7 +285,8 @@ fn publish(db: &Connection, head: &str, id: Id, record: &Record) -> Result<()> {
     };
     for entry in entries {
         db.execute(
-            "INSERT OR IGNORE INTO rep_search_visibility VALUES(?,?)",
+            "INSERT OR IGNORE INTO rep_search_visibility(head,entry,object,section)
+             SELECT ?1,id,object,section FROM rep_search_entries WHERE id=?2",
             params![head, entry],
         )?;
     }
@@ -261,10 +317,6 @@ fn write_sections(
         "INSERT INTO rep_search_entries(object,section,kind,subject,scope) VALUES(?,?,?,?,?)",
     )?;
     let mut source = db.prepare_cached("INSERT INTO rep_search_sources VALUES(?,?)")?;
-    let mut row = db.prepare_cached(
-        "INSERT INTO rep_search_passages(entry,location,text,normalized,priority,semantic) VALUES(?,?,?,?,?,?)",
-    )?;
-    let mut posting = db.prepare_cached("INSERT INTO rep_search_terms VALUES(?,?)")?;
     for (section_number, section) in record.sections.iter().enumerate() {
         let section_number = section_number as i64;
         let existing = lookup
@@ -286,21 +338,13 @@ fn write_sections(
         for source_id in &section.sources {
             source.execute(params![source_id.to_string(), key])?;
         }
-        for passage in &section.passages {
-            let normalized = normalize(&passage.text);
-            let location = serde_json::to_string(&passage.location)?;
-            let id = row.insert(params![
-                key,
-                location,
-                passage.text,
-                normalized,
-                passage.priority,
-                passage.semantic
-            ])?;
-            for term in terms(&normalized) {
-                posting.execute(params![term, id])?;
-            }
+        if let Some(length) = section.pending_text {
+            db.execute(
+                "INSERT INTO rep_search_text(entry,length) VALUES(?,?)",
+                params![key, i64::try_from(length)?],
+            )?;
         }
+        write_passages(db, key, &section.passages)?;
     }
     if record.cacheable {
         db.execute(
@@ -309,4 +353,27 @@ fn write_sections(
         )?;
     }
     Ok(entries)
+}
+
+fn write_passages(db: &Connection, entry: i64, passages: &[Passage]) -> Result<()> {
+    let mut row = db.prepare_cached(
+        "INSERT INTO rep_search_passages(entry,location,text,normalized,priority,semantic) VALUES(?,?,?,?,?,?)",
+    )?;
+    let mut posting = db.prepare_cached("INSERT INTO rep_search_terms VALUES(?,?)")?;
+    for passage in passages {
+        let normalized = normalize(&passage.text);
+        let location = serde_json::to_string(&passage.location)?;
+        let id = row.insert(params![
+            entry,
+            location,
+            passage.text,
+            normalized,
+            passage.priority,
+            passage.semantic
+        ])?;
+        for term in terms(&normalized) {
+            posting.execute(params![term, id])?;
+        }
+    }
+    Ok(())
 }

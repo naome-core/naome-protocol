@@ -1,7 +1,7 @@
 use super::SemanticQuery;
 use crate::{search::SearchOptions, wire::Id};
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, Row, Statement, params};
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BTreeMap, BinaryHeap},
@@ -12,15 +12,21 @@ use std::{
 pub(in super::super) struct VectorWork {
     pub(in super::super) products: usize,
     pub(in super::super) bounded: bool,
+    pub(in super::super) rows_examined: usize,
+    pub(in super::super) vectors_loaded: usize,
 }
 
-const SCOPE: &str = "
-    FROM rep_search_vectors v
-    JOIN rep_search_passages p ON p.id=v.passage
-    JOIN rep_search_entries e ON e.id=p.entry
-    JOIN rep_search_visibility visible ON visible.entry=e.id AND visible.head=?1
-    WHERE v.model=?2
-      AND (?3 IS NULL OR e.kind=?3) AND (?4 IS NULL OR e.subject=?4) AND (?5 IS NULL OR e.scope=?5)";
+fn scope_sql(vector_index: &str) -> String {
+    format!("FROM rep_search_visibility visible INDEXED BY rep_search_visibility_order
+        CROSS JOIN rep_search_entries e ON e.id=visible.entry
+        CROSS JOIN rep_search_passages p INDEXED BY rep_search_passages_entry ON p.entry=e.id
+        CROSS JOIN rep_search_vectors v {vector_index} ON v.passage=p.id AND v.model=?2
+        WHERE visible.head=?1
+          AND (?3 IS NULL OR e.kind=?3) AND (?4 IS NULL OR e.subject=?4) AND (?5 IS NULL OR e.scope=?5)")
+}
+
+const COVERING_VECTORS: &str = "INDEXED BY rep_search_vector_keys";
+const SAMPLE_BATCH: usize = 128;
 
 struct Scope<'a> {
     db: &'a Connection,
@@ -34,6 +40,7 @@ type Match = (Id, i64, i64, f32);
 #[derive(Clone, Copy)]
 struct Coarse {
     similarity: f32,
+    order: usize,
     passage: i64,
     part: i64,
 }
@@ -42,7 +49,7 @@ impl Ord for Coarse {
     fn cmp(&self, other: &Self) -> Ordering {
         self.similarity
             .total_cmp(&other.similarity)
-            .then_with(|| (other.passage, other.part).cmp(&(self.passage, self.part)))
+            .then_with(|| other.order.cmp(&self.order))
     }
 }
 impl PartialOrd for Coarse {
@@ -107,7 +114,7 @@ pub(super) fn semantic_passages(
     };
 
     if count <= budget / exact_cost {
-        scope.visit(dimensions, count, count, &mut exact)?;
+        scope.visit(dimensions, count, count, work, &mut exact)?;
         work.products = count * exact_cost;
     } else {
         let coarse_budget = (budget - exact_cost) / 2;
@@ -116,12 +123,12 @@ pub(super) fn semantic_passages(
         if samples == 0 {
             // Tiny caller-supplied budgets can only afford sampled exact comparisons.
             let samples = count.min(budget / exact_cost);
-            scope.visit(dimensions, count, samples, &mut exact)?;
+            scope.visit(dimensions, count, samples, work, &mut exact)?;
             work.products = samples * exact_cost;
         } else {
             let coarse_products = samples * query_count * width;
             let finalists = samples.min((budget - coarse_products) / exact_cost);
-            let shortlist = shortlist(&scope, &queries, width, count, samples, finalists)?;
+            let shortlist = shortlist(&scope, &queries, width, count, samples, finalists, work)?;
             let mut statement = db.prepare_cached(
                 "SELECT e.object,p.id,p.location,v.part,v.vector FROM rep_search_vectors v
                  JOIN rep_search_passages p ON p.id=v.passage JOIN rep_search_entries e ON e.id=p.entry
@@ -131,6 +138,7 @@ pub(super) fn semantic_passages(
                 let mut rows = statement.query(params![semantic.model, item.passage, item.part])?;
                 if let Some(row) = rows.next()? {
                     exact(row)?;
+                    work.vectors_loaded += 1;
                 }
             }
             work.products = coarse_products + shortlist.len() * exact_cost;
@@ -162,6 +170,7 @@ fn shortlist(
     count: usize,
     samples: usize,
     finalists: usize,
+    work: &mut VectorWork,
 ) -> Result<Vec<Coarse>> {
     let prefixes: Vec<_> = queries
         .iter()
@@ -170,7 +179,8 @@ fn shortlist(
     let query_refs: Vec<_> = prefixes.iter().map(Vec::as_slice).collect();
     let mut decoded = Vec::with_capacity(width);
     let mut best = BinaryHeap::with_capacity(finalists);
-    scope.visit(width, count, samples, |row| {
+    let mut order = 0;
+    scope.visit(width, count, samples, work, |row| {
         let values = decode(row, width, &mut decoded)?;
         let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
         let similarity = if norm > 0.0 {
@@ -181,9 +191,11 @@ fn shortlist(
         ensure!(similarity.is_finite(), "invalid projected embedding");
         let item = Coarse {
             similarity,
+            order,
             passage: row.get(1)?,
             part: row.get(3)?,
         };
+        order += 1;
         if best.len() < finalists {
             best.push(Reverse(item));
         } else if best.peek().is_some_and(|worst| worst.0 < item) {
@@ -196,8 +208,8 @@ fn shortlist(
 
 impl Scope<'_> {
     fn count(&self) -> Result<usize> {
-        let count: i64 = self.db.query_row(
-            &format!("SELECT count(*) {SCOPE}"),
+        let sql = format!("SELECT count(*) {}", scope_sql(COVERING_VECTORS));
+        let count: i64 = self.db.prepare_cached(&sql)?.query_row(
             params![
                 self.head,
                 self.model,
@@ -215,30 +227,64 @@ impl Scope<'_> {
         width: usize,
         count: usize,
         samples: usize,
+        work: &mut VectorWork,
         mut visit: impl FnMut(&Row<'_>) -> Result<()>,
     ) -> Result<()> {
         if samples == 0 {
             return Ok(());
         }
+        // Sparse scans read ordered keys first. Materialize embedding BLOBs
+        // only for sampled rows, even when the eligible inventory is large.
+        let sparse = samples < count;
+        let width = (width * 4) as i64;
+        let (columns, index) = if sparse {
+            ("p.id,v.part", COVERING_VECTORS)
+        } else {
+            ("e.object,p.id,p.location,v.part,substr(v.vector,1,?6)", "")
+        };
         let sql = format!(
-            "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?6) {SCOPE} ORDER BY p.id,v.part",
+            "SELECT {columns} {} ORDER BY visible.object,visible.section,p.location,v.part",
+            scope_sql(index)
         );
         let mut statement = self.db.prepare_cached(&sql)?;
-        let mut rows = statement.query(params![
-            self.head,
-            self.model,
-            self.options.kind.map(|kind| kind as i64),
-            self.options.subject,
-            self.options.scope,
-            (width * 4) as i64
-        ])?;
+        let kind = self.options.kind.map(|kind| kind as i64);
+        let bound: [&dyn rusqlite::ToSql; 6] = [
+            &self.head,
+            &self.model,
+            &kind,
+            &self.options.subject,
+            &self.options.scope,
+            &width,
+        ];
+        let mut rows = statement.query(&bound[..if sparse { 5 } else { 6 }])?;
+        let mut vectors = self.db.prepare_cached(
+            "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?3)
+             FROM json_each(?2) sample
+             CROSS JOIN rep_search_vectors v ON v.model=?1
+                AND v.passage=json_extract(sample.value,'$[0]')
+                AND v.part=json_extract(sample.value,'$[1]')
+             CROSS JOIN rep_search_passages p ON p.id=v.passage
+             CROSS JOIN rep_search_entries e ON e.id=p.entry ORDER BY sample.key",
+        )?;
+        let mut keys = Vec::with_capacity(SAMPLE_BATCH);
         let mut available = 0;
         let mut visited = 0;
         while let Some(row) = rows.next()? {
+            work.rows_examined += 1;
             if available
                 == (((2 * visited as u128 + 1) * count as u128) / (2 * samples as u128)) as usize
             {
-                visit(row)?;
+                if sparse {
+                    keys.push((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?));
+                    if keys.len() == SAMPLE_BATCH {
+                        work.vectors_loaded +=
+                            visit_samples(&mut vectors, self.model, width, &keys, &mut visit)?;
+                        keys.clear();
+                    }
+                } else {
+                    visit(row)?;
+                    work.vectors_loaded += 1;
+                }
                 visited += 1;
                 if visited == samples {
                     break;
@@ -246,8 +292,29 @@ impl Scope<'_> {
             }
             available += 1;
         }
+        if !keys.is_empty() {
+            work.vectors_loaded +=
+                visit_samples(&mut vectors, self.model, width, &keys, &mut visit)?;
+        }
         Ok(())
     }
+}
+
+fn visit_samples(
+    vectors: &mut Statement<'_>,
+    model: &str,
+    width: i64,
+    keys: &[(i64, i64)],
+    mut visit: impl FnMut(&Row<'_>) -> Result<()>,
+) -> Result<usize> {
+    let mut rows = vectors.query(params![model, serde_json::to_string(keys)?, width])?;
+    let mut loaded = 0;
+    while let Some(row) = rows.next()? {
+        visit(row)?;
+        loaded += 1;
+    }
+    ensure!(loaded == keys.len(), "sampled vector disappeared");
+    Ok(loaded)
 }
 
 fn decode<'a>(row: &Row<'_>, width: usize, buffer: &'a mut Vec<f32>) -> Result<&'a [f32]> {

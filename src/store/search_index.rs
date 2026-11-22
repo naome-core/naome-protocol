@@ -1,6 +1,7 @@
 mod cache;
 mod extract;
 mod rank;
+mod text;
 mod vectors;
 
 use self::rank::{SemanticQuery, VectorWork, rank};
@@ -15,7 +16,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use cache::{INDEX_VERSION, coverage, prepared_cache_available};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use std::collections::BTreeSet;
 use vectors::{embed_query, missing_vectors};
 
@@ -45,25 +46,42 @@ struct IndexedRecord {
 struct IndexedSection {
     sources: BTreeSet<Id>,
     passages: Vec<Passage>,
+    pending_text: Option<u64>,
 }
 
 impl Archive {
-    /// Resolve an explicit head, or use the most recently saved or imported inventory.
+    /// Resolve an explicit head, the pinned search head, or the latest registered inventory.
     pub fn search_head(&self, head: Option<Id>) -> Result<Snapshot> {
         let head = match head {
             Some(head) => head,
             None => self
                 .db
                 .query_row(
-                    "SELECT id FROM heads ORDER BY rowid DESC LIMIT 1",
+                    "SELECT coalesce(
+                        (SELECT head FROM rep_search_selection WHERE singleton=1),
+                        (SELECT id FROM heads ORDER BY rowid DESC LIMIT 1)
+                    )",
                     [],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
+                    |row| row.get::<_, Option<String>>(0),
+                )?
                 .context("no archive snapshot; create one with snapshot or specify --head")?
                 .parse()?,
         };
         self.head(head)
+    }
+
+    /// Pin a search snapshot independently of cache preparation. None restores the default.
+    pub fn set_search_head(&self, head: Option<Id>) -> Result<()> {
+        if let Some(head) = head {
+            self.head(head)?;
+            self.db.execute(
+                "INSERT OR REPLACE INTO rep_search_selection VALUES(1,?)",
+                [head.to_string()],
+            )?;
+        } else {
+            self.db.execute("DELETE FROM rep_search_selection", [])?;
+        }
+        Ok(())
     }
 
     /// Clear one snapshot's derived search data. The next search rebuilds it.
@@ -207,8 +225,10 @@ impl Archive {
             semantic_index_complete: None,
             vector_budget_exhausted: false,
             vector_products: 0,
+            vector_rows_examined: 0,
+            vector_rows_loaded: 0,
             limited_coverage: false,
-            query_limited: limited || (options.mode == SearchMode::Lexical && text.len() > 1),
+            query_limited: limited,
             hits: Vec::new(),
         };
 
@@ -297,7 +317,7 @@ impl Archive {
         let candidates = rank(
             &read,
             &head,
-            query,
+            &text,
             options,
             model_key
                 .as_deref()
@@ -312,6 +332,8 @@ impl Archive {
         )?;
         report.vector_budget_exhausted = work.bounded;
         report.vector_products = work.products;
+        report.vector_rows_examined = work.rows_examined;
+        report.vector_rows_loaded = work.vectors_loaded;
         for candidate in candidates {
             let Ok(document) = self.read(snapshot, candidate.id, "read") else {
                 report.limited_coverage = true;
@@ -339,7 +361,7 @@ impl Archive {
                 None
             } else {
                 let Some(snippet) = self
-                    .search_snippet(snapshot, candidate.id, &document, &location)
+                    .search_snippet(snapshot, &document, &location)
                     .ok()
                     .flatten()
                 else {

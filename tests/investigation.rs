@@ -17,7 +17,7 @@ fn ambiguous_execution_survives_restart_and_shared_reservations() -> Result<()> 
     let dir = tempdir()?;
     let path = dir.path().join("state");
     let a = Archive::open(&path)?;
-    a.resource("samples", 1)?;
+    a.resource("samples", 3)?;
     let f = Format::A;
     let key = fixture::fixture_key(17);
     let trusted = BTreeSet::from([hex::encode(key.verifying_key().to_bytes())]);
@@ -27,7 +27,7 @@ fn ambiguous_execution_survives_restart_and_shared_reservations() -> Result<()> 
         Kind::Authority,
         "sample",
         "lab",
-        json!({"actor":"station","operation":"observe","valid":[10,20],"ceilings":{"samples":1}}),
+        json!({"actor":"station","operation":"observe","valid":[10,20],"ceilings":{"samples":2}}),
         vec![],
     )?;
     let sig = fixture::sign(&a, f, auth, "lab", "executor", 17)?;
@@ -53,8 +53,23 @@ fn ambiguous_execution_survives_restart_and_shared_reservations() -> Result<()> 
         costs: BTreeMap::from([("samples".into(), 1)]),
     };
     let second = decision("2")?;
+    let legacy = Request {
+        attempt: "legacy".into(),
+        decision: decision("legacy")?,
+        ..serde_json::from_slice(&serde_json::to_vec(&req)?)?
+    };
     let s = a.snapshot("station", BTreeSet::new())?;
     drop(a);
+    let old = rusqlite::Connection::open(&path)?;
+    old.execute(
+        "UPDATE limits SET capacity=capacity-1 WHERE resource='samples'",
+        [],
+    )?;
+    old.execute(
+        "INSERT INTO attempts VALUES(?,?,'execution-unknown',NULL)",
+        rusqlite::params![legacy.attempt, serde_json::to_vec(&legacy)?],
+    )?;
+    drop(old);
     let mut a = Archive::open(&path)?;
     assert!(a.reserve(&s, &req, &trusted, 21).is_err());
     // General read access does not grant the public authority required for dispatch.
@@ -95,7 +110,10 @@ fn ambiguous_execution_survives_restart_and_shared_reservations() -> Result<()> 
     ));
     req.decision = second;
     req.attempt = "2".into();
-    assert!(a.reserve(&s, &req, &trusted, 13).is_err());
+    assert_eq!(
+        a.reserve(&s, &req, &trusted, 13).unwrap_err().to_string(),
+        "authority quota exceeded"
+    );
     Ok(())
 }
 

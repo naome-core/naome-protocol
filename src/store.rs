@@ -77,6 +77,7 @@ impl Archive {
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;
         CREATE TABLE IF NOT EXISTS objects(id TEXT PRIMARY KEY, data BLOB, access TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS heads(id TEXT PRIMARY KEY, manifest BLOB NOT NULL);
+        CREATE TABLE IF NOT EXISTS rep_search_selection(singleton INTEGER PRIMARY KEY CHECK(singleton=1), head TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS releases(head TEXT PRIMARY KEY REFERENCES heads(id));
         CREATE TABLE IF NOT EXISTS suspended_releases(head TEXT PRIMARY KEY REFERENCES releases(head));
         CREATE VIEW IF NOT EXISTS available_releases AS SELECT head FROM releases EXCEPT SELECT head FROM suspended_releases;

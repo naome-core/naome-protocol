@@ -98,30 +98,23 @@ impl Archive {
             "decision mismatch"
         );
         let max: BTreeMap<String, u64> = a.field("ceilings")?;
-        let mut spent = BTreeMap::<String, u64>::new();
-        {
-            let mut stmt = tx.prepare("SELECT request FROM attempts")?;
-            for row in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
-                let prior: Request = serde_json::from_slice(&row?)?;
-                if prior.authority == r.authority {
-                    for (unit, cost) in prior.costs {
-                        let n = spent.entry(unit).or_default();
-                        *n = n.checked_add(cost).context("quota overflow")?;
-                    }
-                }
-            }
-        }
         let revoked: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM revocations WHERE authority=?)",
             [r.authority.to_string()],
             |row| row.get(0),
         )?;
         ensure!(!revoked, "authority revoked");
+        initialize_attempt_spend(&tx)?;
+        let mut spent = tx.prepare_cached(
+            "SELECT spent FROM rep_attempt_spend WHERE authority=? AND resource=?",
+        )?;
+        let authority = r.authority.to_string();
         for (unit, &cost) in &r.costs {
-            let total = spent
-                .get(unit)
-                .copied()
-                .unwrap_or(0)
+            let prior: i64 = spent
+                .query_row(params![authority, unit], |row| row.get(0))
+                .optional()?
+                .unwrap_or(0);
+            let total = u64::try_from(prior)?
                 .checked_add(cost)
                 .context("quota overflow")?;
             ensure!(
@@ -137,6 +130,7 @@ impl Archive {
                 "shared resource unavailable"
             );
         }
+        drop(spent);
         tx.execute(
             "INSERT INTO attempts VALUES(?,?,'execution-unknown',NULL)",
             params![r.attempt, bytes],
@@ -200,4 +194,35 @@ impl Archive {
         }
         Ok(())
     }
+}
+
+// Build the aggregate once from the authoritative attempts. SQLite maintains it
+// for every new attempt, including writes made by an older REP binary.
+fn initialize_attempt_spend(tx: &Transaction<'_>) -> Result<()> {
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='rep_attempt_spend')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        tx.execute_batch(
+            "CREATE TABLE rep_attempt_spend(
+                authority TEXT NOT NULL,
+                resource TEXT NOT NULL,
+                spent INTEGER NOT NULL CHECK(typeof(spent)='integer' AND spent>=0),
+                PRIMARY KEY(authority,resource)
+             ) WITHOUT ROWID;
+             INSERT INTO rep_attempt_spend
+                SELECT json_extract(CAST(request AS TEXT),'$.authority'),cost.key,sum(cost.value)
+                FROM attempts,json_each(CAST(request AS TEXT),'$.costs') AS cost
+                GROUP BY 1,2;
+             CREATE TRIGGER rep_attempt_spend_insert AFTER INSERT ON attempts BEGIN
+                INSERT INTO rep_attempt_spend
+                  SELECT json_extract(CAST(NEW.request AS TEXT),'$.authority'),cost.key,cost.value
+                  FROM json_each(CAST(NEW.request AS TEXT),'$.costs') AS cost WHERE true
+                  ON CONFLICT(authority,resource) DO UPDATE SET spent=spent+excluded.spent;
+             END;",
+        )?;
+    }
+    Ok(())
 }

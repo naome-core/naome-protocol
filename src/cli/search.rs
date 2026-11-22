@@ -27,7 +27,7 @@ pub struct FindArguments {
     /// MIME type of --input. Defaults to the filename extension or UTF-8 content.
     #[arg(long, requires = "input")]
     media_type: Option<String>,
-    /// Search this snapshot. Defaults to the most recently saved or imported snapshot.
+    /// Search this snapshot. Defaults to the active search snapshot.
     #[arg(long)]
     head: Option<Id>,
     /// Defaults to hybrid when a local model is configured, otherwise lexical.
@@ -65,7 +65,7 @@ pub struct FindArguments {
 
 #[derive(Args, Serialize, Deserialize)]
 pub struct PrepareSearchArguments {
-    /// Prepare this snapshot. Defaults to the most recently saved or imported snapshot.
+    /// Prepare this snapshot. Defaults to the active search snapshot.
     #[arg(long)]
     head: Option<Id>,
     /// Maximum records and passages to prepare in this invocation.

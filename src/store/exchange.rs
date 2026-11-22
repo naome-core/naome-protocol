@@ -5,12 +5,14 @@ use crate::{
     wire::{Id, MAX_BYTES},
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::params;
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     io::{BufReader, Read},
 };
+
+mod stream;
 
 #[cfg(test)]
 mod tests;
@@ -136,20 +138,10 @@ impl Archive {
             last = Some(id);
             examined += 1;
             used += reserved;
-            if purpose == "train"
-                && !self
-                    .explain(s, &[id], purpose, s.objects.len(), 48)
-                    .frontier
-                    .is_empty()
-            {
+            if let Some(packet) = self.exchange_packet(s, id, purpose) {
+                packets.push(packet);
+            } else {
                 omitted.insert(id);
-                continue;
-            }
-            match self.packet(s, id, purpose) {
-                Ok(packet) => packets.push(packet),
-                Err(_) => {
-                    omitted.insert(id);
-                }
             }
         }
         Ok(Bundle {
@@ -160,31 +152,54 @@ impl Archive {
             continuation,
         })
     }
+    fn exchange_packet(&self, s: &Snapshot, id: Id, purpose: &str) -> Option<Packet> {
+        if purpose == "train"
+            && !self
+                .explain(s, &[id], purpose, s.objects.len(), 48)
+                .frontier
+                .is_empty()
+        {
+            return None;
+        }
+        self.packet(s, id, purpose).ok()
+    }
+
     pub fn import(&mut self, b: &Bundle) -> Result<Id> {
-        ensure!(
-            b.snapshot.version == 1
-                && !b.snapshot.source.is_empty()
-                && b.head == b.snapshot.id()?,
-            "invalid bundle head"
-        );
+        verify_head(b.head, &b.snapshot)?;
         let tx = self.db.transaction()?;
         let mut ids = b.omitted.clone();
         let mut bytes = Vec::new();
         for p in &b.packets {
-            ensure!(
-                ids.insert(p.id) && p.hex.len() <= 2 * MAX_BYTES,
-                "duplicate or oversized packet"
-            );
-            decode_packet_hex(&p.hex, &mut bytes)?;
-            validate(p.id, &bytes, p.access)?;
-            insert(&tx, p.id, &bytes, p.access)?;
+            ensure!(ids.insert(p.id), "duplicate packet");
+            add_packet(&tx, p, &mut bytes)?;
         }
         ensure!(ids == b.snapshot.objects, "inventory mismatch");
-        tx.execute(
-            "INSERT OR IGNORE INTO heads VALUES(?,?)",
-            params![b.head.to_string(), serde_json::to_vec(&b.snapshot)?],
-        )?;
+        save_head(&tx, b.head, &b.snapshot)?;
         tx.commit()?;
         Ok(b.head)
     }
+}
+
+fn verify_head(head: Id, snapshot: &Snapshot) -> Result<()> {
+    ensure!(
+        snapshot.version == 1 && !snapshot.source.is_empty() && snapshot.id()? == head,
+        "invalid bundle head"
+    );
+    Ok(())
+}
+
+fn add_packet(db: &Connection, packet: &Packet, bytes: &mut Vec<u8>) -> Result<()> {
+    ensure!(packet.hex.len() <= 2 * MAX_BYTES, "oversized packet");
+    decode_packet_hex(&packet.hex, bytes)?;
+    validate(packet.id, bytes, packet.access)?;
+    insert(db, packet.id, bytes, packet.access)?;
+    Ok(())
+}
+
+fn save_head(db: &Connection, head: Id, snapshot: &Snapshot) -> Result<()> {
+    db.execute(
+        "INSERT OR IGNORE INTO heads VALUES(?,?)",
+        params![head.to_string(), serde_json::to_vec(snapshot)?],
+    )?;
+    Ok(())
 }

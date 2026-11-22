@@ -1,4 +1,7 @@
-use super::{Dependencies, IndexedRecord, IndexedSection, Passage};
+use super::{
+    Dependencies, IndexedRecord, IndexedSection, Passage,
+    text::{MAX_TEXT_BYTES, Utf8Check, payload_passages},
+};
 use crate::{
     profile::{Document, Kind, allows},
     search::{MAX_MEDIA_BYTES, MediaSpan, SearchLocation, media_type, native_media, text_media},
@@ -6,6 +9,7 @@ use crate::{
     wire::Id,
 };
 use anyhow::Result;
+use caseless::Caseless;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 use std::{collections::BTreeSet, ops::Range};
@@ -15,10 +19,10 @@ use unicode_segmentation::UnicodeSegmentation;
 const MAX_PAYLOAD: u64 = 256 * 1024;
 const MAX_FIELDS: usize = 64;
 const MAX_FIELD_BYTES: usize = 4096;
-const PASSAGE_BYTES: usize = 768;
+pub(super) const PASSAGE_BYTES: usize = 768;
 
 pub(super) fn normalize(text: &str) -> String {
-    text.nfkc().flat_map(char::to_lowercase).collect()
+    text.nfkc().default_case_fold().nfkc().collect()
 }
 
 pub(super) fn terms(normalized: &str) -> BTreeSet<&str> {
@@ -205,35 +209,14 @@ impl Archive {
         let mut sections = vec![IndexedSection {
             sources: dependencies.available.clone(),
             passages,
+            pending_text: None,
         }];
         let mut cacheable = true;
         if descriptor {
             let media = media_type(&document.subject);
             if text_media(media) {
-                let mut data = Vec::new();
-                let payload = document
-                    .materialize(MAX_PAYLOAD, &mut data, |id| {
-                        self.search_source(snapshot, id, &mut dependencies)
-                    })
-                    .and_then(|_| Ok(String::from_utf8(data)?));
-                match payload {
-                    Ok(text) => {
-                        let passages = ranges(&text)
-                            .map(|range| Passage {
-                                text: text[range.clone()].to_owned(),
-                                location: SearchLocation::Payload {
-                                    start: range.start,
-                                    end: range.end,
-                                },
-                                priority: 0,
-                                semantic: true,
-                            })
-                            .collect();
-                        sections.push(IndexedSection {
-                            sources: dependencies.available,
-                            passages,
-                        });
-                    }
+                match self.search_text(snapshot, &document, &mut dependencies) {
+                    Ok(section) => sections.push(section),
                     Err(_) => {
                         limited = true;
                         cacheable = false;
@@ -253,6 +236,7 @@ impl Archive {
                             priority: 0,
                             semantic: true,
                         }],
+                        pending_text: None,
                     }),
                     _ => {
                         limited = true;
@@ -270,6 +254,34 @@ impl Archive {
             limited,
             cacheable,
         }
+    }
+
+    fn search_text(
+        &self,
+        snapshot: &Snapshot,
+        document: &Document,
+        dependencies: &mut Dependencies,
+    ) -> Result<IndexedSection> {
+        let length: u64 = document.field("length")?;
+        let mut resolve = |id| self.search_source(snapshot, id, dependencies);
+        let (passages, pending_text) = if length <= MAX_PAYLOAD {
+            let mut bytes = Vec::new();
+            document.materialize(MAX_PAYLOAD, &mut bytes, &mut resolve)?;
+            (
+                payload_passages(std::str::from_utf8(&bytes)?, 0).collect(),
+                None,
+            )
+        } else {
+            let mut utf8 = Utf8Check::default();
+            document.materialize(MAX_TEXT_BYTES, &mut utf8, &mut resolve)?;
+            utf8.finish()?;
+            (Vec::new(), Some(length))
+        };
+        Ok(IndexedSection {
+            sources: dependencies.available.clone(),
+            passages,
+            pending_text,
+        })
     }
 
     fn media_dependencies(
@@ -366,7 +378,6 @@ impl Archive {
     pub(super) fn search_snippet(
         &self,
         snapshot: &Snapshot,
-        id: Id,
         document: &Document,
         location: &SearchLocation,
     ) -> Result<Option<String>> {
@@ -384,11 +395,8 @@ impl Archive {
                     .and_then(|text| text.get(*start..*end).map(str::to_owned))
             }
             SearchLocation::Payload { start, end } => {
-                let mut bytes = Vec::new();
-                self.materialize(snapshot, id, "read", MAX_PAYLOAD, &mut bytes)?;
-                std::str::from_utf8(&bytes)?
-                    .get(*start..*end)
-                    .map(str::to_owned)
+                let bytes = self.read_verified_text_span(snapshot, document, *start..*end)?;
+                Some(String::from_utf8(bytes)?)
             }
         })
     }
