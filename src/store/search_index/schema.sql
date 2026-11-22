@@ -83,6 +83,7 @@ CREATE TABLE rep_search_vectors(
     PRIMARY KEY(passage,model,part),
     FOREIGN KEY(passage,model) REFERENCES rep_search_vector_state(passage,model) ON DELETE CASCADE
 ) WITHOUT ROWID;
+CREATE INDEX rep_search_vector_keys ON rep_search_vectors(passage,model,part);
 CREATE TRIGGER rep_search_object_arrival AFTER INSERT ON objects
 BEGIN
     UPDATE rep_search_revision SET value=value+1;

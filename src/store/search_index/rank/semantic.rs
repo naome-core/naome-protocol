@@ -1,7 +1,7 @@
 use super::SemanticQuery;
 use crate::{search::SearchOptions, wire::Id};
-use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, Row, params};
+use anyhow::{Result, ensure};
+use rusqlite::{Connection, Row, Statement, params};
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BTreeMap, BinaryHeap},
@@ -16,13 +16,17 @@ pub(in super::super) struct VectorWork {
     pub(in super::super) vectors_loaded: usize,
 }
 
-const SCOPE: &str = "
-    FROM rep_search_visibility visible INDEXED BY rep_search_visibility_order
-    CROSS JOIN rep_search_entries e ON e.id=visible.entry
-    CROSS JOIN rep_search_passages p INDEXED BY rep_search_passages_entry ON p.entry=e.id
-    CROSS JOIN rep_search_vectors v ON v.passage=p.id AND v.model=?2
-    WHERE visible.head=?1
-      AND (?3 IS NULL OR e.kind=?3) AND (?4 IS NULL OR e.subject=?4) AND (?5 IS NULL OR e.scope=?5)";
+fn scope_sql(vector_index: &str) -> String {
+    format!("FROM rep_search_visibility visible INDEXED BY rep_search_visibility_order
+        CROSS JOIN rep_search_entries e ON e.id=visible.entry
+        CROSS JOIN rep_search_passages p INDEXED BY rep_search_passages_entry ON p.entry=e.id
+        CROSS JOIN rep_search_vectors v {vector_index} ON v.passage=p.id AND v.model=?2
+        WHERE visible.head=?1
+          AND (?3 IS NULL OR e.kind=?3) AND (?4 IS NULL OR e.subject=?4) AND (?5 IS NULL OR e.scope=?5)")
+}
+
+const COVERING_VECTORS: &str = "INDEXED BY rep_search_vector_keys";
+const SAMPLE_BATCH: usize = 128;
 
 struct Scope<'a> {
     db: &'a Connection,
@@ -204,8 +208,8 @@ fn shortlist(
 
 impl Scope<'_> {
     fn count(&self) -> Result<usize> {
-        let count: i64 = self.db.query_row(
-            &format!("SELECT count(*) {SCOPE}"),
+        let sql = format!("SELECT count(*) {}", scope_sql(COVERING_VECTORS));
+        let count: i64 = self.db.prepare_cached(&sql)?.query_row(
             params![
                 self.head,
                 self.model,
@@ -233,23 +237,36 @@ impl Scope<'_> {
         // only for sampled rows, even when the eligible inventory is large.
         let sparse = samples < count;
         let width = (width * 4) as i64;
+        let (columns, index) = if sparse {
+            ("p.id,v.part", COVERING_VECTORS)
+        } else {
+            ("e.object,p.id,p.location,v.part,substr(v.vector,1,?6)", "")
+        };
         let sql = format!(
-            "SELECT e.object,p.id,p.location,v.part,CASE WHEN ?6>0 THEN substr(v.vector,1,?6) END
-             {SCOPE} ORDER BY visible.object,visible.section,p.location,v.part",
+            "SELECT {columns} {} ORDER BY visible.object,visible.section,p.location,v.part",
+            scope_sql(index)
         );
         let mut statement = self.db.prepare_cached(&sql)?;
-        let mut rows = statement.query(params![
-            self.head,
-            self.model,
-            self.options.kind.map(|kind| kind as i64),
-            self.options.subject,
-            self.options.scope,
-            if sparse { 0 } else { width }
-        ])?;
-        let mut vector = self.db.prepare_cached(
-            "SELECT ?3,?2,?4,?5,substr(vector,1,?6) FROM rep_search_vectors
-             WHERE model=?1 AND passage=?2 AND part=?5",
+        let kind = self.options.kind.map(|kind| kind as i64);
+        let bound: [&dyn rusqlite::ToSql; 6] = [
+            &self.head,
+            &self.model,
+            &kind,
+            &self.options.subject,
+            &self.options.scope,
+            &width,
+        ];
+        let mut rows = statement.query(&bound[..if sparse { 5 } else { 6 }])?;
+        let mut vectors = self.db.prepare_cached(
+            "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?3)
+             FROM json_each(?2) sample
+             CROSS JOIN rep_search_vectors v ON v.model=?1
+                AND v.passage=json_extract(sample.value,'$[0]')
+                AND v.part=json_extract(sample.value,'$[1]')
+             CROSS JOIN rep_search_passages p ON p.id=v.passage
+             CROSS JOIN rep_search_entries e ON e.id=p.entry ORDER BY sample.key",
         )?;
+        let mut keys = Vec::with_capacity(SAMPLE_BATCH);
         let mut available = 0;
         let mut visited = 0;
         while let Some(row) = rows.next()? {
@@ -258,19 +275,16 @@ impl Scope<'_> {
                 == (((2 * visited as u128 + 1) * count as u128) / (2 * samples as u128)) as usize
             {
                 if sparse {
-                    let mut values = vector.query(params![
-                        self.model,
-                        row.get::<_, i64>(1)?,
-                        row.get_ref(0)?.as_str()?,
-                        row.get_ref(2)?.as_str()?,
-                        row.get::<_, i64>(3)?,
-                        width,
-                    ])?;
-                    visit(values.next()?.context("sampled vector disappeared")?)?;
+                    keys.push((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?));
+                    if keys.len() == SAMPLE_BATCH {
+                        work.vectors_loaded +=
+                            visit_samples(&mut vectors, self.model, width, &keys, &mut visit)?;
+                        keys.clear();
+                    }
                 } else {
                     visit(row)?;
+                    work.vectors_loaded += 1;
                 }
-                work.vectors_loaded += 1;
                 visited += 1;
                 if visited == samples {
                     break;
@@ -278,8 +292,29 @@ impl Scope<'_> {
             }
             available += 1;
         }
+        if !keys.is_empty() {
+            work.vectors_loaded +=
+                visit_samples(&mut vectors, self.model, width, &keys, &mut visit)?;
+        }
         Ok(())
     }
+}
+
+fn visit_samples(
+    vectors: &mut Statement<'_>,
+    model: &str,
+    width: i64,
+    keys: &[(i64, i64)],
+    mut visit: impl FnMut(&Row<'_>) -> Result<()>,
+) -> Result<usize> {
+    let mut rows = vectors.query(params![model, serde_json::to_string(keys)?, width])?;
+    let mut loaded = 0;
+    while let Some(row) = rows.next()? {
+        visit(row)?;
+        loaded += 1;
+    }
+    ensure!(loaded == keys.len(), "sampled vector disappeared");
+    Ok(loaded)
 }
 
 fn decode<'a>(row: &Row<'_>, width: usize, buffer: &'a mut Vec<f32>) -> Result<&'a [f32]> {
