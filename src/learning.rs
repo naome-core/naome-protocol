@@ -687,6 +687,7 @@ impl Archive {
                 })
         };
         let mut dependents = BTreeMap::<Id, Vec<Id>>::new();
+        let mut excluded_uses = BTreeSet::new();
         let mut direct = BTreeSet::new();
         for (&id, d) in &docs {
             if matches!(
@@ -721,7 +722,7 @@ impl Archive {
                     _ => false,
                 };
                 if excluded {
-                    continue;
+                    excluded_uses.insert(id);
                 }
             }
             // Claims and arguments can themselves be reported before any
@@ -730,6 +731,7 @@ impl Archive {
                 && initial.contains(&id)
                 && matches!(d.kind, Kind::Argument | Kind::Claim)
                 && d.scope == n.scope
+                && !excluded_uses.contains(&id)
             {
                 direct.insert(id);
             }
@@ -748,16 +750,26 @@ impl Archive {
                 dependents.entry(edge.target).or_default().push(id);
             }
         }
+        let mut reached_without_impact = BTreeSet::new();
         let mut affected = initial.clone();
         let mut pending: Vec<_> = initial.iter().copied().collect();
         while let Some(id) = pending.pop() {
+            let propagates = affected.contains(&id);
             if let Some(children) = dependents.get(&id) {
-                pending.extend(
-                    children
-                        .iter()
-                        .copied()
-                        .filter(|&child| affected.insert(child)),
-                );
+                for &child in children {
+                    // An unaffected use can still carry premises into another
+                    // argument, which evaluates them in its own context.
+                    let newly_reached = if !excluded_uses.contains(&child)
+                        && (propagates || docs[&child].kind == Kind::Argument)
+                    {
+                        affected.insert(child)
+                    } else {
+                        !affected.contains(&child) && reached_without_impact.insert(child)
+                    };
+                    if newly_reached {
+                        pending.push(child);
+                    }
+                }
             }
         }
         let mut by_kind: BTreeMap<String, BTreeSet<Id>> = BTreeMap::new();

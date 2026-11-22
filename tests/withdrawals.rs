@@ -339,6 +339,88 @@ fn scoped_withdrawal_preserves_other_measurement_modes_and_events() -> Result<()
 }
 
 #[test]
+fn scoped_withdrawal_reaches_delegated_use_of_an_unaffected_receipt() -> Result<()> {
+    for format in [Format::A, Format::B] {
+        let archive = Archive::memory()?;
+        let case = fixture::seed(&archive, format)?;
+        let query = threshold_query(&archive, &case, format)?;
+        let radial = measurement_at(&archive, &case, &query, format, "radial", 4)?;
+        fixture::sign(
+            &archive,
+            format,
+            radial.arguments[0],
+            SCOPE,
+            "data-origin",
+            7,
+        )?;
+        let measured = archive.snapshot("radial evidence", Default::default())?;
+        let original = assess(&archive, &measured, &radial)?;
+        assert_eq!(original.result, Some(Standing::Supported));
+        let receipt = deposit_receipt(&archive, &measured, &radial, &original, format)?;
+        fixture::sign(&archive, format, receipt, SCOPE, "assessor", 4)?;
+        let signed = archive.snapshot("signed radial receipt", [measured.id()?].into())?;
+        let radial_label = archive.label(&signed, receipt, "synthetic", None, None, format)?;
+
+        let argument = put(
+            &archive,
+            format,
+            Kind::Argument,
+            SUBJECT,
+            SCOPE,
+            json!({"method":"delegated"}),
+            vec![link("claim", radial.target), link("receipt", receipt)],
+        )?;
+        let delegated = Query {
+            arguments: vec![argument],
+            ..radial.clone()
+        };
+        let before = archive.snapshot("delegated radial receipt", [measured.id()?].into())?;
+        let original_delegate = assess(&archive, &before, &delegated)?;
+        assert_eq!(original_delegate.result, Some(Standing::Supported));
+        let delegated_receipt =
+            deposit_receipt(&archive, &before, &delegated, &original_delegate, format)?;
+
+        let notice = signed_withdrawal(
+            &archive,
+            format,
+            case.calibration,
+            json!({"mode":"axial","interval":[3,5]}),
+        )?;
+        let after = archive.snapshot("axial withdrawal", [before.id()?].into())?;
+        let radial_recheck = assess(&archive, &after, &radial)?;
+        assert_eq!(radial_recheck.result, Some(Standing::Supported));
+        assert!(!radial_recheck.applicable_notices.contains(&notice));
+        let delegated_recheck = assess(&archive, &after, &delegated)?;
+        assert_eq!(delegated_recheck.result, Some(Standing::Unresolved));
+        assert!(
+            delegated_recheck
+                .checks
+                .iter()
+                .any(|check| { check.status == Status::Unknown && check.inputs.contains(&notice) })
+        );
+
+        let impact = archive.impact(&after, notice, &[], after.objects.len())?;
+        assert!(impact.frontier.is_empty());
+        assert!(
+            impact
+                .by_kind
+                .get("argument")
+                .is_some_and(|ids| ids.contains(&argument))
+        );
+        assert!(!impact.by_kind["argument"].contains(&radial.arguments[0]));
+        assert!(impact.by_kind["assessment"].contains(&delegated_receipt));
+        assert!(!impact.by_kind["assessment"].contains(&receipt));
+        assert!(
+            !impact
+                .by_kind
+                .get("label")
+                .is_some_and(|ids| ids.contains(&radial_label))
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn direct_withdrawal_routes_affected_claims_and_arguments_without_a_prior_receipt() -> Result<()> {
     for format in [Format::A, Format::B] {
         let archive = Archive::memory()?;
