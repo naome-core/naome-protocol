@@ -175,6 +175,88 @@ fn paged_exchange_converges_on_the_same_inventory() -> Result<()> {
 }
 
 #[test]
+fn offline_selection_and_exchange_support_payloads_above_the_network_limit() -> Result<()> {
+    use naome_protocol::store::sharing::MAX_MEMBER_BYTES;
+
+    let source = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let bytes = vec![1; MAX_MEMBER_BYTES + 1];
+    let selected = source.blob(&bytes, public)?;
+    let unrelated = source.blob(b"unrelated", public)?;
+    let snapshot = source.selected_snapshot("offline", BTreeSet::new(), [selected].into())?;
+    assert!(!snapshot.objects.contains(&unrelated));
+
+    let mut receiver = Archive::memory()?;
+    let head = receiver.import(&source.export(&snapshot, "read")?)?;
+    assert_eq!(
+        receiver.resolve(&receiver.head(head)?, selected, "read")?,
+        bytes
+    );
+    for archive in [&source, &receiver] {
+        let err = archive.release(head).unwrap_err();
+        assert!(err.to_string().contains("network limit"), "{err}");
+        assert!(archive.observed_releases()?.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn migration_exports_only_the_paired_inventories_and_mapping_evidence() -> Result<()> {
+    for (source_format, target_format) in [(Format::A, Format::B), (Format::B, Format::A)] {
+        let archive = Archive::memory()?;
+        let public = Id::blob(PUBLIC);
+        let raw = archive.blob(b"selected source bytes", public)?;
+        let root = archive.document(
+            &Document::new(
+                Kind::Question,
+                "fixture",
+                "scope",
+                json!({"question":"what?"}),
+                vec![link("evidence", raw)],
+            )?,
+            source_format,
+            public,
+        )?;
+        let source = archive.selected_snapshot("scoped source", BTreeSet::new(), [root].into())?;
+        let unrelated = archive.blob(b"other local evidence", public)?;
+        let other_root = archive.document(
+            &Document::new(
+                Kind::Question,
+                "other",
+                "scope",
+                json!({"question":"unrelated"}),
+                vec![link("evidence", unrelated)],
+            )?,
+            source_format,
+            public,
+        )?;
+
+        let migration = archive.migrate(&source, target_format, "custodian")?;
+        let exchange = archive.head(migration.exchange_head)?;
+        assert_eq!(migration.pairs.len(), 1);
+        assert_eq!(migration.pairs[&root].format(), Some(target_format));
+        let bundle = archive.export(&exchange, "read")?;
+        for unrelated in [unrelated, other_root] {
+            assert!(!bundle.snapshot.objects.contains(&unrelated));
+            assert!(!bundle.packets.iter().any(|packet| packet.id == unrelated));
+            assert!(!bundle.omitted.contains(&unrelated));
+        }
+        let mut recipient = Archive::memory()?;
+        let head = recipient.import(&bundle)?;
+        let received = recipient.head(head)?;
+        assert_eq!(
+            recipient.verify_mapping(&received, migration.mapping)?,
+            migration.pairs
+        );
+        assert_eq!(
+            recipient.resolve(&received, raw, "read")?,
+            b"selected source bytes"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn unavailable_dependencies_are_retained_without_blocking_other_translations() -> Result<()> {
     let a = Archive::memory()?;
     let public = Id::blob(PUBLIC);

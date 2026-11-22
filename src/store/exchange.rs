@@ -7,7 +7,13 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, io::Read};
+use std::{
+    collections::BTreeSet,
+    io::{BufReader, Read},
+};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,11 +35,16 @@ pub struct Bundle {
 impl Bundle {
     /// Decode one offline exchange packet within the import byte budget.
     pub fn read(reader: impl Read) -> Result<Self> {
-        const LIMIT: usize = 256 * 1024 * 1024;
-        let mut bytes = Vec::new();
-        reader.take(LIMIT as u64 + 1).read_to_end(&mut bytes)?;
-        ensure!(bytes.len() <= LIMIT, "exchange byte limit");
-        Ok(serde_json::from_slice(&bytes)?)
+        Self::read_bounded(reader, 256 * 1024 * 1024)
+    }
+
+    fn read_bounded(reader: impl Read, limit: u64) -> Result<Self> {
+        let mut limited = reader.take(limit + 1);
+        let bundle = serde_json::from_reader(BufReader::new(&mut limited));
+        // The parser checks through EOF, including trailing whitespace. Reading
+        // the sentinel byte distinguishes a valid file at the limit from a prefix.
+        ensure!(limited.limit() > 0, "exchange byte limit");
+        Ok(bundle?)
     }
 }
 

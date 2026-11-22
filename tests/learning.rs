@@ -140,6 +140,54 @@ fn prior_release_receipts_must_replay_before_their_labels_can_be_used() -> Resul
 }
 
 #[test]
+fn released_v012_receipt_replays_with_its_original_withdrawal_semantics() -> Result<()> {
+    // Exported by tag v0.1.2 (c546fba6ed08403c045b3438fd7ad446de258c5f).
+    // The query requires an axial withdrawal, and the reading is radial.
+    #[derive(serde::Deserialize)]
+    struct Vector {
+        bundle: naome_protocol::store::Bundle,
+        receipt: Id,
+        request: TrainingRequest,
+    }
+
+    let mut vector: Vector =
+        serde_json::from_str(include_str!("fixtures/rep-v0.1.2-required-withdrawal.json"))?;
+    let mut archive = Archive::memory()?;
+    let head = archive.import(&vector.bundle)?;
+    assert_eq!(head, vector.request.label_head);
+    let label = vector.request.examples[0].label;
+    let view = archive.head(head)?;
+    let receipt = archive.read(&view, vector.receipt, "read")?;
+    assert_eq!(receipt.fields["evaluator"], json!("rep-rust-0.1.2"));
+    let original: evaluation::Receipt = receipt.field("original_transcript")?;
+    assert_eq!(original.result, Some(Standing::Unresolved));
+    assert!(!original.horizon_complete);
+    assert!(
+        original
+            .obligations
+            .contains("required notice applicability unknown")
+    );
+
+    let replay = archive.training_manifest(&vector.request, Format::A)?;
+    assert_eq!(replay.included, [label]);
+    assert!(replay.withheld.is_empty());
+
+    let horizon = archive.head(receipt.one("snapshot")?)?;
+    let query: Query = receipt.field("original_query")?;
+    let current = evaluation::assess(&archive, &horizon, &query)?;
+    assert!(current.horizon_complete);
+    assert_eq!(current.result, Some(Standing::Supported));
+    vector.request.standing = naome_protocol::learning::LabelStanding::Current;
+    let extraction = archive.training_manifest(&vector.request, Format::A)?;
+    assert!(extraction.included.is_empty());
+    assert_eq!(
+        extraction.withheld[&label],
+        "label requires reassessment at the requested notice horizon"
+    );
+    Ok(())
+}
+
+#[test]
 fn training_reuses_inventories_without_widening_query_budgets() -> Result<()> {
     let archive = Archive::memory()?;
     let format = Format::A;

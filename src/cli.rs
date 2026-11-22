@@ -83,7 +83,7 @@ pub enum ArchiveCommand {
         source: String,
         #[arg(long)]
         parent: Vec<Id>,
-        /// Select an object and its transitive inputs for release. Repeat for multiple roots.
+        /// Select an object and its transitive inputs. Repeat for multiple roots.
         #[arg(long)]
         root: Vec<Id>,
     },

@@ -250,6 +250,49 @@ impl Archive {
         self.save(&s)?;
         Ok(s)
     }
+    /// Seal the readable forward dependency closure of explicitly selected objects.
+    pub fn selected_snapshot(
+        &self,
+        source: &str,
+        parents: BTreeSet<Id>,
+        roots: BTreeSet<Id>,
+    ) -> Result<Snapshot> {
+        ensure!(!roots.is_empty(), "no snapshot roots selected");
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let mut pending: Vec<_> = roots.iter().copied().collect();
+        let mut objects = roots;
+        while let Some(id) = pending.pop() {
+            let (bytes, access) = self
+                .raw(id)?
+                .context("selected object or dependency is unavailable")?;
+            self.check_access(access, |policy| crate::profile::allows(policy, "read"))?;
+            let record = id
+                .format()
+                .map(|format| Record::decode(&bytes, format))
+                .transpose()?;
+            // Blob access is custody metadata outside the hashed payload. Record
+            // inputs also carry the profile and each ordered evidence reference.
+            for dependency in std::iter::once(access).chain(record.iter().flat_map(Record::inputs))
+            {
+                if objects.insert(dependency) {
+                    pending.push(dependency);
+                }
+            }
+        }
+        let snapshot = Snapshot {
+            version: 1,
+            source: source.into(),
+            parents,
+            objects,
+        };
+        self.save(&snapshot)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
     pub fn save(&self, s: &Snapshot) -> Result<Id> {
         ensure!(s.version == 1 && !s.source.is_empty(), "invalid snapshot");
         let bytes = serde_json::to_vec(s)?;

@@ -339,6 +339,57 @@ fn scoped_withdrawal_preserves_other_measurement_modes_and_events() -> Result<()
 }
 
 #[test]
+fn direct_withdrawal_routes_affected_claims_and_arguments_without_a_prior_receipt() -> Result<()> {
+    for format in [Format::A, Format::B] {
+        let archive = Archive::memory()?;
+        let case = fixture::seed(&archive, format)?;
+        let mut before = archive.head(case.s0)?;
+        let query = threshold_query(&archive, &case, format)?;
+        let argument = query.arguments[0];
+        before.objects.insert(query.policy);
+        assert_eq!(
+            assess(&archive, &before, &query)?.result,
+            Some(Standing::Supported)
+        );
+
+        for (target, kind, mode, affected) in [
+            (argument, "argument", "axial", true),
+            (query.target, "claim", "axial", true),
+            (argument, "argument", "radial", false),
+        ] {
+            let notice = signed_withdrawal(&archive, format, target, json!({"mode":mode}))?;
+            let signature = fixture::sign(&archive, format, notice, SCOPE, "notice", 9)?;
+            let mut after = before.clone();
+            after.objects.extend([notice, signature]);
+            let impact = archive.impact(&after, notice, &[], after.objects.len())?;
+            assert!(impact.frontier.is_empty());
+            assert_eq!(
+                impact
+                    .by_kind
+                    .get(kind)
+                    .is_some_and(|ids| ids.contains(&target)),
+                affected
+            );
+
+            let required = Query {
+                required_notices: vec![notice],
+                ..query.clone()
+            };
+            let assessed = assess(&archive, &after, &required)?;
+            assert!(assessed.horizon_complete);
+            assert_eq!(assessed.applicable_notices.contains(&notice), affected);
+            let expected = if affected {
+                Standing::Unresolved
+            } else {
+                Standing::Supported
+            };
+            assert_eq!(assessed.result, Some(expected));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn correction_evidence_withdrawals_use_the_measurement_context() -> Result<()> {
     let archive = Archive::memory()?;
     let format = Format::B;

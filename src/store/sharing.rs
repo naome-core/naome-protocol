@@ -4,7 +4,7 @@ use crate::{
     profile::{Document, Kind, PROFILE, verify_attestation},
     wire::{Id, Record},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use rusqlite::{Transaction, TransactionBehavior};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -242,56 +242,6 @@ impl Archive {
         self.register_release(head, &self.head(head)?)?;
         tx.commit()?;
         Ok(())
-    }
-
-    /// Seal the readable forward dependency closure of explicitly selected objects.
-    pub fn selected_snapshot(
-        &self,
-        source: &str,
-        parents: BTreeSet<Id>,
-        roots: BTreeSet<Id>,
-    ) -> Result<Snapshot> {
-        ensure!(
-            (1..=MAX_MEMBERS).contains(&roots.len()),
-            "invalid number of release roots"
-        );
-        let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-        let mut pending: Vec<_> = roots.iter().copied().collect();
-        let mut objects = roots;
-        let mut total = 0;
-        while let Some(id) = pending.pop() {
-            self.account_member(id, &mut total)?;
-            let (bytes, access) = self
-                .raw(id)?
-                .context("selected object or dependency is unavailable")?;
-            self.check_access(access, |policy| crate::profile::allows(policy, "read"))?;
-            let record = id
-                .format()
-                .map(|format| Record::decode(&bytes, format))
-                .transpose()?;
-            // Blob access is custody metadata outside the hashed payload. Record
-            // inputs also carry the profile and each ordered evidence reference.
-            for dependency in std::iter::once(access).chain(record.iter().flat_map(Record::inputs))
-            {
-                if objects.insert(dependency) {
-                    ensure!(
-                        objects.len() <= MAX_MEMBERS,
-                        "selected release exceeds member limit"
-                    );
-                    pending.push(dependency);
-                }
-            }
-        }
-        let snapshot = Snapshot {
-            version: 1,
-            source: source.into(),
-            parents,
-            objects,
-        };
-        check_manifest(snapshot.id()?, &snapshot)?;
-        self.save(&snapshot)?;
-        tx.commit()?;
-        Ok(snapshot)
     }
 
     fn account_member(&self, id: Id, total: &mut usize) -> Result<()> {

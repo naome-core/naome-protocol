@@ -77,19 +77,17 @@ fn only_released_readable_members_are_served_and_mirrors_preserve_rights() -> Re
 }
 
 #[test]
-fn selection_rejects_denied_unavailable_and_oversized_dependencies() -> Result<()> {
+fn selection_rejects_denied_and_unavailable_dependencies() -> Result<()> {
     let archive = Archive::memory()?;
     let public = Id::blob(PUBLIC);
     let private = archive.blob(br#"{"purposes":[],"version":1}"#, public)?;
     let denied = archive.blob(b"private reading", private)?;
     let erased = archive.blob(b"erased reading", public)?;
     archive.withdraw(erased)?;
-    let oversized = archive.blob(&vec![0; MAX_MEMBER_BYTES + 1], public)?;
     for (dependency, reason) in [
         (denied, "use withheld"),
         (erased, "unavailable"),
         (Id::blob(b"never deposited"), "unavailable"),
-        (oversized, "network limit"),
     ] {
         let record = profile::Document::new(
             profile::Kind::Occurrence,

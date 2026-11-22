@@ -687,6 +687,7 @@ impl Archive {
                 })
         };
         let mut dependents = BTreeMap::<Id, Vec<Id>>::new();
+        let mut direct = BTreeSet::new();
         for (&id, d) in &docs {
             if matches!(
                 d.kind,
@@ -723,6 +724,15 @@ impl Archive {
                     continue;
                 }
             }
+            // Claims and arguments can themselves be reported before any
+            // assessment or other record links them to a downstream use.
+            if !calibration
+                && initial.contains(&id)
+                && matches!(d.kind, Kind::Argument | Kind::Claim)
+                && d.scope == n.scope
+            {
+                direct.insert(id);
+            }
             for edge in &d.inputs {
                 if initial.contains(&edge.target)
                     && let Some((mode, [first, last])) = &correction
@@ -751,7 +761,7 @@ impl Archive {
             }
         }
         let mut by_kind: BTreeMap<String, BTreeSet<Id>> = BTreeMap::new();
-        for id in affected.difference(&initial) {
+        for id in affected.difference(&initial).chain(&direct) {
             if let Some(d) = docs.get(id) {
                 by_kind
                     .entry(
