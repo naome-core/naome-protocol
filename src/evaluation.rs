@@ -1,8 +1,11 @@
+pub(crate) mod correction;
 mod inventory;
 mod measurement;
 mod science;
+use correction::{
+    MeasurementUse, Notice, WithdrawalApplicability, WithdrawalChecks, WithdrawalRules,
+};
 pub(crate) use inventory::ReadInventory;
-pub(crate) use measurement::MeasurementUse;
 use measurement::Predicate;
 
 use crate::{
@@ -91,21 +94,19 @@ pub struct Receipt {
     pub frontier: BTreeSet<Id>,
 }
 impl Receipt {
-    pub(crate) fn excludes_withdrawal_for(&self, notice: Id, target: Id) -> bool {
-        self.excludes_withdrawal(|check| {
-            check.inputs.first() == Some(&notice)
-                && check
-                    .inputs
-                    .get(2..)
-                    .is_some_and(|targets| targets.contains(&target))
-        })
-    }
-
-    fn excludes_withdrawal(&self, matches: impl Fn(&Check) -> bool) -> bool {
+    // The existing evaluator could also match a named signed test when a
+    // historical query listed a non-notice ID in required_notices.
+    fn legacy_excludes_non_notice(&self, endpoints: &BTreeSet<Id>) -> bool {
         let mut checks = self
             .checks
             .iter()
-            .filter(|check| check.test == WITHDRAWAL_APPLICABILITY && matches(check))
+            .filter(|check| {
+                check.test == WITHDRAWAL_APPLICABILITY
+                    && check
+                        .inputs
+                        .first()
+                        .is_some_and(|id| endpoints.contains(id))
+            })
             .peekable();
         checks.peek().is_some() && checks.all(|check| check.status == Status::NotApplicable)
     }
@@ -124,13 +125,6 @@ impl Receipt {
         self.obligations.insert(reason.into());
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WithdrawalRules {
-    ScopeOnly,
-    FirstScoped,
-    Scoped,
-}
-
 struct EvaluatorRules {
     ids: &'static [&'static str],
     withdrawal: WithdrawalRules,
@@ -215,17 +209,16 @@ impl Evaluation<'_> {
         premises: &BTreeSet<Id>,
         measurement: MeasurementUse<'_>,
         out: &mut Receipt,
+        withdrawals: &mut WithdrawalChecks,
     ) -> Result<bool> {
         let mut open = false;
         for &id in &self.inventory.notices {
             let n = &self.inventory.documents[&id];
-            if n.scope != scope {
+            let notice = Notice(n);
+            if !notice.in_scope(scope) {
                 continue;
             }
-            let targets: Vec<_> = n
-                .roles("target")
-                .filter(|&target| !self.aliases.endpoints(target).is_disjoint(premises))
-                .collect();
+            let targets: Vec<_> = notice.matching_targets(&self.aliases, premises).collect();
             if targets.is_empty() {
                 continue;
             }
@@ -242,16 +235,17 @@ impl Evaluation<'_> {
             ensure!(!reason.is_empty(), "missing notice reason");
             let action: String = n.field("action")?;
             if self.withdrawal_rules != WithdrawalRules::ScopeOnly && action == "withdraw" {
-                let first_scoped = self.withdrawal_rules == WithdrawalRules::FirstScoped;
                 let mut inputs = vec![id, signature];
-                if !first_scoped {
+                if self.withdrawal_rules != WithdrawalRules::FirstScoped {
                     // Identify the targets checked for this use, including when only some
                     // targets of a notice occur in the warrant.
-                    inputs.extend(targets);
+                    inputs.extend(targets.iter().copied());
                 }
-                match measurement.within_withdrawal(n, first_scoped) {
-                    Ok(true) => {}
-                    Ok(false) => {
+                let applicability = notice.withdrawal(scope, measurement, self.withdrawal_rules);
+                withdrawals.record(id, &targets, &applicability);
+                match applicability {
+                    WithdrawalApplicability::Applies => {}
+                    WithdrawalApplicability::Excluded => {
                         out.check(
                             WITHDRAWAL_APPLICABILITY,
                             Status::NotApplicable,
@@ -260,7 +254,7 @@ impl Evaluation<'_> {
                         );
                         continue;
                     }
-                    Err(error) => {
+                    WithdrawalApplicability::Unknown(error) => {
                         out.unknown(WITHDRAWAL_APPLICABILITY, &error.to_string(), &inputs);
                         open = true;
                         continue;
@@ -371,9 +365,10 @@ impl Evaluation<'_> {
         a: &Document,
         id: Id,
         out: &mut Receipt,
+        withdrawals: &mut WithdrawalChecks,
     ) -> Result<Vec<Standing>> {
         match a.field::<String>("method")?.as_str() {
-            "simultaneous-bounds" => self.measurement(c, a, out),
+            "simultaneous-bounds" => self.measurement(c, a, out, withdrawals),
             "signed-tests" => self.signed_tests(c, a, out),
             "typed-outcome" => {
                 ensure!(
@@ -468,12 +463,7 @@ impl Evaluation<'_> {
                 for (notice_id, n) in &self.inventory.documents {
                     if n.kind == Kind::Notice
                         && !original_view.objects.contains(notice_id)
-                        && n.inputs.iter().any(|l| {
-                            self.aliases
-                                .endpoints(l.target)
-                                .iter()
-                                .any(|x| lineage.visited.contains(x))
-                        })
+                        && Notice(n).refers_to(&self.aliases, &lineage.visited)
                     {
                         bail!("delegated receipt requires reassessment after a later notice");
                     }
@@ -506,7 +496,13 @@ pub(crate) fn assess_for_evaluator(
     q: &Query,
     evaluator: &str,
 ) -> Result<Receipt> {
-    assess_with_inventory(store, s, q, evaluator, &mut ReadInventory::default())
+    Ok(assess_with_inventory(store, s, q, evaluator, &mut ReadInventory::default())?.receipt)
+}
+
+#[derive(Default)]
+pub(crate) struct Assessment {
+    pub(crate) receipt: Receipt,
+    pub(crate) withdrawals: WithdrawalChecks,
 }
 
 pub(crate) fn assess_with_inventory(
@@ -515,13 +511,15 @@ pub(crate) fn assess_with_inventory(
     q: &Query,
     evaluator: &str,
     inventory: &mut ReadInventory,
-) -> Result<Receipt> {
+) -> Result<Assessment> {
     let rules = REPLAY_RULES
         .iter()
         .find(|rules| rules.ids.contains(&evaluator))
         .context("unsupported receipt evaluator")?;
     let withdrawal_rules = rules.withdrawal;
-    let mut out = Receipt::default();
+    let mut assessment = Assessment::default();
+    let out = &mut assessment.receipt;
+    let withdrawals = &mut assessment.withdrawals;
     let target = store.read(s, q.target, "read");
     let score = target
         .as_ref()
@@ -542,7 +540,7 @@ pub(crate) fn assess_with_inventory(
             "unsupported query policy"
         );
         out.dependencies.extend([q.target, q.policy]);
-        inventory.search(store, s, q, &mut out)?;
+        inventory.search(store, s, q, out)?;
         let mut aliases = Equivalence::default();
         for &mapping in &q.mappings {
             aliases.add(store.verify_mapping(s, mapping)?);
@@ -600,10 +598,10 @@ pub(crate) fn assess_with_inventory(
                 )
                 .unwrap_or_default();
                 ensure!(
-                    !view.challenged(&c.scope, &premises.visited, measurement, &mut out)?,
+                    !view.challenged(&c.scope, &premises.visited, measurement, out, withdrawals)?,
                     "argument under an admitted notice"
                 );
-                view.warrant(&c, a, arg, &mut out)
+                view.warrant(&c, a, arg, out, withdrawals)
             })();
             match result {
                 Ok(results) => {
@@ -620,12 +618,11 @@ pub(crate) fn assess_with_inventory(
             let applies = !endpoints.is_disjoint(&out.applicable_notices);
             let excluded = rules.resolve_required_withdrawals
                 && out.frontier.is_empty()
-                && out.excludes_withdrawal(|check| {
-                    check
-                        .inputs
-                        .first()
-                        .is_some_and(|id| endpoints.contains(id))
-                });
+                && if view.inventory.notices.is_disjoint(&endpoints) {
+                    out.legacy_excludes_non_notice(&endpoints)
+                } else {
+                    withdrawals.excludes_notice(&endpoints)
+                };
             ensure!(applies || excluded, "required notice applicability unknown");
         }
         if let Some(now) = q.current_at {
@@ -681,7 +678,7 @@ pub(crate) fn assess_with_inventory(
     if let Err(e) = run {
         out.unknown("query completeness", &e.to_string(), &[q.target, q.policy]);
     }
-    Ok(out)
+    Ok(assessment)
 }
 pub fn deposit_receipt(
     store: &Archive,
