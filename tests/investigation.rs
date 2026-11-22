@@ -99,15 +99,14 @@ fn ambiguous_execution_survives_restart_and_shared_reservations() -> Result<()> 
     Ok(())
 }
 
-#[test]
-fn capture_compute_close_and_retry_without_redispatch() -> Result<()> {
-    let mut a = Archive::memory()?;
-    let f = Format::B;
-    let public = Id::blob(PUBLIC);
-    let bytes = b"abcabcab";
-    let descriptor = a.capture(&bytes[..], "text/plain", 3, public, f)?;
+fn payload_check_request(
+    archive: &Archive,
+    f: Format,
+    descriptor: Id,
+    attempt: &str,
+) -> Result<Request> {
     let question = put(
-        &a,
+        archive,
         f,
         Kind::Question,
         "sample",
@@ -116,7 +115,7 @@ fn capture_compute_close_and_retry_without_redispatch() -> Result<()> {
         vec![],
     )?;
     let plan = put(
-        &a,
+        archive,
         f,
         Kind::Plan,
         "sample",
@@ -124,27 +123,121 @@ fn capture_compute_close_and_retry_without_redispatch() -> Result<()> {
         json!({"planned_count":1,"stopping":"one-payload","predicate":"exact-bytes"}),
         vec![link("descriptor", descriptor), link("question", question)],
     )?;
-    let key = fixture::fixture_key(8);
-    let keys = [hex::encode(key.verifying_key().to_bytes())].into();
     let auth = put(
-        &a,
+        archive,
         f,
         Kind::Authority,
         "sample",
         "session",
-        json!({"actor":"analyst","operation":"verify-payload","valid":[0,100],"ceilings":{"bytes":8}}),
+        json!({"actor":"analyst","operation":"verify-payload","valid":[0,100],"ceilings":{"bytes":16}}),
         vec![],
     )?;
-    let sig = fixture::sign(&a, f, auth, "session", "executor", 8)?;
+    let sig = fixture::sign(archive, f, auth, "session", "executor", 8)?;
     let d = put(
-        &a,
+        archive,
         f,
         Kind::Decision,
         "sample",
         "session",
-        json!({"attempt":"capture-1","operation":"verify-payload"}),
+        json!({"attempt":attempt,"operation":"verify-payload"}),
         vec![link("authority", auth), link("plan", plan)],
     )?;
+    Ok(Request {
+        attempt: attempt.into(),
+        actor: "analyst".into(),
+        subject: "sample".into(),
+        operation: "verify-payload".into(),
+        decision: d,
+        authority: auth,
+        signature: sig,
+        costs: [("bytes".into(), 8)].into(),
+    })
+}
+
+#[test]
+fn capture_rolls_back_when_a_chunk_has_been_withdrawn() -> Result<()> {
+    let dir = tempdir()?;
+    let db = dir.path().join("archive.sqlite");
+    let mut archive = Archive::open(&db)?;
+    let public = Id::blob(PUBLIC);
+    let retired = archive.blob(b"ret", public)?;
+    let original =
+        archive.selected_snapshot("original chunk", BTreeSet::new(), [retired].into())?;
+    let bundle = archive.export(&original, "read")?;
+    archive.withdraw(retired)?;
+    let before = archive.snapshot("before capture", BTreeSet::new())?;
+
+    let err = archive
+        .capture(&b"newret"[..], "text/plain", 3, public, Format::A)
+        .unwrap_err();
+    assert!(err.to_string().contains("locally withdrawn chunk"), "{err}");
+    assert!(err.to_string().contains(&retired.to_string()));
+    archive.import(&bundle)?;
+    drop(archive);
+
+    let archive = Archive::open(&db)?;
+    let after = archive.snapshot("after failed capture", BTreeSet::new())?;
+    assert_eq!(after.objects, before.objects);
+    assert!(!after.objects.contains(&Id::blob(b"new")));
+    assert!(archive.resolve(&original, retired, "read").is_err());
+    Ok(())
+}
+
+#[test]
+fn retry_returns_a_not_executed_readback_after_reopening() -> Result<()> {
+    let dir = tempdir()?;
+    let db = dir.path().join("archive.sqlite");
+    let mut a = Archive::open(&db)?;
+    let f = Format::A;
+    let descriptor = a.capture(&b"abcabcab"[..], "text/plain", 3, Id::blob(PUBLIC), f)?;
+    let request = payload_check_request(&a, f, descriptor, "original")?;
+    let follow_up = payload_check_request(&a, f, descriptor, "follow-up")?;
+    assert_eq!(request.authority, follow_up.authority);
+    let key = fixture::fixture_key(8);
+    let keys = [hex::encode(key.verifying_key().to_bytes())].into();
+    a.resource("bytes", 16)?;
+
+    let before = a.snapshot("fixture", BTreeSet::new())?;
+    assert_eq!(a.reserve(&before, &request, &keys, 50)?, Dispatch::Reserved);
+    let witness = put(
+        &a,
+        f,
+        Kind::Occurrence,
+        "sample",
+        "session",
+        json!({"attempt":"original","execution":"not-executed"}),
+        vec![link("decision", request.decision)],
+    )?;
+    let signature = fixture::sign(&a, f, witness, "session", "readback", 8)?;
+    let head = a.snapshot("readback", [before.id()?].into())?;
+    a.reconcile_attempt(&head, &request.attempt, witness, signature, &keys)?;
+    drop(a);
+
+    let mut a = Archive::open(&db)?;
+    for now in [51, 52] {
+        let retry = a.execute_payload_check(&before, &request, &keys, &key, now, f)?;
+        assert_eq!(retry.state, "not-executed");
+        assert_eq!(retry.occurrence, Some(witness));
+        assert!(retry.closure.is_none());
+    }
+    assert_eq!(
+        a.snapshot("after retry", BTreeSet::new())?.objects,
+        head.objects
+    );
+    assert_eq!(a.reserve(&head, &follow_up, &keys, 53)?, Dispatch::Reserved);
+    Ok(())
+}
+
+#[test]
+fn capture_compute_close_and_retry_without_redispatch() -> Result<()> {
+    let mut a = Archive::memory()?;
+    let f = Format::B;
+    let public = Id::blob(PUBLIC);
+    let bytes = b"abcabcab";
+    let descriptor = a.capture(&bytes[..], "text/plain", 3, public, f)?;
+    let req = payload_check_request(&a, f, descriptor, "capture-1")?;
+    let key = fixture::fixture_key(8);
+    let keys = [hex::encode(key.verifying_key().to_bytes())].into();
     a.resource("bytes", 8)?;
     let s = a.snapshot("fixture", BTreeSet::new())?;
     let mut output = vec![];
@@ -167,16 +260,6 @@ fn capture_compute_close_and_retry_without_redispatch() -> Result<()> {
         )
         .is_err()
     );
-    let req = Request {
-        attempt: "capture-1".into(),
-        actor: "analyst".into(),
-        subject: "sample".into(),
-        operation: "verify-payload".into(),
-        decision: d,
-        authority: auth,
-        signature: sig,
-        costs: [("bytes".into(), 8)].into(),
-    };
     let first = a.execute_payload_check(&s, &req, &keys, &key, 50, f)?;
     assert_eq!(first.state, "observed");
     let closed = first.closure.unwrap();

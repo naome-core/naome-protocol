@@ -177,7 +177,7 @@ impl Archive {
             );
             decode_packet_hex(&p.hex, &mut bytes)?;
             validate(p.id, &bytes, p.access)?;
-            insert(&tx, p.id, &bytes, p.access)?
+            insert(&tx, p.id, &bytes, p.access)?;
         }
         ensure!(ids == b.snapshot.objects, "inventory mismatch");
         tx.execute(

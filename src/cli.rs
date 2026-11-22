@@ -282,6 +282,8 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 "profile": Id::blob(profile::PROFILE),
                 "measurement_profile": Id::blob(profile::MEASUREMENT_PROFILE),
                 "public": public,
+                "receipt_evaluator": evaluation::EVALUATOR_ID,
+                "replay_evaluators": evaluation::replay_evaluator_ids().collect::<Vec<_>>(),
                 "evaluators": ["simultaneous-bounds","certified-hull","signed-tests","typed-outcome","delegated","recorded-difference","least-zero","domain-inclusion","source-independence","sample-description","survey-identification","unit-grid-map"],
             }));
         }

@@ -1,6 +1,6 @@
 use crate::{
     profile::{Document, Kind, link},
-    store::{Archive, Snapshot},
+    store::{Archive, ObjectAvailability, Snapshot},
     wire::{Format, Id, MAX_BYTES},
 };
 use anyhow::{Context, Result, ensure};
@@ -44,8 +44,13 @@ impl Archive {
                 chunks.len() < 16_384,
                 "chunk manifest limit; use larger chunks"
             );
-            digest.update(&buf[..count]);
-            let id = self.blob(&buf[..count], access)?;
+            let chunk = &buf[..count];
+            let (id, availability) = self.store_blob(chunk, access)?;
+            ensure!(
+                availability == ObjectAvailability::Available,
+                "payload contains a locally withdrawn chunk {id}"
+            );
+            digest.update(chunk);
             let mut e = link("chunk", id);
             e.qualifier = offset.to_string();
             chunks.push(e);

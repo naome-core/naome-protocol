@@ -22,7 +22,7 @@ Use `rep put` for typed research documents and `rep assess` for a policy-bound r
 
 ## Bootstrap and exchange
 
-The two pinned kits include canonical decoding rules, reference handling and six vectors each. Obtain the expected SHA-256 digest through a trusted channel, then run `rep kit FILE DIGEST`. `rep capabilities` prints the versions and digests built into this implementation. [Format A](spec/kits/A.json) · [Format B](spec/kits/B.json) · [Research profile](spec/kits/research-profile.txt) · [Paired measurement profile](spec/kits/measurement-profile-v1.txt)
+The two pinned kits include canonical decoding rules, reference handling and six vectors each. Obtain the expected SHA-256 digest through a trusted channel, then run `rep kit FILE DIGEST`. `rep capabilities` prints the supported formats, kit digests, active receipt evaluator and accepted replay identifiers. [Format A](spec/kits/A.json) · [Format B](spec/kits/B.json) · [Research profile](spec/kits/research-profile.txt) · [Paired measurement profile](spec/kits/measurement-profile-v1.txt)
 
 A stores the typed envelope as deterministic CBOR. B uses a canonical tagged JSON encoding. Re-encoding creates a new record identifier. A verified migration binds the exact old and new records and their dependencies. The migration exchange includes the paired inventories and mapping evidence. Detached signatures continue to name their original bytes. Legacy JSON-body records and typed measurements can coexist in the same archive.
 

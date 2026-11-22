@@ -131,6 +131,42 @@ pub(crate) enum WithdrawalRules {
     Scoped,
 }
 
+struct EvaluatorRules {
+    ids: &'static [&'static str],
+    withdrawal: WithdrawalRules,
+    resolve_required_withdrawals: bool,
+}
+
+const REPLAY_RULES: &[EvaluatorRules] = &[
+    EvaluatorRules {
+        ids: &[RULES_V1],
+        withdrawal: WithdrawalRules::Scoped,
+        resolve_required_withdrawals: true,
+    },
+    EvaluatorRules {
+        ids: &["rep-rust-0.1.2", "rep-rust-0.1.2-dev.1"],
+        withdrawal: WithdrawalRules::Scoped,
+        resolve_required_withdrawals: false,
+    },
+    EvaluatorRules {
+        ids: &[FIRST_SCOPED_EVALUATOR_ID],
+        withdrawal: WithdrawalRules::FirstScoped,
+        resolve_required_withdrawals: false,
+    },
+    EvaluatorRules {
+        ids: &[V0_1_0_EVALUATOR_ID, "rep-rust-0.1.1"],
+        withdrawal: WithdrawalRules::ScopeOnly,
+        resolve_required_withdrawals: false,
+    },
+];
+
+#[cfg(feature = "cli")]
+pub(crate) fn replay_evaluator_ids() -> impl Iterator<Item = &'static str> {
+    REPLAY_RULES
+        .iter()
+        .flat_map(|rules| rules.ids.iter().copied())
+}
+
 pub struct Evaluation<'a> {
     store: &'a Archive,
     s: &'a Snapshot,
@@ -480,13 +516,11 @@ pub(crate) fn assess_with_inventory(
     evaluator: &str,
     inventory: &mut ReadInventory,
 ) -> Result<Receipt> {
-    let (withdrawal_rules, resolve_required_withdrawals) = match evaluator {
-        RULES_V1 => (WithdrawalRules::Scoped, true),
-        "rep-rust-0.1.2" | "rep-rust-0.1.2-dev.1" => (WithdrawalRules::Scoped, false),
-        FIRST_SCOPED_EVALUATOR_ID => (WithdrawalRules::FirstScoped, false),
-        V0_1_0_EVALUATOR_ID | "rep-rust-0.1.1" => (WithdrawalRules::ScopeOnly, false),
-        _ => bail!("unsupported receipt evaluator"),
-    };
+    let rules = REPLAY_RULES
+        .iter()
+        .find(|rules| rules.ids.contains(&evaluator))
+        .context("unsupported receipt evaluator")?;
+    let withdrawal_rules = rules.withdrawal;
     let mut out = Receipt::default();
     let target = store.read(s, q.target, "read");
     let score = target
@@ -584,7 +618,7 @@ pub(crate) fn assess_with_inventory(
         for &notice in &q.required_notices {
             let endpoints = view.aliases.endpoints(notice);
             let applies = !endpoints.is_disjoint(&out.applicable_notices);
-            let excluded = resolve_required_withdrawals
+            let excluded = rules.resolve_required_withdrawals
                 && out.frontier.is_empty()
                 && out.excludes_withdrawal(|check| {
                     check
