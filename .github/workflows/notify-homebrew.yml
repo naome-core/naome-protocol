@@ -1,0 +1,32 @@
+name: Notify Homebrew tap
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  dispatch:
+    if: >-
+      github.repository == 'naome-core/naome-protocol' &&
+      ((github.event_name == 'release' && !github.event.release.prerelease) ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Create a token scoped to the Homebrew tap
+        id: tap-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.NAOME_TAP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.NAOME_TAP_APP_PRIVATE_KEY }}
+          owner: naome-core
+          repositories: homebrew-tap
+          permission-actions: write
+
+      - name: Start the Homebrew release sync
+        env:
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
+        run: gh workflow run sync-releases.yml --repo naome-core/homebrew-tap --ref main
