@@ -453,7 +453,7 @@ pub(crate) fn assess_for_evaluator(
     evaluator: &str,
 ) -> Result<Receipt> {
     let withdrawal_rules = match evaluator {
-        EVALUATOR_ID => WithdrawalRules::Scoped,
+        EVALUATOR_ID | "rep-rust-0.1.2-dev.1" => WithdrawalRules::Scoped,
         FIRST_SCOPED_EVALUATOR_ID => WithdrawalRules::FirstScoped,
         V0_1_0_EVALUATOR_ID | "rep-rust-0.1.1" => WithdrawalRules::ScopeOnly,
         _ => bail!("unsupported receipt evaluator"),

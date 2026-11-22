@@ -98,6 +98,8 @@ fn prior_release_receipts_must_replay_before_their_labels_can_be_used() -> Resul
         ("rep-rust-0.1.1", true, false),
         ("rep-rust-0.1.2-dev", false, true),
         ("rep-rust-0.1.2-dev", true, false),
+        ("rep-rust-0.1.2-dev.1", false, true),
+        ("rep-rust-0.1.2-dev.1", true, false),
         ("unknown-evaluator", false, false),
     ] {
         let mut receipt = original.clone();
