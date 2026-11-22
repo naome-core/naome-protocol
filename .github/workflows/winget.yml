@@ -29,6 +29,32 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Update WinGet to support the catalog manifest schema
+        shell: powershell
+        run: |
+          $release = 'https://github.com/microsoft/winget-cli/releases/download/v1.29.380'
+          $assets = @{
+            'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle' = '65DEA9C01CE08EE7B763366B27C0E651F97DB857C11CA9B9C301826C10092F2E'
+            'DesktopAppInstaller_Dependencies.zip' = 'BA875AFE9D190F61218985AC0292A99D1DB710BF93E13C68944CA9D89F0D82D1'
+          }
+          Push-Location $env:RUNNER_TEMP
+          try {
+            foreach ($asset in $assets.Keys) {
+              curl.exe --fail --silent --show-error --location --retry 3 "$release/$asset" --output $asset
+              if ($LASTEXITCODE -ne 0) {
+                throw "Unable to download $asset."
+              }
+              if ((Get-FileHash -LiteralPath $asset).Hash -ne $assets[$asset]) {
+                throw "Unexpected SHA-256 for $asset."
+              }
+            }
+            Expand-Archive -LiteralPath 'DesktopAppInstaller_Dependencies.zip' -DestinationPath 'winget-dependencies'
+            $dependencies = (Get-ChildItem 'winget-dependencies/x64/*.appx').FullName
+            Add-AppxPackage -Path 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle' -DependencyPath $dependencies
+          } finally {
+            Pop-Location
+          }
+
       - name: Test the portable package
         shell: pwsh
         run: ./tools/ci/test_winget.ps1
