@@ -14,6 +14,7 @@ jobs:
       ((github.event_name == 'release' && !github.event.release.prerelease) ||
        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
+    environment: homebrew-release
     timeout-minutes: 5
     steps:
       - name: Create a token scoped to the Homebrew tap
