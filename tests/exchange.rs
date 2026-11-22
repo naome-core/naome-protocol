@@ -292,3 +292,39 @@ fn unavailable_dependencies_are_retained_without_blocking_other_translations() -
     assert!(!pairs.contains_key(&scoped));
     Ok(())
 }
+
+#[test]
+fn streaming_exchange_preserves_identity_omissions_and_atomic_import() -> Result<()> {
+    let source = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let private = source.blob(br#"{"purposes":["custody"],"version":1}"#, public)?;
+    let withheld = source.blob(b"withheld content", private)?;
+    let payload = source.blob(b"permitted content", public)?;
+    let snapshot = source.snapshot("streaming", BTreeSet::new())?;
+    let mut stream = Vec::new();
+    let count = source.export_stream(&snapshot, "read", &mut stream)?;
+    assert_eq!(count, source.export(&snapshot, "read")?.packets.len());
+    let mut recipient = Archive::memory()?;
+    assert!(
+        recipient
+            .import_stream(&stream[..stream.len() - 5])
+            .is_err()
+    );
+    assert!(recipient.head(snapshot.id()?).is_err());
+    assert!(
+        recipient
+            .selected_snapshot("probe", BTreeSet::new(), [payload].into())
+            .is_err()
+    );
+    let head = recipient.import_stream(stream.as_slice())?;
+    assert_eq!(head, snapshot.id()?);
+    let received = recipient.head(head)?;
+    assert_eq!(received.objects, snapshot.objects);
+    assert_eq!(
+        recipient.resolve(&received, payload, "read")?,
+        b"permitted content"
+    );
+    assert!(recipient.resolve(&received, withheld, "read").is_err());
+    assert_eq!(recipient.import_stream(stream.as_slice())?, head);
+    Ok(())
+}

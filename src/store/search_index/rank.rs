@@ -57,7 +57,7 @@ pub(super) struct SemanticQuery<'a> {
 pub(super) fn rank(
     db: &Connection,
     head: &str,
-    query: &str,
+    queries: &[&str],
     options: SearchOptions<'_>,
     semantic: Option<SemanticQuery<'_>>,
     work: &mut VectorWork,
@@ -65,9 +65,10 @@ pub(super) fn rank(
     let bound = (options.limit * 4).max(40);
     let mut candidates = BTreeMap::new();
     if options.mode != SearchMode::Semantic {
-        for (rank, (id, passage, strength, exact_key)) in lexical(db, head, query, options, bound)?
-            .into_iter()
-            .enumerate()
+        for (rank, (id, passage, strength, exact_key)) in
+            lexical(db, head, queries, options, bound)?
+                .into_iter()
+                .enumerate()
         {
             candidates.insert(
                 id,
@@ -129,39 +130,58 @@ pub(super) fn rank(
 fn lexical(
     db: &Connection,
     head: &str,
-    query: &str,
+    queries: &[&str],
     options: SearchOptions<'_>,
     bound: usize,
 ) -> Result<Vec<(Id, i64, f64, bool)>> {
-    let query = normalize(query);
-    let terms = terms(&query);
-    if terms.is_empty() {
+    let queries: Vec<_> = queries
+        .iter()
+        .filter_map(|raw| {
+            let query = normalize(raw);
+            let tokens = terms(&query);
+            (!tokens.is_empty()).then(|| {
+                serde_json::json!({
+                    "text": query, "raw": raw, "tokens": tokens
+                })
+            })
+        })
+        .collect();
+    if queries.is_empty() {
         return Ok(Vec::new());
     }
     let mut statement = db.prepare_cached(
-        "WITH scored AS (
-            SELECT e.object,p.id,p.location,COUNT(*) AS matches,instr(p.normalized,?3)>0 AS exact,
-                   p.priority>=2 AND instr(' '||p.normalized||' ', ' '||?3||' ')>0 AS exact_key,
-                   COUNT(*)*4+p.priority+2*(instr(p.normalized,?3)>0) AS score
-            FROM json_each(?2) token
+        "WITH queries AS (
+            SELECT key,json_extract(value,'$.text') AS text,json_extract(value,'$.raw') AS raw,
+                json_extract(value,'$.tokens') AS tokens,json_array_length(value,'$.tokens') AS size
+            FROM json_each(?2)
+        ), scored AS (
+            SELECT e.object,p.id,p.location,
+                   1.0*COUNT(*)/q.size AS fraction,
+                   instr(p.normalized,q.text)>0 AS exact,
+                   p.priority>=2 AND instr(' '||p.normalized||' ', ' '||q.text||' ')>0 AS exact_key,
+                   p.priority>=2 AND instr(' '||p.text||' ', ' '||q.raw||' ')>0 AS exact_original,
+                   COUNT(*)*4+p.priority+2*(instr(p.normalized,q.text)>0) AS score
+            FROM queries q JOIN json_each(q.tokens) token
             JOIN rep_search_terms t ON t.term=token.value
             JOIN rep_search_passages p ON p.id=t.passage
             JOIN rep_search_entries e ON e.id=p.entry
             JOIN rep_search_visibility visible ON visible.entry=e.id AND visible.head=?1
-            WHERE (?4 IS NULL OR e.kind=?4) AND (?5 IS NULL OR e.subject=?5) AND (?6 IS NULL OR e.scope=?6)
-            GROUP BY p.id
+            WHERE (?3 IS NULL OR e.kind=?3) AND (?4 IS NULL OR e.subject=?4) AND (?5 IS NULL OR e.scope=?5)
+            GROUP BY q.key,p.id
         ), ordered AS (
-            SELECT object,id,score,matches,exact,exact_key,ROW_NUMBER() OVER(PARTITION BY object ORDER BY exact_key DESC,score DESC,location,id) AS rank
+            SELECT object,id,score,fraction,exact,exact_key,exact_original,
+               ROW_NUMBER() OVER(PARTITION BY object ORDER BY exact_key DESC,exact_original DESC,
+                                 score DESC,exact DESC,fraction DESC,location,id) AS rank
             FROM scored
         )
-        SELECT object,id,matches,exact,exact_key FROM ordered WHERE rank=1 ORDER BY exact_key DESC,score DESC,object LIMIT ?7",
+        SELECT object,id,fraction,exact,exact_key FROM ordered
+        WHERE rank=1 ORDER BY exact_key DESC,exact_original DESC,score DESC,object LIMIT ?6",
     )?;
     statement
         .query_map(
             params![
                 head,
-                serde_json::to_string(&terms)?,
-                query,
+                serde_json::to_string(&queries)?,
                 options.kind.map(|kind| kind as i64),
                 options.subject,
                 options.scope,
@@ -178,12 +198,8 @@ fn lexical(
             },
         )?
         .map(|row| {
-            let (object, passage, matches, exact, exact_key) = row?;
-            let strength = if exact {
-                1.0
-            } else {
-                (matches / terms.len() as f64).powi(2)
-            };
+            let (object, passage, fraction, exact, exact_key) = row?;
+            let strength = if exact { 1.0 } else { fraction.powi(2) };
             Ok((object.parse()?, passage, strength, exact_key))
         })
         .collect()

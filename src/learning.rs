@@ -51,7 +51,17 @@ pub struct Extraction {
     pub manifest: Id,
     pub included: Vec<Id>,
     pub withheld: BTreeMap<Id, String>,
+    /// Decisions corresponding positionally to the request examples.
+    pub rows: Vec<TrainingRow>,
 }
+
+#[derive(Debug, Serialize)]
+pub struct TrainingRow {
+    pub label: Id,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<String>,
+}
+
 fn label_value(
     receipt: &crate::evaluation::Receipt,
     check: Option<&str>,
@@ -541,6 +551,7 @@ impl Archive {
         let mut partitions: BTreeMap<(String, Id), String> = BTreeMap::new();
         let mut included = vec![];
         let mut withheld = BTreeMap::new();
+        let mut rows = Vec::with_capacity(request.examples.len());
         let mut links = vec![link("policy", request.policy)];
         let mut release_signatures = BTreeSet::new();
         let mut exact_rows = BTreeSet::new();
@@ -563,7 +574,7 @@ impl Archive {
                 ensure!(exact_rows.insert(row_key), "duplicate training example");
                 Ok(example)
             });
-            match row {
+            let rejection = match row {
                 Ok(ValidatedExample {
                     groups: axes,
                     release_attestations: witnesses,
@@ -581,11 +592,18 @@ impl Archive {
                         l.qualifier = format!("{}:{i}", included.len());
                         links.push(l);
                     }
+                    None
                 }
-                Err(e) => {
-                    withheld.insert(ex.label, e.to_string());
+                Err(error) => {
+                    let reason = error.to_string();
+                    withheld.insert(ex.label, reason.clone());
+                    Some(reason)
                 }
-            }
+            };
+            rows.push(TrainingRow {
+                label: ex.label,
+                rejection,
+            });
         }
         for (role, s) in [("feature-cutoff", &before), ("label-horizon", &after)] {
             let id = self.blob(&serde_json::to_vec(s)?, Id::blob(PUBLIC))?;
@@ -628,6 +646,7 @@ impl Archive {
             manifest,
             included,
             withheld,
+            rows,
         })
     }
     pub fn impact(

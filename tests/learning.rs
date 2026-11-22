@@ -172,6 +172,27 @@ fn released_v012_receipt_replays_with_its_original_withdrawal_semantics() -> Res
     assert_eq!(replay.included, [label]);
     assert!(replay.withheld.is_empty());
 
+    let mut repeated = vector.request.clone();
+    let example = repeated.examples[0].clone();
+    repeated.examples.push(example.clone());
+    repeated.examples.push(Example {
+        features: vec![],
+        ..example
+    });
+    let rows = archive.training_manifest(&repeated, Format::A)?;
+    assert_eq!(rows.included, [label]);
+    assert_eq!(
+        rows.rows
+            .iter()
+            .map(|row| (row.label, row.rejection.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            (label, None),
+            (label, Some("duplicate training example")),
+            (label, Some("empty features or partition")),
+        ]
+    );
+
     let horizon = archive.head(receipt.one("snapshot")?)?;
     let query: Query = receipt.field("original_query")?;
     let current = evaluation::assess(&archive, &horizon, &query)?;

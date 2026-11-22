@@ -1,5 +1,5 @@
-CREATE TABLE rep_search_schema(version INTEGER PRIMARY KEY CHECK(version=2));
-INSERT INTO rep_search_schema VALUES(2);
+CREATE TABLE rep_search_schema(version INTEGER PRIMARY KEY CHECK(version=3));
+INSERT INTO rep_search_schema VALUES(3);
 CREATE TABLE rep_search_revision(value INTEGER NOT NULL);
 INSERT INTO rep_search_revision VALUES(0);
 CREATE TABLE rep_search_heads(
@@ -33,9 +33,18 @@ CREATE TABLE rep_search_entries(
 CREATE TABLE rep_search_visibility(
     head TEXT NOT NULL REFERENCES rep_search_heads(head) ON DELETE CASCADE,
     entry INTEGER NOT NULL REFERENCES rep_search_entries(id) ON DELETE CASCADE,
+    object TEXT NOT NULL,
+    section INTEGER NOT NULL,
     PRIMARY KEY(head,entry)
 ) WITHOUT ROWID;
 CREATE INDEX rep_search_visibility_entry ON rep_search_visibility(entry);
+CREATE INDEX rep_search_visibility_order ON rep_search_visibility(head,object,section);
+CREATE TABLE rep_search_text(
+    entry INTEGER PRIMARY KEY REFERENCES rep_search_entries(id) ON DELETE CASCADE,
+    cursor INTEGER NOT NULL DEFAULT 0,
+    length INTEGER NOT NULL CHECK(length>0),
+    CHECK(cursor>=0 AND cursor<=length)
+);
 CREATE TABLE rep_search_sources(
     source TEXT NOT NULL,
     entry INTEGER NOT NULL REFERENCES rep_search_entries(id) ON DELETE CASCADE,
@@ -51,7 +60,7 @@ CREATE TABLE rep_search_passages(
     priority INTEGER NOT NULL,
     semantic INTEGER NOT NULL
 );
-CREATE INDEX rep_search_passages_entry ON rep_search_passages(entry);
+CREATE INDEX rep_search_passages_entry ON rep_search_passages(entry,location);
 CREATE TABLE rep_search_terms(
     term TEXT NOT NULL,
     passage INTEGER NOT NULL REFERENCES rep_search_passages(id) ON DELETE CASCADE,

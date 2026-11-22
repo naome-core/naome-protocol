@@ -14,7 +14,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use std::{
     fs::File,
-    io::{BufWriter, Read, Write},
+    io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -122,6 +122,12 @@ pub enum ArchiveCommand {
     },
     /// Search authorized archive records and text passages by word or meaning.
     Find(FindArguments),
+    /// Show or pin the active search snapshot. Clear the pin to use the latest registered snapshot.
+    SearchHead {
+        head: Option<Id>,
+        #[arg(long, conflicts_with = "head")]
+        clear: bool,
+    },
     /// Prepare archive text, media and embeddings independently of a search.
     PrepareSearch(PrepareSearchArguments),
     /// Reuse a local model for JSON-line find and prepare-search requests on stdin.
@@ -146,12 +152,20 @@ pub enum ArchiveCommand {
         after: Option<Id>,
         #[arg(long)]
         limit: Option<usize>,
+        /// Write the inventory once, followed by an ordered stream of packets.
+        #[arg(long, conflicts_with_all = ["after", "limit"])]
+        stream: bool,
         output: PathBuf,
         #[arg(long, default_value = "read")]
         purpose: String,
     },
     /// Verify and reconcile an exchange file atomically.
-    Import { file: PathBuf },
+    Import {
+        file: PathBuf,
+        /// Read the streaming exchange format.
+        #[arg(long)]
+        stream: bool,
+    },
     /// Sign a minimal scoring-hull disclosure and write its packet to a new file.
     Project {
         head: Id,
@@ -435,6 +449,12 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             )?)
         }
         ArchiveCommand::Find(arguments) => print(LocalSearch::default().find(&db, arguments)?),
+        ArchiveCommand::SearchHead { head, clear } => {
+            if head.is_some() || clear {
+                db.set_search_head(head)?;
+            }
+            print(db.search_head(None)?.id()?)
+        }
         ArchiveCommand::PrepareSearch(arguments) => {
             print(LocalSearch::default().prepare(&db, arguments)?)
         }
@@ -461,8 +481,18 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             purpose,
             after,
             limit,
+            stream,
         } => {
             let s = db.head(head)?;
+            if stream {
+                let count = publish(&path, |file| {
+                    let mut output = BufWriter::new(file);
+                    let count = db.export_stream(&s, &purpose, &mut output)?;
+                    output.flush()?;
+                    Ok(count)
+                })?;
+                return print(json!({"head":head,"continuation":null,"packets":count}));
+            }
             let packet = if limit.is_some() || after.is_some() {
                 db.export_page(&s, &purpose, after, limit.unwrap_or(usize::MAX))?
             } else {
@@ -473,7 +503,14 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 json!({"head":packet.head,"continuation":packet.continuation,"packets":packet.packets.len()}),
             )
         }
-        ArchiveCommand::Import { file } => print(db.import(&Bundle::read(File::open(file)?)?)?),
+        ArchiveCommand::Import { file, stream } => {
+            let file = File::open(file)?;
+            if stream {
+                print(db.import_stream(BufReader::new(file))?)
+            } else {
+                print(db.import(&Bundle::read(file)?)?)
+            }
+        }
         ArchiveCommand::Project {
             head,
             receipt,

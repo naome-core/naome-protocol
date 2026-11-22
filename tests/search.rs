@@ -83,6 +83,21 @@ fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
         json!([V012_NOTICE])
     );
 
+    let second = run(&["snapshot", "newer inventory"])?;
+    assert_eq!(run(&["search-head"])?, second);
+    assert_eq!(run(&["search-head", V012_HEAD])?, json!(V012_HEAD));
+    assert_eq!(run(&["find", "interferometer drift"])?["head"], V012_HEAD);
+    assert_eq!(
+        run(&[
+            "prepare-search",
+            "--lexical",
+            "--head",
+            second.as_str().unwrap()
+        ])?["head"],
+        second
+    );
+    assert_eq!(run(&["search-head", "--clear"])?, second);
+
     let file = directory.path().join("exchange.json");
     run(&["export", V012_HEAD, file.to_str().unwrap()])?;
     assert_eq!(
@@ -708,7 +723,7 @@ fn projected_search_finds_late_candidates_under_an_actual_comparison_budget() ->
 
 #[cfg(feature = "cli")]
 #[test]
-fn previous_draft_cache_is_rebuilt_without_changing_the_archive() -> Result<()> {
+fn previous_caches_are_rebuilt_without_changing_the_archive() -> Result<()> {
     use sha2::{Digest, Sha256};
     use std::{
         fs,
@@ -716,37 +731,162 @@ fn previous_draft_cache_is_rebuilt_without_changing_the_archive() -> Result<()> 
         process::{Command, Stdio},
     };
 
-    let directory = tempfile::tempdir()?;
-    let database = directory.path().join("archive.sqlite");
-    fs::write(&database, include_bytes!("fixtures/search-cache-v1.sqlite"))?;
-    let mut session = Command::new(env!("CARGO_BIN_EXE_rep"))
-        .arg("--db")
-        .arg(&database)
-        .arg("search-session")
-        .env_remove("NAOME_SEARCH_MODEL")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
-    session.stdin.take().unwrap().write_all(
-        b"{\"op\":\"prepare_search\",\"lexical\":true}\n{\"op\":\"find\",\"query\":\"interferometer drift\"}\n",
-    )?;
-    let output = session.wait_with_output()?;
-    assert!(output.status.success());
-    let lines: Vec<serde_json::Value> = std::str::from_utf8(&output.stdout)?
-        .lines()
-        .map(serde_json::from_str)
-        .collect::<serde_json::Result<_>>()?;
-    assert_eq!(lines[0]["ok"]["index_complete"], true);
-    assert_eq!(lines[1]["ok"]["index_version"], 2);
-    assert_eq!(lines[1]["ok"]["hits"][0]["id"], V012_CLAIM);
+    // v2 was populated by v0.1.3 using prepare-search on the released v0.1.2 archive.
+    for cached in [
+        include_bytes!("fixtures/search-cache-v1.sqlite").as_slice(),
+        include_bytes!("fixtures/search-cache-v2.sqlite").as_slice(),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("archive.sqlite");
+        fs::write(&database, cached)?;
+        let mut session = Command::new(env!("CARGO_BIN_EXE_rep"))
+            .arg("--db")
+            .arg(&database)
+            .arg("search-session")
+            .env_remove("NAOME_SEARCH_MODEL")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        session.stdin.take().unwrap().write_all(
+            b"{\"op\":\"prepare_search\",\"lexical\":true}\n{\"op\":\"find\",\"query\":\"interferometer drift\"}\n",
+        )?;
+        let output = session.wait_with_output()?;
+        assert!(output.status.success());
+        let lines: Vec<serde_json::Value> = std::str::from_utf8(&output.stdout)?
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<serde_json::Result<_>>()?;
+        assert_eq!(lines[0]["ok"]["index_complete"], true);
+        assert_eq!(lines[1]["ok"]["index_version"], 3);
+        assert_eq!(lines[1]["ok"]["hits"][0]["id"], V012_CLAIM);
 
-    let archive = Archive::open(database)?;
-    let head = archive.head(V012_HEAD.parse()?)?;
+        let archive = Archive::open(database)?;
+        let head = archive.head(V012_HEAD.parse()?)?;
+        assert_eq!(
+            archive.releases()?.into_iter().collect::<Vec<_>>(),
+            [head.id()?]
+        );
+        let packet = serde_json::to_vec(&archive.export(&head, "read")?)?;
+        assert_eq!(hex::encode(Sha256::digest(packet)), V012_EXCHANGE_SHA256);
+    }
+    Ok(())
+}
+
+#[test]
+fn text_queries_and_large_captures_use_later_passages() -> Result<()> {
+    use naome_protocol::search::SearchInput;
+
+    let archive = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let street = claim(&archive, "Straße", "ος", public, Format::A)?;
+    let input = format!("{}STRASSE", "noise ".repeat(150));
+    let mut bytes = b"earlyfield ".to_vec();
+    bytes.resize(4095, b' ');
+    bytes.extend_from_slice("測定".as_bytes());
+    bytes.resize(270_000, b' ');
+    bytes.extend_from_slice(b"laterfield");
+    let payload = archive.capture(bytes.as_slice(), "text/plain", 4096, public, Format::B)?;
+    let snapshot = archive.snapshot("long text", BTreeSet::new())?;
+    let first = archive.prepare_search(&snapshot, 2, None)?;
+    assert!(!first.index_complete);
+    let second = archive.prepare_search(&snapshot, 1, None)?;
+    assert!(!second.index_complete);
+    let early = archive.search_prepared(
+        &snapshot,
+        SearchInput::Text("earlyfield"),
+        SearchOptions::default(),
+        None,
+    )?;
+    assert_eq!(early.hits[0].id, payload);
+    assert_eq!(early.hits[0].snippet.as_deref(), Some("earlyfield"));
+    let third = archive.prepare_search(&snapshot, 4, None)?;
+    assert!(third.index_complete && !third.limited_coverage);
+    let late = archive.find(&snapshot, "laterfield", SearchOptions::default(), None)?;
+    assert_eq!(late.hits[0].snippet.as_deref(), Some("laterfield"));
     assert_eq!(
-        archive.releases()?.into_iter().collect::<Vec<_>>(),
-        [head.id()?]
+        late.hits[0].location,
+        SearchLocation::Payload {
+            start: 270_000,
+            end: 270_010
+        }
     );
-    let packet = serde_json::to_vec(&archive.export(&head, "read")?)?;
-    assert_eq!(hex::encode(Sha256::digest(packet)), V012_EXCHANGE_SHA256);
+    let cross_chunk = archive.find(&snapshot, "測定", SearchOptions::default(), None)?;
+    assert_eq!(cross_chunk.hits[0].id, payload);
+    let file = archive.find_input(
+        &snapshot,
+        SearchInput::TextFile(&input),
+        SearchOptions::default(),
+        None,
+    )?;
+    assert_eq!(file.hits[0].id, street);
+    assert!(!file.query_limited);
+    assert_eq!(
+        archive
+            .find(&snapshot, "ΟΣ", SearchOptions::default(), None)?
+            .hits[0]
+            .id,
+        street
+    );
+    Ok(())
+}
+
+#[test]
+fn limited_semantic_results_survive_different_cache_histories() -> Result<()> {
+    struct ExactSubject(String);
+    impl Embedder for ExactSubject {
+        fn id(&self) -> Id {
+            Id::blob(b"cache-history test")
+        }
+        fn dimensions(&self) -> usize {
+            2
+        }
+        fn embed(&mut self, input: EmbeddingInput, values: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Ok(values
+                .iter()
+                .map(|value| {
+                    if matches!(input, EmbeddingInput::Query) || *value == self.0 {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.0, 1.0]
+                    }
+                })
+                .collect())
+        }
+    }
+    let mut expected = None;
+    for prewarm in [false, true] {
+        let archive = Archive::memory()?;
+        let mut records = Vec::new();
+        for subject in ["first", "second", "third", "fourth", "fifth"] {
+            let document = Document::new(Kind::Claim, subject, "test", json!({}), vec![])?;
+            let id = archive.document(&document, Format::A, Id::blob(PUBLIC))?;
+            records.push((id, subject));
+        }
+        records.sort_unstable();
+        let mut model = ExactSubject(records[2].1.into());
+        if prewarm {
+            let subset =
+                archive.selected_snapshot("subset", BTreeSet::new(), [records[4].0].into())?;
+            archive.prepare_search(&subset, 100, Some(&mut model))?;
+        }
+        let snapshot = archive.snapshot("all", BTreeSet::new())?;
+        archive.prepare_search(&snapshot, 100, Some(&mut model))?;
+        let options = SearchOptions {
+            mode: SearchMode::Semantic,
+            vector_budget: 1,
+            ..Default::default()
+        };
+        let result = archive.find(&snapshot, "query", options, Some(&mut model))?;
+        assert_eq!(
+            result.hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            [records[2].0]
+        );
+        assert_eq!(result.vector_rows_loaded, 1);
+        assert!(result.vector_rows_examined > result.vector_rows_loaded);
+        if let Some(head) = expected {
+            assert_eq!(result.head, head);
+        }
+        expected = Some(result.head);
+    }
     Ok(())
 }
