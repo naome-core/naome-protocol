@@ -48,6 +48,41 @@ impl Bundle {
     }
 }
 
+fn decode_packet_hex(encoded: &str, decoded: &mut Vec<u8>) -> Result<(), hex::FromHexError> {
+    const NIBBLES: [u8; 256] = {
+        let mut values = [u8::MAX; 256];
+        let lower = b"0123456789abcdef";
+        let upper = b"0123456789ABCDEF";
+        let mut n = 0;
+        while n < lower.len() {
+            values[lower[n] as usize] = n as u8;
+            values[upper[n] as usize] = n as u8;
+            n += 1;
+        }
+        values
+    };
+
+    let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(hex::FromHexError::OddLength);
+    }
+
+    // Accumulate invalid-nibble sentinels while decoding. Only malformed input
+    // needs a second pass to recover the precise error and byte offset.
+    let mut nibbles = 0;
+    decoded.clear();
+    decoded.extend(pairs.iter().map(|&[high, low]| {
+        let high = NIBBLES[high as usize];
+        let low = NIBBLES[low as usize];
+        nibbles |= high | low;
+        (high << 4) | low
+    }));
+    if nibbles > 0x0f {
+        hex::decode_to_slice(encoded, decoded)?;
+    }
+    Ok(())
+}
+
 impl Archive {
     fn packet(&self, s: &Snapshot, id: Id, purpose: &str) -> Result<Packet> {
         let (bytes, access) = self.resolve_with(s, id, |policy| allows(policy, purpose))?;
@@ -134,12 +169,13 @@ impl Archive {
         );
         let tx = self.db.transaction()?;
         let mut ids = b.omitted.clone();
+        let mut bytes = Vec::new();
         for p in &b.packets {
             ensure!(
                 ids.insert(p.id) && p.hex.len() <= 2 * MAX_BYTES,
                 "duplicate or oversized packet"
             );
-            let bytes = hex::decode(&p.hex)?;
+            decode_packet_hex(&p.hex, &mut bytes)?;
             validate(p.id, &bytes, p.access)?;
             insert(&tx, p.id, &bytes, p.access)?
         }
