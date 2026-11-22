@@ -1,4 +1,5 @@
 mod exchange;
+mod search_index;
 pub mod sharing;
 pub use exchange::{Bundle, Packet};
 
@@ -229,7 +230,11 @@ impl Archive {
     ) -> Result<Document> {
         self.read_with(id, |id| self.resolve_for_training(s, id, access))
     }
-    fn read_with(&self, id: Id, resolve: impl Fn(Id) -> Result<Vec<u8>>) -> Result<Document> {
+    fn read_with(
+        &self,
+        id: Id,
+        mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
+    ) -> Result<Document> {
         let format = id.format().context("expected record")?;
         let r = Record::decode(&resolve(id)?, format)?;
         let profile = supported_profile(r.profile).context("unsupported profile")?;

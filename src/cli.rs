@@ -1,11 +1,12 @@
 use crate::{
     evaluation, executor, fixture, kit, learning,
     profile::{self, Document, Kind, PUBLIC},
+    search::{MAX_MEDIA_BYTES, MediaInput, SearchInput, SearchMode, SearchOptions, text_media},
     store::{Archive, Bundle},
     wire::{Format, Id, MAX_BYTES, Record},
 };
 use anyhow::{Result, ensure};
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use ed25519_dalek::SigningKey;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -117,6 +118,8 @@ pub enum ArchiveCommand {
         #[arg(long, default_value_t = 100)]
         budget: usize,
     },
+    /// Search authorized archive records and text passages by word or meaning.
+    Find(FindArguments),
     /// Trace required input edges and the unresolved frontier.
     Explain {
         head: Id,
@@ -221,6 +224,48 @@ pub enum ArchiveCommand {
     /// Erase a payload and persist its local withdrawal marker.
     Withdraw { id: Id },
 }
+#[derive(Args)]
+pub struct FindArguments {
+    /// A content identifier, words, or a natural-language query.
+    #[arg(required_unless_present = "input", conflicts_with = "input")]
+    query: Option<String>,
+    /// Use a local image, audio, video, PDF, code or data file as the query.
+    #[arg(long, value_name = "FILE")]
+    input: Option<PathBuf>,
+    /// MIME type of --input. Defaults to the filename extension or UTF-8 content.
+    #[arg(long, requires = "input")]
+    media_type: Option<String>,
+    /// Search this snapshot. Defaults to the most recently saved or imported snapshot.
+    #[arg(long)]
+    head: Option<Id>,
+    /// Defaults to hybrid when a local model is configured, otherwise lexical.
+    #[arg(long, value_enum)]
+    mode: Option<SearchMode>,
+    #[arg(long)]
+    kind: Option<String>,
+    #[arg(long)]
+    subject: Option<String>,
+    #[arg(long)]
+    scope: Option<String>,
+    #[arg(long, default_value_t = SearchOptions::default().limit)]
+    limit: usize,
+    /// Maximum records and passages to index per invocation.
+    #[arg(long, default_value_t = SearchOptions::default().index_budget)]
+    index_budget: usize,
+    /// Maximum eligible vectors to score against the query.
+    #[arg(long, default_value_t = SearchOptions::default().vector_budget)]
+    vector_budget: usize,
+    /// Rebuild the selected snapshot's derived search index.
+    #[arg(long)]
+    rebuild_index: bool,
+    /// Local EmbeddingGemma 2 checkpoint directory (also NAOME_SEARCH_MODEL).
+    #[arg(long)]
+    model: Option<PathBuf>,
+    /// Python executable with the local media and inference dependencies (also NAOME_SEARCH_PYTHON).
+    #[arg(long)]
+    python: Option<PathBuf>,
+}
+
 fn load(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let mut b = vec![];
     File::open(path)?
@@ -425,6 +470,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 after,
             )?)
         }
+        ArchiveCommand::Find(arguments) => find(&db, arguments),
         ArchiveCommand::Explain {
             head,
             id,
@@ -575,4 +621,114 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         | ArchiveCommand::Keygen { .. }
         | ArchiveCommand::Value { .. } => unreachable!("handled before opening the archive"),
     }
+}
+
+fn find(archive: &Archive, arguments: FindArguments) -> Result<()> {
+    use anyhow::Context;
+    let snapshot = archive.search_head(arguments.head)?;
+    let bytes = arguments
+        .input
+        .as_deref()
+        .map(|path| load(path, MAX_MEDIA_BYTES as usize))
+        .transpose()?;
+    let input = match (
+        arguments.query.as_deref(),
+        arguments.input.as_deref(),
+        bytes.as_deref(),
+    ) {
+        (Some(query), None, None) => SearchInput::Text(query),
+        (None, Some(path), Some(bytes)) => {
+            let media_type = arguments
+                .media_type
+                .as_deref()
+                .or_else(|| infer_media_type(path));
+            if media_type.is_some_and(text_media) || media_type.is_none() {
+                let text = std::str::from_utf8(bytes)
+                    .context("query file requires supported media or UTF-8 text")?;
+                ensure!(
+                    !text.contains('\0'),
+                    "query file requires supported media or UTF-8 text"
+                );
+                SearchInput::TextFile(text)
+            } else {
+                SearchInput::Media(MediaInput {
+                    media_type: media_type.context("missing query media type")?,
+                    bytes,
+                })
+            }
+        }
+        _ => anyhow::bail!("expected a search query or --input FILE"),
+    };
+
+    let model = arguments
+        .model
+        .or_else(|| std::env::var_os("NAOME_SEARCH_MODEL").map(PathBuf::from));
+    let mode = arguments.mode.unwrap_or(if model.is_some() {
+        SearchMode::Hybrid
+    } else {
+        SearchMode::Lexical
+    });
+    let options = SearchOptions {
+        mode,
+        kind: arguments
+            .kind
+            .map(|kind| serde_json::from_value(kind.into()))
+            .transpose()?,
+        subject: arguments.subject.as_deref(),
+        scope: arguments.scope.as_deref(),
+        limit: arguments.limit,
+        index_budget: arguments.index_budget,
+        vector_budget: arguments.vector_budget,
+    };
+    if arguments.rebuild_index {
+        archive.clear_search_index(snapshot.id()?)?;
+    }
+    if mode == SearchMode::Lexical
+        || matches!(input, SearchInput::Text(text) if text.trim().parse::<Id>().is_ok())
+    {
+        return print(archive.find_input(&snapshot, input, options, None)?);
+    }
+    #[cfg(feature = "semantic-search")]
+    {
+        let directory =
+            model.context("configure --model or NAOME_SEARCH_MODEL for semantic search")?;
+        let python = arguments
+            .python
+            .or_else(|| std::env::var_os("NAOME_SEARCH_PYTHON").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("python3"));
+        let mut model = crate::search::EmbeddingGemma::open(&directory, &python)?;
+        print(archive.find_input(&snapshot, input, options, Some(&mut model))?)
+    }
+    #[cfg(not(feature = "semantic-search"))]
+    {
+        let _ = (model, arguments.python);
+        anyhow::bail!("this build lacks the semantic-search Cargo feature")
+    }
+}
+
+fn infer_media_type(path: &Path) -> Option<&'static str> {
+    Some(
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "png" => "image/png",
+            "jpeg" | "jpg" => "image/jpeg",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            "tiff" | "tif" => "image/tiff",
+            "wav" => "audio/wav",
+            "flac" => "audio/flac",
+            "ogg" => "audio/ogg",
+            "mp3" => "audio/mpeg",
+            "m4a" => "audio/mp4",
+            "aac" => "audio/aac",
+            "mp4" => "video/mp4",
+            "mov" => "video/quicktime",
+            "webm" => "video/webm",
+            "mkv" => "video/x-matroska",
+            "pdf" => "application/pdf",
+            "json" | "jsonl" | "ndjson" => "application/json",
+            "csv" => "text/csv",
+            "tsv" => "text/tab-separated-values",
+            _ => return None,
+        },
+    )
 }

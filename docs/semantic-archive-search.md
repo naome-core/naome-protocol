@@ -8,11 +8,11 @@ An investigator can ask a natural-language question about a named archive snapsh
 
 [`Archive::discover`](../src/store.rs) pages through a snapshot in ascending identifier order and filters typed records by kind, subject and scope. It uses the archive's read permission checks and skips blobs. [The CLI](../src/cli.rs) exposes it as `rep discover` with the existing `search` alias. The same commands are embedded by `naome archive`. [The protocol specification](../spec/research-evidence-protocol.tex) describes learned similarity, explicit search coverage and reproducible evidence references.
 
-## Proposed first version
+## Search interface
 
-Offer a separate ranked entry point, provisionally `rep find HEAD QUERY`, backed by one library query used by archive clients. Accept optional kind, subject and scope filters, a result limit and explicit work budgets. Provide lexical, semantic and hybrid ranking modes. Route exact content identifiers to the archive's verified lookup. Existing structured inventory queries use `discover` and its `search` alias.
+Offer a separate ranked entry point, `rep find QUERY` or `rep find --input FILE` with optional `--head`, backed by one library query used by archive clients. Accept optional kind, subject and scope filters, a result limit and explicit work budgets. Provide lexical, semantic and hybrid ranking modes. Route exact content identifiers to the archive's verified lookup. Existing structured inventory queries use `discover` and its `search` alias.
 
-Start with supported typed records and bounded UTF-8 text carried by readable archive descriptors. Extract a documented, versioned set of text fields for supported profiles. Preserve the original text and byte ranges for citations. Version any Unicode normalization, segmentation or tokenization used for search so that ranked text remains traceable to its source across writing systems. Treat unsupported profiles and other media as coverage gaps when they limit the requested search. Structured metadata can still help a user find their descriptors. Later slices can add profile-specific extractors, OCR, non-text modalities and multi-archive queries.
+Index supported typed records and bounded UTF-8 text, code and data carried by readable archive descriptors. Preserve the original text and byte ranges for citations. EmbeddingGemma 2 places text, images, audio and sampled video in one vector space. Index image contents, audio and video ranges, and rendered PDF pages. Queries can use text, a source/code file, or a native media file. A media hit records its MIME type and a selector into the archived original. Other binary formats expose their descriptor metadata and links. Format-specific extractors can extend content coverage without changing archive IDs.
 
 Each response identifies the snapshot, ranking mode and relevant index and model versions, and reports whether it completed within budget. Return ranked hits with IDs, kind and source metadata when available, and a field path or byte range for matched text. Generate optional snippets from re-resolved content and report incomplete coverage without exposing denied identifiers or counts. A continuation, if added, binds the snapshot, query and index generation so it cannot silently page a different ranking.
 
@@ -20,9 +20,9 @@ Each response identifies the snapshot, ranking mode and relevant index and model
 
 The archive owns immutable objects, snapshot membership and current access enforcement. A small search module owns deterministic text extraction, ranking and a rebuildable local index. Store index data under the same local custody as its sources, with a schema or generation identifier. Keep search state outside the content-addressed record and exchange formats. Every entry carries the source IDs actually used to extract its text. Typed fields can be resolved through their record and profile. Payload passages also track the descriptor and chunk IDs they used.
 
-Use the same eligible corpus for lexical and semantic ranking. Evaluate SQLite FTS5 for lexical candidate lookup and verify that ranking statistics cannot incorporate out-of-snapshot or unreadable records. The exact vector baseline scores eligible embeddings locally. Use a bounded, deterministic rank fusion for hybrid results and a stable identifier and segment tie-break. Record ranking parameters and distinguish budgeted results from a complete scan. Test exact ranking before considering an approximate vector index.
+Use the same eligible corpus for lexical and semantic ranking. Use an inverted postings index partitioned by snapshot for lexical candidates. Only authorized and available sources contribute postings or vectors. The exact vector baseline scores eligible embeddings locally. Use a bounded, deterministic rank fusion for hybrid results and a stable identifier and segment tie-break. Record ranking parameters and distinguish budgeted results from a complete scan. Test exact ranking before considering an approximate vector index.
 
-Define a narrow local embedding interface for indexed text and queries. Pin model identity, output dimension, normalization and extraction version for each generation. Reject incompatible or invalid vectors. Compare candidate local models on the same evaluation set before choosing a default. If a requested semantic mode lacks its configured model or coverage, report that explicitly. Lexical search is available as its own mode. The first version runs offline with operator-supplied model files.
+Use a local EmbeddingGemma 2 provider for both query and archive input. Bind the index to the exact weights, tokenizer, decoding implementation and runtime configuration. Validate all vectors and media selectors before persistence. An optional local worker loads the operator's checkpoint offline and receives only approved archive inputs over private process pipes.
 
 ## Multilingual coverage
 
@@ -40,7 +40,7 @@ Exercise indexing through existing deposit, import and withdrawal operations. A 
 
 1. **Fix the evaluation set and contract.** Build synthetic archives and judged queries covering exact IDs, metadata, paraphrases, calibration reports, text passages, corrections, historical heads and withheld data. Freeze the target languages, relevance judgments and minimum retrieval quality before tuning ranking. Define the response shape and coverage states.
 2. **Deliver lexical retrieval and source navigation.** Connect the library and CLI to canonical archive reads. Add indexing and invalidation, explicit budgets and stable ordering. Validate results against the existing archived identifiers and permissions.
-3. **Add semantic and hybrid retrieval.** Evaluate local models with the same judgments, select a versioned configuration and implement reproducible generation and rank fusion. Keep a lexical comparison and a semantic-only comparison.
+3. **Deliver multilingual and multimodal retrieval.** Evaluate the selected EmbeddingGemma 2 configuration with lexical, semantic and hybrid search. Exercise text and example-file queries across modalities, including audio/video ranges, image results and PDF pages.
 4. **Validate archive operations and scale.** Test rebuild and restart, incremental indexing, snapshot isolation, withdrawal and partially imported bundles. Profile realistic large local corpora before adding an approximate vector backend or changing index placement.
 
 ## Acceptance
@@ -50,4 +50,40 @@ Exercise indexing through existing deposit, import and withdrawal operations. A 
 - Every hit resolves to its cited record or passage. Fixtures with unreadable, withdrawn and out-of-snapshot content return zero such hits. Adding excluded content leaves visible results and scoring unchanged. Cover both native encodings, partial imports, rebuild after restart, a withdrawn chunk in a searchable descriptor and missing model configuration.
 - Measure cold index build time, warm query median and p95, memory and index disk size at multiple corpus sizes. Establish operating limits from those measurements. Track query budget exhaustion separately from an empty completed search.
 
-Model choice, maximum supported corpus size and performance targets are decisions for implementation after baseline measurements. The first version's success is a local search flow with checkable references and measured retrieval quality.
+Operating limits beyond the documented per-artifact and per-query budgets depend on corpus and host measurements. The first version's success is a local search flow with checkable references and measured retrieval quality.
+
+## Reproducing the model checks
+
+Use the EmbeddingGemma 2 checkpoint and Python environment described in the
+[README](../README.md#search-by-content-or-by-example). The release-profile
+language check uses a fixed synthetic archive with 26 languages and 52 judged
+queries. Each language appears in same-language retrieval and in both query
+and source roles for cross-language retrieval. Seven unmatched queries test
+false positives.
+
+```sh
+cargo test --release --locked --test search_multilingual -- --ignored --nocapture
+cargo test --release --locked --test search_media -- --ignored --nocapture
+```
+
+For the media check, set `NAOME_MEDIA_FIXTURES` to a directory containing the
+[Golden Gate image](https://raw.githubusercontent.com/google-gemma/cookbook/refs/heads/main/apps/sample-data/GoldenGate.png)
+as `bridge.png`, the [speech recording](https://gemma.ai/assets/capabilities/roses-are.wav)
+as `roses.wav`, and the [cat clip](https://github.com/bebechien/gemma/raw/refs/heads/main/videos/cat_dozing.mp4)
+as `cat.mp4`. Create `nitrate.pdf` using Pillow in that directory.
+
+```python
+from PIL import Image, ImageDraw
+
+page = Image.new("RGB", (500, 400), "#eef4ee")
+draw = ImageDraw.Draw(page)
+draw.text((30, 30), "Hydrological monitoring report: river nitrate concentration", fill="black")
+draw.line([(40, 300), (140, 260), (240, 190), (340, 160), (440, 70)], fill="blue", width=4)
+page.save("nitrate.pdf")
+```
+
+The media check exercises text-to-artifact and file-to-artifact retrieval,
+validates each result selector, and reconstructs the archived original byte
+for byte. These trials measure behavior on their fixed corpora. Throughput and
+retrieval quality at production archive sizes remain dependent on the corpus
+and host.
