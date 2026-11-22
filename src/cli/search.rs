@@ -127,7 +127,13 @@ impl LocalSearch {
                 .context("locate local EmbeddingGemma 2 weights")?;
             let python = python
                 .or_else(|| std::env::var_os("NAOME_SEARCH_PYTHON").map(PathBuf::from))
-                .unwrap_or_else(|| PathBuf::from("python3"));
+                .unwrap_or_else(|| {
+                    PathBuf::from(if cfg!(windows) {
+                        "python.exe"
+                    } else {
+                        "python3"
+                    })
+                });
             if self.model.as_ref().is_none_or(|loaded| {
                 loaded.directory != directory
                     || loaded.python != python

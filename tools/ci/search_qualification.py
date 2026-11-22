@@ -1,6 +1,7 @@
 """Run the offline multilingual and multimodal release cases with pinned inputs."""
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -48,19 +49,35 @@ def create_fixtures(directory):
     page.save(directory / "nitrate.pdf")
 
 
-def main():
+def verify_packaged_search(rep, root, environment):
+    def run(*args):
+        return json.loads(subprocess.check_output([rep, *args], cwd=root, env=environment, timeout=420))
+
+    media = Path(environment["NAOME_MEDIA_FIXTURES"]) / "bridge.png"
+    object_id = run("capture", media, "image/png")
+    head = run("snapshot", "packaged model search", "--root", object_id)
+    for query in [["Golden Gate Brücke in San Francisco"], ["--input", media]]:
+        report = run("find", "--head", head, "--mode", "semantic", "--prepare", *query)
+        hits = report["hits"]
+        if not report["semantic_index_complete"] or not hits or hits[0]["id"] != object_id:
+            raise ValueError(f"packaged model search did not retrieve the bridge image: {report}")
+    print("Verified multilingual text and image queries through the packaged CLI")
+
+
+def qualify(rep=None):
     with tempfile.TemporaryDirectory(prefix="rep-search-qualification-") as temporary:
         root = Path(temporary)
         environment = os.environ.copy()
         if "NAOME_SEARCH_MODEL" not in environment:
             environment["NAOME_SEARCH_MODEL"] = snapshot_download(
-                MODEL, revision=REVISION, local_dir=root / "model"
+                MODEL, revision=REVISION, local_dir=root / "model weights"
             )
         if "NAOME_MEDIA_FIXTURES" not in environment:
             fixtures = root / "media"
             create_fixtures(fixtures)
             environment["NAOME_MEDIA_FIXTURES"] = str(fixtures)
         environment["NAOME_SEARCH_PYTHON"] = sys.executable
+        environment["NAOME_SEARCH_DEVICE"] = "cpu"
         environment["HF_HUB_OFFLINE"] = "1"
         subprocess.run(
             ["cargo", "test", "--release", "--locked", "--test", "search_multilingual",
@@ -68,7 +85,9 @@ def main():
             check=True,
             env=environment,
         )
+        if rep is not None:
+            verify_packaged_search(rep, root, environment)
 
 
 if __name__ == "__main__":
-    main()
+    qualify()

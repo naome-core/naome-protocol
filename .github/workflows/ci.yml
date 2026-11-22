@@ -70,6 +70,20 @@ jobs:
       runner: macos-15
       profile: test
 
+  windows_tests:
+    name: Cargo (Windows x86_64)
+    uses: ./.github/workflows/rust-tests.yml
+    with:
+      runner: windows-2025
+      profile: test
+
+  release:
+    name: Release qualification
+    if: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'task/release-') }}
+    uses: ./.github/workflows/full-cargo.yml
+    with:
+      model_search: true
+
   linux:
     name: Rust platform (Linux x86_64)
     if: ${{ always() }}
@@ -105,7 +119,7 @@ jobs:
   required:
     name: Rust CI
     if: ${{ always() }}
-    needs: [quality, linux, macos]
+    needs: [quality, linux, macos, windows_tests, release]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -116,7 +130,13 @@ jobs:
       - name: Verify required jobs
         env:
           NEEDS: ${{ toJSON(needs) }}
-        run: python3 tools/ci/check_results.py quality linux macos
+          RELEASE_REQUIRED: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'task/release-') }}
+        run: |
+          if [ "$RELEASE_REQUIRED" = true ]; then
+            python3 tools/ci/check_results.py quality linux macos windows_tests release
+          else
+            python3 tools/ci/check_results.py quality linux macos windows_tests release=skipped
+          fi
       - name: Reject workflow cancellation
         if: ${{ always() && cancelled() }}
         run: exit 1

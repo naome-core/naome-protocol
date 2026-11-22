@@ -1,0 +1,3 @@
+* text=auto eol=lf
+spec/kits/** -text
+src/search/gemma_worker.py -text

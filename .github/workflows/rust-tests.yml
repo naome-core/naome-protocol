@@ -9,6 +9,12 @@ on:
       profile:
         required: true
         type: string
+      package_target:
+        type: string
+        default: ''
+      model_search:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,6 +22,7 @@ permissions:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
   NAOME_TEST_PROFILE: ${{ inputs.profile }}
 
 defaults:
@@ -26,8 +33,7 @@ jobs:
   tests:
     name: Full workspace
     runs-on: ${{ inputs.runner }}
-    # Allow cold release builds plus the complete native system-test workload.
-    timeout-minutes: 30
+    timeout-minutes: ${{ inputs.model_search && 60 || 30 }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,6 +51,10 @@ jobs:
           rustup component list --installed
           rustc --version --verbose
           cargo --version --verbose
+
+      - name: Select the native MSVC target explicitly
+        if: ${{ runner.os == 'Windows' }}
+        run: echo 'CARGO_BUILD_TARGET=x86_64-pc-windows-msvc' >> "$GITHUB_ENV"
 
       - name: Cache Cargo downloads
         continue-on-error: true
@@ -70,6 +80,57 @@ jobs:
 
       - name: Run documentation tests
         run: cargo test --workspace --doc --all-features --locked
+
+      - name: Set up Python for release verification
+        if: ${{ inputs.package_target != '' }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+
+      - name: Install the qualified inference runtime
+        if: ${{ inputs.model_search }}
+        run: |
+          if [[ "$RUNNER_OS" != macOS ]]; then
+            python -m pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-search-torch.txt
+          fi
+          python -m pip install -r requirements-search.txt
+
+      - name: Package and test the release download
+        if: ${{ inputs.package_target != '' }}
+        env:
+          PACKAGE_TARGET: ${{ inputs.package_target }}
+          MODEL_SEARCH: ${{ inputs.model_search }}
+        run: |
+          args=()
+          if [[ "$MODEL_SEARCH" == true ]]; then
+            args+=(--model)
+          fi
+          python tools/ci/package_release.py "$PACKAGE_TARGET" "${args[@]}"
+
+      - name: Verify and stage the source package and whitepaper
+        if: ${{ inputs.package_target == 'x86_64-unknown-linux-gnu' }}
+        run: |
+          cargo package --locked
+          mkdir -p target/source-distribution
+          cp target/package/naome-protocol-*.crate spec/research-evidence-protocol.pdf target/source-distribution/
+
+      - name: Upload the verified native release files
+        if: ${{ inputs.package_target != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rep-${{ inputs.package_target }}
+          path: target/distribution/*
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload the source package and whitepaper
+        if: ${{ inputs.package_target == 'x86_64-unknown-linux-gnu' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rep-source
+          path: target/source-distribution/*
+          if-no-files-found: error
+          compression-level: 0
 
       - name: Verify tracked sources are unchanged
         run: git diff --exit-code HEAD
