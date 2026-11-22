@@ -151,7 +151,7 @@ fn released_v012_receipt_replays_with_its_original_withdrawal_semantics() -> Res
     }
 
     let mut vector: Vector =
-        serde_json::from_str(include_str!("fixtures/rep-v0.1.2-required-withdrawal.json"))?;
+        serde_json::from_str(include_str!("fixtures/v0.1.2-required-withdrawal.json"))?;
     let mut archive = Archive::memory()?;
     let head = archive.import(&vector.bundle)?;
     assert_eq!(head, vector.request.label_head);

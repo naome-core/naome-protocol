@@ -49,9 +49,9 @@ def create_fixtures(directory):
     page.save(directory / "nitrate.pdf")
 
 
-def verify_packaged_search(rep, root, environment):
+def verify_packaged_search(nao, root, environment):
     def run(*args):
-        return json.loads(subprocess.check_output([rep, *args], cwd=root, env=environment, timeout=420))
+        return json.loads(subprocess.check_output([nao, *args], cwd=root, env=environment, timeout=420))
 
     media = Path(environment["NAOME_MEDIA_FIXTURES"]) / "bridge.png"
     object_id = run("capture", media, "image/png")
@@ -65,8 +65,8 @@ def verify_packaged_search(rep, root, environment):
     print("Verified multilingual text and image queries through the packaged CLI")
 
 
-def qualify(rep=None):
-    with tempfile.TemporaryDirectory(prefix="rep-search-qualification-") as temporary:
+def qualify(nao=None):
+    with tempfile.TemporaryDirectory(prefix="nao-search-qualification-") as temporary:
         root = Path(temporary)
         environment = os.environ.copy()
         if "NAOME_SEARCH_MODEL" not in environment:
@@ -86,8 +86,8 @@ def qualify(rep=None):
             check=True,
             env=environment,
         )
-        if rep is not None:
-            verify_packaged_search(rep, root, environment)
+        if nao is not None:
+            verify_packaged_search(nao, root, environment)
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ fn cli_export_preserves_exchange_bytes_and_existing_files() -> Result<()> {
     let head = source.selected_snapshot("bench", BTreeSet::new(), [id].into())?;
     let example = Bundle::read(&include_bytes!("../spec/examples/exchange-v1.json")[..])?;
     let bytes = serde_json::to_vec(&example)?;
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rep"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nao"));
     command
         .arg("--db")
         .arg(&db)

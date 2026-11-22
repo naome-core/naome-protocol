@@ -14,7 +14,7 @@ use tempfile::tempdir;
 
 #[test]
 fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rep"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
         .arg("capabilities")
         .output()?;
     assert!(
@@ -502,15 +502,15 @@ fn controlled_test_exemptions_require_witness_and_a_scientific_pass() -> Result<
 fn public_interchange_runs_through_cli_and_grades_external_output() -> Result<()> {
     use std::process::Command;
     let dir = tempdir()?;
-    let rep = env!("CARGO_BIN_EXE_rep");
-    let trial = Command::new(rep).arg("trial").arg(dir.path()).output()?;
+    let nao = env!("CARGO_BIN_EXE_nao");
+    let trial = Command::new(nao).arg("trial").arg(dir.path()).output()?;
     assert!(
         trial.status.success(),
         "{}",
         String::from_utf8_lossy(&trial.stderr)
     );
     let cases = dir.path().join("conformance");
-    let run = Command::new(rep).arg("suite").arg(&cases).output()?;
+    let run = Command::new(nao).arg("suite").arg(&cases).output()?;
     assert!(
         run.status.success(),
         "{}",
@@ -519,7 +519,7 @@ fn public_interchange_runs_through_cli_and_grades_external_output() -> Result<()
     let submission = dir.path().join("actual.json");
     std::fs::write(&submission, &run.stdout)?;
     let grade = || {
-        Command::new(rep)
+        Command::new(nao)
             .arg("grade")
             .arg(cases.join("answers.json"))
             .arg(&submission)

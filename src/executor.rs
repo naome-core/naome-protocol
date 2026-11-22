@@ -197,7 +197,7 @@ impl Archive {
 }
 
 // Build the aggregate once from the authoritative attempts. SQLite maintains it
-// for every new attempt, including writes made by an older REP binary.
+// for every new attempt, including writes made by older CLI versions.
 fn initialize_attempt_spend(tx: &Transaction<'_>) -> Result<()> {
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='rep_attempt_spend')",

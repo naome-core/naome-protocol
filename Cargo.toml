@@ -1,6 +1,6 @@
 [package]
 name = "naome-protocol"
-default-run = "rep"
+default-run = "nao"
 version = "0.1.6"
 edition = "2024"
 rust-version = "1.89"
@@ -16,7 +16,7 @@ semantic-search = ["dep:base64"]
 cli = ["dep:clap", "dep:getrandom", "dep:tempfile"]
 
 [[bin]]
-name = "rep"
+name = "nao"
 path = "src/main.rs"
 required-features = ["cli"]
 
