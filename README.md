@@ -2,9 +2,43 @@
 
 `naome-protocol` stores, exchanges and evaluates content-addressed research evidence. The library and its `rep` CLI use local SQLite archives and portable exchange files. Each judgment binds a claim, its evidence, the recipient's policy and the inventory searched for corrections. [Whitepaper](spec/research-evidence-protocol.pdf) · [LaTeX source](spec/research-evidence-protocol.tex)
 
+## Install REP
+
+Download the archive for your system from [GitHub Releases](https://github.com/naome-core/naome-protocol/releases) and compare its SHA-256 with the adjacent `.sha256` file. Extract it and run `rep --version` from that directory.
+
+| Platform | Download suffix | Run |
+| --- | --- | --- |
+| Windows x64 | `x86_64-pc-windows-msvc.zip` | `.\rep.exe --version` |
+| macOS 15 on Apple silicon | `aarch64-apple-darwin.tar.gz` | `./rep --version` |
+| Linux x64 with glibc 2.35 or later | `x86_64-unknown-linux-gnu.tar.gz` | `./rep --version` |
+
+PowerShell can expand the ZIP with `Expand-Archive` and check its hash with `Get-FileHash -Algorithm SHA256`. On Linux and macOS, use `tar -xzf` to extract the archive and `shasum -a 256` or `sha256sum` to check its hash. Keep custody databases and signing seeds in a private user directory. On Windows new files inherit access permissions from that directory.
+
 ## Use an offline archive
 
-From this crate's directory, run `cargo install --locked --path .`. Set a database with `rep --db FILE`. The default is `evidence.sqlite`. The following example uses a fresh directory, a C compiler for bundled SQLite and `jq` for reading JSON output.
+To build from the source checkout, run `cargo install --locked --path .` with Rust and a C compiler for bundled SQLite. On Windows, install the MSVC C++ build tools and Windows SDK for the Rust MSVC toolchain. Set a database with `rep --db FILE`. The default is `evidence.sqlite`.
+
+From the directory where you extracted the Windows download, run this in PowerShell.
+
+```powershell
+$rep = (Resolve-Path .\rep.exe).Path
+$archive = Join-Path $env:TEMP ("rep-" + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $archive | Out-Null
+Push-Location $archive
+try {
+    Set-Content -Encoding ascii reading.txt 'instrument readback'
+    $id = & $rep blob reading.txt | ConvertFrom-Json
+    $head = & $rep snapshot readback --root $id | ConvertFrom-Json
+    & $rep export $head exchange.json
+    & $rep --db receiver.sqlite import exchange.json
+    & $rep --db receiver.sqlite resolve $head $id received.txt
+    (Get-FileHash reading.txt).Hash -eq (Get-FileHash received.txt).Hash
+} finally {
+    Pop-Location
+}
+```
+
+On Linux and macOS, the following example uses `jq` for reading JSON output. Put the installed `rep` on your PATH before changing directories.
 
 ```sh
 export archive_dir="$(mktemp -d)"
@@ -19,6 +53,35 @@ cmp reading.txt received.txt
 ```
 
 Use `rep put` for typed research documents and `rep assess` for a policy-bound receipt. `rep --help` lists the archive, investigation, correction, migration and learning commands. The `naome archive` frontend accepts the same operations in a node directory. To embed the Rust library alone, select `naome-protocol` with `default-features = false`. The default `cli` feature adds argument parsing, command I/O, synthetic trials and the grader.
+
+## Search with a local model
+
+Lexical search runs in the bundled executable. Semantic and hybrid search use a local [EmbeddingGemma 2 checkpoint](https://huggingface.co/google/embeddinggemma-2) and Python 3.12. The download includes the same runtime requirements used in release CI. Run the setup commands from the extracted directory.
+
+On Windows, use an x64 Python 3.12 installation.
+
+```powershell
+py -3.12 -m venv .venv
+$python = '.\.venv\Scripts\python.exe'
+& $python -m pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-search-torch.txt
+& $python -m pip install -r requirements-search.txt
+& .\.venv\Scripts\hf.exe download google/embeddinggemma-2 --revision f9972ac22e696a105c482202646979e33e4b5a1e --local-dir model
+.\rep.exe find "calibration results" --prepare --model model --python $python
+```
+
+On Linux and macOS, use a native Python 3.12 installation.
+
+```sh
+python3.12 -m venv .venv
+if [ "$(uname -s)" = Linux ]; then
+  .venv/bin/python -m pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-search-torch.txt
+fi
+.venv/bin/python -m pip install -r requirements-search.txt
+.venv/bin/hf download google/embeddinggemma-2 --revision f9972ac22e696a105c482202646979e33e4b5a1e --local-dir model
+./rep find "calibration results" --prepare --model model --python .venv/bin/python
+```
+
+Run searches against an archive with a snapshot. Add `--db FILE` when using a custody database other than `evidence.sqlite`. Use `--input FILE` for a query from an image, audio, video, PDF or text file. Once the checkpoint and Python dependencies are installed, the model worker uses local files offline.
 
 ## Bootstrap and exchange
 

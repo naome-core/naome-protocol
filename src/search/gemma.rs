@@ -36,7 +36,14 @@ impl EmbeddingGemma {
             "expected a local EmbeddingGemma 2 model directory"
         );
         let mut child = Command::new(python)
-            .args(["-I", "-u", "-c", include_str!("gemma_worker.py")])
+            .args([
+                "-I",
+                "-X",
+                "utf8",
+                "-u",
+                "-c",
+                include_str!("gemma_worker.py"),
+            ])
             .arg(directory)
             .env("HF_HUB_OFFLINE", "1")
             .env("TRANSFORMERS_OFFLINE", "1")

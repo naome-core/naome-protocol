@@ -12,17 +12,21 @@ def require_success(needs, expected):
     if unexpected:
         raise ValueError("Unexpected CI dependencies: " + ", ".join(sorted(unexpected)))
     failures = []
-    for name in expected:
+    for name, required_result in expected.items():
         result = needs.get(name, {}).get("result")
-        if result != "success":
-            failures.append(f"{name}: {result or 'missing'}")
+        if result != required_result:
+            failures.append(f"{name}: {result or 'missing'} (expected {required_result})")
     if failures:
         raise ValueError("Required CI dependencies did not succeed: " + ", ".join(failures))
 
 
 if __name__ == "__main__":
     try:
-        require_success(json.loads(os.environ["NEEDS"]), sys.argv[1:])
+        expected = {}
+        for argument in sys.argv[1:]:
+            name, _, result = argument.partition("=")
+            expected[name] = result or "success"
+        require_success(json.loads(os.environ["NEEDS"]), expected)
     except (KeyError, ValueError, TypeError) as error:
         raise SystemExit(str(error)) from error
-    print("All required CI dependencies succeeded.")
+    print("All CI dependencies reached their required results.")
