@@ -8,13 +8,13 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Default)]
-pub(super) struct MeasurementUse<'a> {
+pub(crate) struct MeasurementUse<'a> {
     mode: Option<&'a str>,
     event: Option<i64>,
 }
 
 impl<'a> MeasurementUse<'a> {
-    pub(super) fn from_reading(reading: &'a Document, rules: WithdrawalRules) -> Self {
+    pub(crate) fn from_reading(reading: &'a Document, rules: WithdrawalRules) -> Self {
         let mode = reading.fields.get("mode").and_then(|v| v.as_str());
         Self {
             // The first scoped evaluator treated an empty direct reading as missing.
@@ -23,7 +23,29 @@ impl<'a> MeasurementUse<'a> {
         }
     }
 
-    pub(super) fn within_withdrawal(self, notice: &Document, first_scoped: bool) -> Result<bool> {
+    pub(crate) fn for_argument(
+        argument: &Document,
+        reading: impl FnOnce(Id) -> Option<&'a Document>,
+        rules: WithdrawalRules,
+    ) -> Option<Self> {
+        match argument
+            .fields
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("recorded-difference" | "simultaneous-bounds") => Some(
+                argument
+                    .roles("reading")
+                    .next()
+                    .and_then(reading)
+                    .map(|doc| Self::from_reading(doc, rules))
+                    .unwrap_or_default(),
+            ),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn within_withdrawal(self, notice: &Document, first_scoped: bool) -> Result<bool> {
         let mode = notice
             .fields
             .get("mode")
@@ -79,10 +101,8 @@ impl Evaluation<'_> {
         let mut branches = BTreeMap::new();
         let mut seen = BTreeSet::new();
         let mut correction_applies = false;
-        for (&id, n) in &self.docs {
-            if n.kind != Kind::Notice {
-                continue;
-            }
+        for &id in &self.inventory.notices {
+            let n = &self.inventory.documents[&id];
             out.visible_notices.insert(id);
             if !n.roles("calibration").any(|k| targets.contains(&k)) {
                 continue;

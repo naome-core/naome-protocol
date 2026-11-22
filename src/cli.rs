@@ -1,3 +1,6 @@
+mod search;
+pub use search::{FindArguments, LocalSearch, PrepareSearchArguments, SearchRequest};
+
 use crate::{
     evaluation, executor, fixture, kit, learning,
     profile::{self, Document, Kind, PUBLIC},
@@ -11,7 +14,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -83,7 +86,7 @@ pub enum ArchiveCommand {
         source: String,
         #[arg(long)]
         parent: Vec<Id>,
-        /// Select an object and its transitive inputs for release. Repeat for multiple roots.
+        /// Select an object and its transitive inputs. Repeat for multiple roots.
         #[arg(long)]
         root: Vec<Id>,
     },
@@ -117,6 +120,12 @@ pub enum ArchiveCommand {
         #[arg(long, default_value_t = 100)]
         budget: usize,
     },
+    /// Search authorized archive records and text passages by word or meaning.
+    Find(FindArguments),
+    /// Prepare archive text, media and embeddings independently of a search.
+    PrepareSearch(PrepareSearchArguments),
+    /// Reuse a local model for JSON-line find and prepare-search requests on stdin.
+    SearchSession,
     /// Trace required input edges and the unresolved frontier.
     Explain {
         head: Id,
@@ -264,6 +273,13 @@ fn publish<T>(path: &Path, write: impl FnOnce(&mut File) -> Result<T>) -> Result
 fn output(path: &Path, data: &[u8]) -> Result<()> {
     publish(path, |f| Ok(f.write_all(data)?))
 }
+fn output_json(path: &Path, data: &impl Serialize) -> Result<()> {
+    publish(path, |file| {
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, data)?;
+        Ok(writer.flush()?)
+    })
+}
 pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
     let public = Id::blob(PUBLIC);
     match &command {
@@ -275,6 +291,8 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 "profile": Id::blob(profile::PROFILE),
                 "measurement_profile": Id::blob(profile::MEASUREMENT_PROFILE),
                 "public": public,
+                "receipt_evaluator": evaluation::EVALUATOR_ID,
+                "replay_evaluators": evaluation::replay_evaluator_ids().collect::<Vec<_>>(),
                 "evaluators": ["simultaneous-bounds","certified-hull","signed-tests","typed-outcome","delegated","recorded-difference","least-zero","domain-inclusion","source-independence","sample-description","survey-identification","unit-grid-map"],
             }));
         }
@@ -416,6 +434,13 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 after,
             )?)
         }
+        ArchiveCommand::Find(arguments) => print(LocalSearch::default().find(&db, arguments)?),
+        ArchiveCommand::PrepareSearch(arguments) => {
+            print(LocalSearch::default().prepare(&db, arguments)?)
+        }
+        ArchiveCommand::SearchSession => {
+            LocalSearch::default().serve(&db, std::io::stdin().lock(), std::io::stdout().lock())
+        }
         ArchiveCommand::Explain {
             head,
             id,
@@ -443,7 +468,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             } else {
                 db.export(&s, &purpose)?
             };
-            output(&path, &serde_json::to_vec(&packet)?)?;
+            output_json(&path, &packet)?;
             print(
                 json!({"head":packet.head,"continuation":packet.continuation,"packets":packet.packets.len()}),
             )
@@ -456,7 +481,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             output: path,
         } => {
             let disclosure = db.project_hull(&db.head(head)?, receipt, &signing_key(&key)?, f)?;
-            output(&path, &serde_json::to_vec(&disclosure.packet)?)?;
+            output_json(&path, &disclosure.packet)?;
             print(
                 json!({"head":disclosure.packet.head,"queries":disclosure.queries,"private_mapping":disclosure.private_mapping}),
             )

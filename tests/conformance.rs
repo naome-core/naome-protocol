@@ -13,6 +13,40 @@ use std::collections::BTreeSet;
 use tempfile::tempdir;
 
 #[test]
+fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rep"))
+        .arg("capabilities")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let capabilities: Value = serde_json::from_slice(&output.stdout)?;
+    let archive = Archive::memory()?;
+    let case = fixture::seed(&archive, Format::A)?;
+    let receipt = archive.read(&archive.head(case.published)?, case.receipts[2], "read")?;
+    assert_eq!(
+        capabilities["receipt_evaluator"],
+        receipt.fields["evaluator"]
+    );
+    let replay =
+        serde_json::from_value::<BTreeSet<String>>(capabilities["replay_evaluators"].clone())?;
+    let expected = [
+        "rep-rust-rules-1",
+        "rep-rust-0.1.2",
+        "rep-rust-0.1.2-dev.1",
+        "rep-rust-0.1.2-dev",
+        "rep-rust-0.1.1",
+        "rep-rust-0.1.0",
+    ]
+    .map(String::from)
+    .into();
+    assert_eq!(replay, expected);
+    Ok(())
+}
+
+#[test]
 fn full_exchange_is_reproducible_from_reopened_databases() -> Result<()> {
     let dir = tempdir()?;
     let results = fixture::trial(dir.path())?;

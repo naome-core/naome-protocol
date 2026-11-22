@@ -1,5 +1,5 @@
 use crate::{
-    profile::{Document, Kind, PUBLIC, link},
+    profile::{Document, Kind, PROFILE, PUBLIC, link},
     store::{Archive, Snapshot},
     wire::{Format, Id, Record},
 };
@@ -105,13 +105,30 @@ impl Archive {
             target,
             Id::blob(PUBLIC),
         )?;
-        let head = self.snapshot(&native.source, [s.id()?, native_head].into())?;
-        self.verify_mapping(&head, mapping)?;
+        let exchange = Snapshot {
+            version: 1,
+            source: native.source,
+            parents: [source_manifest, native_head].into(),
+            objects: s
+                .objects
+                .union(&native.objects)
+                .copied()
+                .chain([
+                    source_manifest,
+                    native_head,
+                    mapping,
+                    Id::blob(PROFILE),
+                    Id::blob(PUBLIC),
+                ])
+                .collect(),
+        };
+        self.verify_mapping(&exchange, mapping)?;
+        let exchange_head = self.save(&exchange)?;
         tx.commit()?;
         Ok(Migration {
             mapping,
             native_head,
-            exchange_head: head.id()?,
+            exchange_head,
             pairs,
             retained,
         })

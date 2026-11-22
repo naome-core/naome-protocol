@@ -84,10 +84,7 @@ fn prior_release_receipts_must_replay_before_their_labels_can_be_used() -> Resul
     let case = fixture::seed(&archive, format)?;
     let evidence = archive.head(case.published)?;
     let original = archive.read(&evidence, case.receipts[2], "read")?;
-    assert_eq!(
-        original.fields["evaluator"],
-        json!(concat!("rep-rust-", env!("CARGO_PKG_VERSION")))
-    );
+    assert_eq!(original.fields["evaluator"], json!("rep-rust-rules-1"));
     let plan = archive
         .read(&evidence, case.queries[2].arguments[0], "read")?
         .one("plan")?;
@@ -100,6 +97,8 @@ fn prior_release_receipts_must_replay_before_their_labels_can_be_used() -> Resul
         ("rep-rust-0.1.2-dev", true, false),
         ("rep-rust-0.1.2-dev.1", false, true),
         ("rep-rust-0.1.2-dev.1", true, false),
+        ("rep-rust-0.1.2", false, true),
+        ("rep-rust-0.1.2", true, false),
         ("unknown-evaluator", false, false),
     ] {
         let mut receipt = original.clone();
@@ -137,6 +136,132 @@ fn prior_release_receipts_must_replay_before_their_labels_can_be_used() -> Resul
         );
         assert_eq!(manifest.withheld.contains_key(&label), !accepted);
     }
+    Ok(())
+}
+
+#[test]
+fn released_v012_receipt_replays_with_its_original_withdrawal_semantics() -> Result<()> {
+    // Exported by tag v0.1.2 (c546fba6ed08403c045b3438fd7ad446de258c5f).
+    // The query requires an axial withdrawal, and the reading is radial.
+    #[derive(serde::Deserialize)]
+    struct Vector {
+        bundle: naome_protocol::store::Bundle,
+        receipt: Id,
+        request: TrainingRequest,
+    }
+
+    let mut vector: Vector =
+        serde_json::from_str(include_str!("fixtures/rep-v0.1.2-required-withdrawal.json"))?;
+    let mut archive = Archive::memory()?;
+    let head = archive.import(&vector.bundle)?;
+    assert_eq!(head, vector.request.label_head);
+    let label = vector.request.examples[0].label;
+    let view = archive.head(head)?;
+    let receipt = archive.read(&view, vector.receipt, "read")?;
+    assert_eq!(receipt.fields["evaluator"], json!("rep-rust-0.1.2"));
+    let original: evaluation::Receipt = receipt.field("original_transcript")?;
+    assert_eq!(original.result, Some(Standing::Unresolved));
+    assert!(!original.horizon_complete);
+    assert!(
+        original
+            .obligations
+            .contains("required notice applicability unknown")
+    );
+
+    let replay = archive.training_manifest(&vector.request, Format::A)?;
+    assert_eq!(replay.included, [label]);
+    assert!(replay.withheld.is_empty());
+
+    let horizon = archive.head(receipt.one("snapshot")?)?;
+    let query: Query = receipt.field("original_query")?;
+    let current = evaluation::assess(&archive, &horizon, &query)?;
+    assert!(current.horizon_complete);
+    assert_eq!(current.result, Some(Standing::Supported));
+    vector.request.standing = naome_protocol::learning::LabelStanding::Current;
+    let extraction = archive.training_manifest(&vector.request, Format::A)?;
+    assert!(extraction.included.is_empty());
+    assert_eq!(
+        extraction.withheld[&label],
+        "label requires reassessment at the requested notice horizon"
+    );
+    Ok(())
+}
+
+#[test]
+fn training_reuses_inventories_without_widening_query_budgets() -> Result<()> {
+    let archive = Archive::memory()?;
+    let format = Format::A;
+    let case = fixture::seed(&archive, format)?;
+    let evidence = archive.head(case.published)?;
+    let query = &case.queries[2];
+    let plan = archive
+        .read(&evidence, query.arguments[0], "read")?
+        .one("plan")?;
+    let record_bytes = evidence
+        .objects
+        .iter()
+        .filter(|id| id.format().is_some())
+        .try_fold(0, |total, &id| -> Result<usize> {
+            Ok(total + archive.resolve(&evidence, id, "read")?.len())
+        })?;
+    let queries = [
+        query.clone(),
+        Query {
+            budget: evidence.objects.len(),
+            ..query.clone()
+        },
+        Query {
+            byte_limit: record_bytes,
+            ..query.clone()
+        },
+    ];
+    let receipts = queries
+        .iter()
+        .map(|query| -> Result<Id> {
+            let receipt = evaluation::assess(&archive, &evidence, query)?;
+            assert!(receipt.horizon_complete);
+            assert_eq!(receipt.result, Some(Standing::Supported));
+            evaluation::deposit_receipt(&archive, &evidence, query, &receipt, format)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let assessed = archive.snapshot("assessed", [case.published].into())?;
+    let labels = receipts
+        .into_iter()
+        .map(|id| archive.label(&assessed, id, "synthetic", None, None, format))
+        .collect::<Result<Vec<_>>>()?;
+    let labeled = archive.snapshot("labeled", [assessed.id()?].into())?;
+    let mut request = TrainingRequest {
+        feature_cutoff: case.feature_cutoff,
+        forecast_plan: None,
+        mappings: vec![],
+        label_head: labeled.id()?,
+        policy: case.policy,
+        standing: Default::default(),
+        project: None,
+        examples: labels
+            .iter()
+            .map(|&label| Example {
+                features: vec![plan],
+                label,
+                partition: "train".into(),
+            })
+            .collect(),
+        independent_roles: BTreeSet::new(),
+        binary: true,
+    };
+    let current = archive.training_manifest(&request, format)?;
+    assert_eq!(current.included, labels[..1]);
+    for label in &labels[1..] {
+        assert_eq!(
+            current.withheld[label],
+            "label requires reassessment at the requested notice horizon"
+        );
+    }
+    request.standing = naome_protocol::learning::LabelStanding::Historical;
+    assert_eq!(
+        archive.training_manifest(&request, format)?.included,
+        labels
+    );
     Ok(())
 }
 

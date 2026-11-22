@@ -129,10 +129,11 @@ impl Archive {
             self.reserve(s, r, authority_keys, now)?
         {
             let occurrence = witness.map(|x| x.parse()).transpose()?;
-            let closure = if let Some(id) = occurrence {
-                Some(self.close_payload_check(f, r, &decision, plan_id, id)?)
-            } else {
-                None
+            let closure = match (state.as_str(), occurrence) {
+                ("observed", Some(id)) => {
+                    Some(self.close_payload_check(f, r, &decision, plan_id, id)?)
+                }
+                _ => None,
             };
             return Ok(Execution {
                 state,

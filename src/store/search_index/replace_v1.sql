@@ -1,0 +1,13 @@
+DROP TRIGGER rep_search_object_arrival;
+DROP TRIGGER rep_search_object_withdrawal;
+DROP TABLE rep_search_limited_media;
+DROP TABLE rep_search_vectors;
+DROP TABLE rep_search_vector_progress;
+DROP TABLE rep_search_terms;
+DROP TABLE rep_search_passages;
+DROP TABLE rep_search_sources;
+DROP TABLE rep_search_entries;
+DROP TABLE rep_search_waiting;
+DROP TABLE rep_search_heads;
+DROP TABLE rep_search_revision;
+DROP TABLE rep_search_schema;

@@ -29,6 +29,40 @@ fn published_offline_exchange_matches_native_export_and_import() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "cli")]
+#[test]
+fn cli_export_preserves_exchange_bytes_and_existing_files() -> Result<()> {
+    use std::{fs, process::Command};
+
+    let directory = tempfile::tempdir()?;
+    let db = directory.path().join("source.sqlite");
+    let path = directory.path().join("exchange.json");
+    let source = Archive::open(&db)?;
+    let id = source.blob(b"OK\n", Id::blob(PUBLIC))?;
+    let head = source.selected_snapshot("bench", BTreeSet::new(), [id].into())?;
+    let example = Bundle::read(&include_bytes!("../spec/examples/exchange-v1.json")[..])?;
+    let bytes = serde_json::to_vec(&example)?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rep"));
+    command
+        .arg("--db")
+        .arg(&db)
+        .arg("export")
+        .arg(head.id()?.to_string())
+        .arg(&path);
+    let first = command.output()?;
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(fs::read(&path)?, bytes);
+
+    fs::write(&path, b"keep this file")?;
+    assert!(!command.output()?.status.success());
+    assert_eq!(fs::read(&path)?, b"keep this file");
+    Ok(())
+}
+
 #[test]
 fn both_kits_and_published_identifiers() -> Result<()> {
     for (f, len, digest) in [
@@ -136,6 +170,88 @@ fn paged_exchange_converges_on_the_same_inventory() -> Result<()> {
     assert_eq!(transferred, s.objects);
     for &id in &s.objects {
         assert_eq!(a.resolve(&s, id, "read")?, b.resolve(&s, id, "read")?);
+    }
+    Ok(())
+}
+
+#[test]
+fn offline_selection_and_exchange_support_payloads_above_the_network_limit() -> Result<()> {
+    use naome_protocol::store::sharing::MAX_MEMBER_BYTES;
+
+    let source = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let bytes = vec![1; MAX_MEMBER_BYTES + 1];
+    let selected = source.blob(&bytes, public)?;
+    let unrelated = source.blob(b"unrelated", public)?;
+    let snapshot = source.selected_snapshot("offline", BTreeSet::new(), [selected].into())?;
+    assert!(!snapshot.objects.contains(&unrelated));
+
+    let mut receiver = Archive::memory()?;
+    let head = receiver.import(&source.export(&snapshot, "read")?)?;
+    assert_eq!(
+        receiver.resolve(&receiver.head(head)?, selected, "read")?,
+        bytes
+    );
+    for archive in [&source, &receiver] {
+        let err = archive.release(head).unwrap_err();
+        assert!(err.to_string().contains("network limit"), "{err}");
+        assert!(archive.observed_releases()?.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn migration_exports_only_the_paired_inventories_and_mapping_evidence() -> Result<()> {
+    for (source_format, target_format) in [(Format::A, Format::B), (Format::B, Format::A)] {
+        let archive = Archive::memory()?;
+        let public = Id::blob(PUBLIC);
+        let raw = archive.blob(b"selected source bytes", public)?;
+        let root = archive.document(
+            &Document::new(
+                Kind::Question,
+                "fixture",
+                "scope",
+                json!({"question":"what?"}),
+                vec![link("evidence", raw)],
+            )?,
+            source_format,
+            public,
+        )?;
+        let source = archive.selected_snapshot("scoped source", BTreeSet::new(), [root].into())?;
+        let unrelated = archive.blob(b"other local evidence", public)?;
+        let other_root = archive.document(
+            &Document::new(
+                Kind::Question,
+                "other",
+                "scope",
+                json!({"question":"unrelated"}),
+                vec![link("evidence", unrelated)],
+            )?,
+            source_format,
+            public,
+        )?;
+
+        let migration = archive.migrate(&source, target_format, "custodian")?;
+        let exchange = archive.head(migration.exchange_head)?;
+        assert_eq!(migration.pairs.len(), 1);
+        assert_eq!(migration.pairs[&root].format(), Some(target_format));
+        let bundle = archive.export(&exchange, "read")?;
+        for unrelated in [unrelated, other_root] {
+            assert!(!bundle.snapshot.objects.contains(&unrelated));
+            assert!(!bundle.packets.iter().any(|packet| packet.id == unrelated));
+            assert!(!bundle.omitted.contains(&unrelated));
+        }
+        let mut recipient = Archive::memory()?;
+        let head = recipient.import(&bundle)?;
+        let received = recipient.head(head)?;
+        assert_eq!(
+            recipient.verify_mapping(&received, migration.mapping)?,
+            migration.pairs
+        );
+        assert_eq!(
+            recipient.resolve(&received, raw, "read")?,
+            b"selected source bytes"
+        );
     }
     Ok(())
 }

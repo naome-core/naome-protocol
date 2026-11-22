@@ -7,7 +7,13 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, io::Read};
+use std::{
+    collections::BTreeSet,
+    io::{BufReader, Read},
+};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,12 +35,52 @@ pub struct Bundle {
 impl Bundle {
     /// Decode one offline exchange packet within the import byte budget.
     pub fn read(reader: impl Read) -> Result<Self> {
-        const LIMIT: usize = 256 * 1024 * 1024;
-        let mut bytes = Vec::new();
-        reader.take(LIMIT as u64 + 1).read_to_end(&mut bytes)?;
-        ensure!(bytes.len() <= LIMIT, "exchange byte limit");
-        Ok(serde_json::from_slice(&bytes)?)
+        Self::read_bounded(reader, 256 * 1024 * 1024)
     }
+
+    fn read_bounded(reader: impl Read, limit: u64) -> Result<Self> {
+        let mut limited = reader.take(limit + 1);
+        let bundle = serde_json::from_reader(BufReader::new(&mut limited));
+        // The parser checks through EOF, including trailing whitespace. Reading
+        // the sentinel byte distinguishes a valid file at the limit from a prefix.
+        ensure!(limited.limit() > 0, "exchange byte limit");
+        Ok(bundle?)
+    }
+}
+
+fn decode_packet_hex(encoded: &str, decoded: &mut Vec<u8>) -> Result<(), hex::FromHexError> {
+    const NIBBLES: [u8; 256] = {
+        let mut values = [u8::MAX; 256];
+        let lower = b"0123456789abcdef";
+        let upper = b"0123456789ABCDEF";
+        let mut n = 0;
+        while n < lower.len() {
+            values[lower[n] as usize] = n as u8;
+            values[upper[n] as usize] = n as u8;
+            n += 1;
+        }
+        values
+    };
+
+    let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(hex::FromHexError::OddLength);
+    }
+
+    // Accumulate invalid-nibble sentinels while decoding. Only malformed input
+    // needs a second pass to recover the precise error and byte offset.
+    let mut nibbles = 0;
+    decoded.clear();
+    decoded.extend(pairs.iter().map(|&[high, low]| {
+        let high = NIBBLES[high as usize];
+        let low = NIBBLES[low as usize];
+        nibbles |= high | low;
+        (high << 4) | low
+    }));
+    if nibbles > 0x0f {
+        hex::decode_to_slice(encoded, decoded)?;
+    }
+    Ok(())
 }
 
 impl Archive {
@@ -123,14 +169,15 @@ impl Archive {
         );
         let tx = self.db.transaction()?;
         let mut ids = b.omitted.clone();
+        let mut bytes = Vec::new();
         for p in &b.packets {
             ensure!(
                 ids.insert(p.id) && p.hex.len() <= 2 * MAX_BYTES,
                 "duplicate or oversized packet"
             );
-            let bytes = hex::decode(&p.hex)?;
+            decode_packet_hex(&p.hex, &mut bytes)?;
             validate(p.id, &bytes, p.access)?;
-            insert(&tx, p.id, &bytes, p.access)?
+            insert(&tx, p.id, &bytes, p.access)?;
         }
         ensure!(ids == b.snapshot.objects, "inventory mismatch");
         tx.execute(

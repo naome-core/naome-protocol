@@ -1,4 +1,5 @@
 mod exchange;
+mod search_index;
 pub mod sharing;
 pub use exchange::{Bundle, Packet};
 
@@ -89,9 +90,13 @@ impl Archive {
         Ok(archive)
     }
     pub fn blob(&self, bytes: &[u8], access: Id) -> Result<Id> {
+        self.store_blob(bytes, access).map(|(id, _)| id)
+    }
+
+    pub(crate) fn store_blob(&self, bytes: &[u8], access: Id) -> Result<(Id, ObjectAvailability)> {
+        check_object_bounds(bytes, access)?;
         let id = Id::blob(bytes);
-        self.deposit(id, bytes, access)?;
-        Ok(id)
+        Ok((id, insert(&self.db, id, bytes, access)?))
     }
     pub fn document(&self, d: &Document, f: Format, access: Id) -> Result<Id> {
         let record = d.encode(access)?;
@@ -108,7 +113,7 @@ impl Archive {
     }
     pub fn deposit(&self, id: Id, bytes: &[u8], access: Id) -> Result<()> {
         validate(id, bytes, access)?;
-        insert(&self.db, id, bytes, access)
+        insert(&self.db, id, bytes, access).map(|_| ())
     }
     pub fn withdraw(&self, id: Id) -> Result<()> {
         ensure!(
@@ -225,7 +230,11 @@ impl Archive {
     ) -> Result<Document> {
         self.read_with(id, |id| self.resolve_for_training(s, id, access))
     }
-    fn read_with(&self, id: Id, resolve: impl Fn(Id) -> Result<Vec<u8>>) -> Result<Document> {
+    fn read_with(
+        &self,
+        id: Id,
+        mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
+    ) -> Result<Document> {
         let format = id.format().context("expected record")?;
         let r = Record::decode(&resolve(id)?, format)?;
         let profile = supported_profile(r.profile).context("unsupported profile")?;
@@ -250,6 +259,49 @@ impl Archive {
         self.save(&s)?;
         Ok(s)
     }
+    /// Seal the readable forward dependency closure of explicitly selected objects.
+    pub fn selected_snapshot(
+        &self,
+        source: &str,
+        parents: BTreeSet<Id>,
+        roots: BTreeSet<Id>,
+    ) -> Result<Snapshot> {
+        ensure!(!roots.is_empty(), "no snapshot roots selected");
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let mut pending: Vec<_> = roots.iter().copied().collect();
+        let mut objects = roots;
+        while let Some(id) = pending.pop() {
+            let (bytes, access) = self
+                .raw(id)?
+                .context("selected object or dependency is unavailable")?;
+            self.check_access(access, |policy| crate::profile::allows(policy, "read"))?;
+            let record = id
+                .format()
+                .map(|format| Record::decode(&bytes, format))
+                .transpose()?;
+            // Blob access is custody metadata outside the hashed payload. Record
+            // inputs also carry the profile and each ordered evidence reference.
+            for dependency in std::iter::once(access).chain(record.iter().flat_map(Record::inputs))
+            {
+                if objects.insert(dependency) {
+                    pending.push(dependency);
+                }
+            }
+        }
+        let snapshot = Snapshot {
+            version: 1,
+            source: source.into(),
+            parents,
+            objects,
+        };
+        self.save(&snapshot)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
     pub fn save(&self, s: &Snapshot) -> Result<Id> {
         ensure!(s.version == 1 && !s.source.is_empty(), "invalid snapshot");
         let bytes = serde_json::to_vec(s)?;
@@ -465,31 +517,47 @@ impl Archive {
         })
     }
 }
-fn validate(id: Id, b: &[u8], access: Id) -> Result<()> {
+fn check_object_bounds(bytes: &[u8], access: Id) -> Result<()> {
     ensure!(
-        b.len() <= MAX_BYTES && access.format().is_none(),
+        bytes.len() <= MAX_BYTES && access.format().is_none(),
         "invalid size or access reference"
     );
+    Ok(())
+}
+fn validate(id: Id, b: &[u8], access: Id) -> Result<()> {
+    check_object_bounds(b, access)?;
     id.verify(b)?;
     if let Some(f) = id.format() {
         ensure!(Record::decode(b, f)?.access == access, "access mismatch")
     }
     Ok(())
 }
-fn insert(db: &Connection, id: Id, b: &[u8], access: Id) -> Result<()> {
+#[derive(PartialEq, Eq)]
+pub(crate) enum ObjectAvailability {
+    Available,
+    Withdrawn,
+}
+
+fn insert(db: &Connection, id: Id, b: &[u8], access: Id) -> Result<ObjectAvailability> {
     let added = db.execute(
         "INSERT OR IGNORE INTO objects VALUES(?,?,?)",
         params![id.to_string(), b, access.to_string()],
     )?;
-    if added == 0 {
-        let same: bool = db.query_row(
-            "SELECT access=? AND (data IS NULL OR data=?) FROM objects WHERE id=?",
-            params![access.to_string(), b, id.to_string()],
-            |r| r.get(0),
-        )?;
-        if !same {
-            bail!("conflicting access or bytes for immutable object {id}")
-        }
+    if added != 0 {
+        return Ok(ObjectAvailability::Available);
     }
-    Ok(())
+
+    let (same, withdrawn): (bool, bool) = db.query_row(
+        "SELECT access=? AND (data IS NULL OR data=?), data IS NULL FROM objects WHERE id=?",
+        params![access.to_string(), b, id.to_string()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if !same {
+        bail!("conflicting access or bytes for immutable object {id}");
+    }
+    Ok(if withdrawn {
+        ObjectAvailability::Withdrawn
+    } else {
+        ObjectAvailability::Available
+    })
 }

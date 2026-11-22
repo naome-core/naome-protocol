@@ -1,6 +1,9 @@
+mod inventory;
 mod measurement;
 mod science;
-use measurement::{MeasurementUse, Predicate};
+pub(crate) use inventory::ReadInventory;
+pub(crate) use measurement::MeasurementUse;
+use measurement::Predicate;
 
 use crate::{
     migration::Equivalence,
@@ -16,7 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) const V0_1_0_EVALUATOR_ID: &str = "rep-rust-0.1.0";
 const FIRST_SCOPED_EVALUATOR_ID: &str = "rep-rust-0.1.2-dev";
 const WITHDRAWAL_APPLICABILITY: &str = "withdrawal applicability";
-pub(crate) const EVALUATOR_ID: &str = concat!("rep-rust-", env!("CARGO_PKG_VERSION"));
+// This identifier versions the receipt semantics. Package releases can reuse it.
+const RULES_V1: &str = "rep-rust-rules-1";
+pub(crate) const EVALUATOR_ID: &str = RULES_V1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +65,7 @@ pub struct Query {
     pub mappings: Vec<Id>,
     #[serde(default)]
     pub previous_receipts: Vec<Id>,
+    /// Require a notice to apply or establish a signed withdrawal’s inapplicability.
     #[serde(default)]
     pub required_notices: Vec<Id>,
     #[serde(default)]
@@ -86,17 +92,20 @@ pub struct Receipt {
 }
 impl Receipt {
     pub(crate) fn excludes_withdrawal_for(&self, notice: Id, target: Id) -> bool {
+        self.excludes_withdrawal(|check| {
+            check.inputs.first() == Some(&notice)
+                && check
+                    .inputs
+                    .get(2..)
+                    .is_some_and(|targets| targets.contains(&target))
+        })
+    }
+
+    fn excludes_withdrawal(&self, matches: impl Fn(&Check) -> bool) -> bool {
         let mut checks = self
             .checks
             .iter()
-            .filter(|check| {
-                check.test == WITHDRAWAL_APPLICABILITY
-                    && check.inputs.first() == Some(&notice)
-                    && check
-                        .inputs
-                        .get(2..)
-                        .is_some_and(|targets| targets.contains(&target))
-            })
+            .filter(|check| check.test == WITHDRAWAL_APPLICABILITY && matches(check))
             .peekable();
         checks.peek().is_some() && checks.all(|check| check.status == Status::NotApplicable)
     }
@@ -116,16 +125,52 @@ impl Receipt {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum WithdrawalRules {
+pub(crate) enum WithdrawalRules {
     ScopeOnly,
     FirstScoped,
     Scoped,
 }
 
+struct EvaluatorRules {
+    ids: &'static [&'static str],
+    withdrawal: WithdrawalRules,
+    resolve_required_withdrawals: bool,
+}
+
+const REPLAY_RULES: &[EvaluatorRules] = &[
+    EvaluatorRules {
+        ids: &[RULES_V1],
+        withdrawal: WithdrawalRules::Scoped,
+        resolve_required_withdrawals: true,
+    },
+    EvaluatorRules {
+        ids: &["rep-rust-0.1.2", "rep-rust-0.1.2-dev.1"],
+        withdrawal: WithdrawalRules::Scoped,
+        resolve_required_withdrawals: false,
+    },
+    EvaluatorRules {
+        ids: &[FIRST_SCOPED_EVALUATOR_ID],
+        withdrawal: WithdrawalRules::FirstScoped,
+        resolve_required_withdrawals: false,
+    },
+    EvaluatorRules {
+        ids: &[V0_1_0_EVALUATOR_ID, "rep-rust-0.1.1"],
+        withdrawal: WithdrawalRules::ScopeOnly,
+        resolve_required_withdrawals: false,
+    },
+];
+
+#[cfg(feature = "cli")]
+pub(crate) fn replay_evaluator_ids() -> impl Iterator<Item = &'static str> {
+    REPLAY_RULES
+        .iter()
+        .flat_map(|rules| rules.ids.iter().copied())
+}
+
 pub struct Evaluation<'a> {
     store: &'a Archive,
     s: &'a Snapshot,
-    docs: BTreeMap<Id, Document>,
+    inventory: &'a ReadInventory,
     aliases: Equivalence,
     policy: Document,
     withdrawal_rules: WithdrawalRules,
@@ -133,7 +178,8 @@ pub struct Evaluation<'a> {
 impl Evaluation<'_> {
     fn doc(&self, id: Id, kind: Kind) -> Result<&Document> {
         let d = self
-            .docs
+            .inventory
+            .documents
             .get(&id)
             .context("missing, opaque or restricted record")?;
         ensure!(d.kind == kind, "wrong input kind");
@@ -146,10 +192,16 @@ impl Evaluation<'_> {
             if self.store.resolve(self.s, endpoint, "read").is_err() {
                 continue;
             }
-            for (&sig, d) in &self.docs {
-                if d.kind == Kind::Attestation
-                    && verify_attestation(d, endpoint, scope, role, "research-policy-1", trusted)
-                        .is_ok()
+            for (sig, document) in self.inventory.attestations(endpoint) {
+                if verify_attestation(
+                    document,
+                    endpoint,
+                    scope,
+                    role,
+                    "research-policy-1",
+                    trusted,
+                )
+                .is_ok()
                 {
                     return Ok(sig);
                 }
@@ -165,8 +217,9 @@ impl Evaluation<'_> {
         out: &mut Receipt,
     ) -> Result<bool> {
         let mut open = false;
-        for (&id, n) in &self.docs {
-            if n.kind != Kind::Notice || n.scope != scope {
+        for &id in &self.inventory.notices {
+            let n = &self.inventory.documents[&id];
+            if n.scope != scope {
                 continue;
             }
             let targets: Vec<_> = n
@@ -412,7 +465,7 @@ impl Evaluation<'_> {
                     lineage.frontier.is_empty(),
                     "delegated dependencies are incomplete"
                 );
-                for (notice_id, n) in &self.docs {
+                for (notice_id, n) in &self.inventory.documents {
                     if n.kind == Kind::Notice
                         && !original_view.objects.contains(notice_id)
                         && n.inputs.iter().any(|l| {
@@ -432,7 +485,8 @@ impl Evaluation<'_> {
                 c,
                 a,
                 |id| {
-                    self.docs
+                    self.inventory
+                        .documents
                         .get(&id)
                         .cloned()
                         .context("missing scientific input")
@@ -452,12 +506,21 @@ pub(crate) fn assess_for_evaluator(
     q: &Query,
     evaluator: &str,
 ) -> Result<Receipt> {
-    let withdrawal_rules = match evaluator {
-        EVALUATOR_ID | "rep-rust-0.1.2-dev.1" => WithdrawalRules::Scoped,
-        FIRST_SCOPED_EVALUATOR_ID => WithdrawalRules::FirstScoped,
-        V0_1_0_EVALUATOR_ID | "rep-rust-0.1.1" => WithdrawalRules::ScopeOnly,
-        _ => bail!("unsupported receipt evaluator"),
-    };
+    assess_with_inventory(store, s, q, evaluator, &mut ReadInventory::default())
+}
+
+pub(crate) fn assess_with_inventory(
+    store: &Archive,
+    s: &Snapshot,
+    q: &Query,
+    evaluator: &str,
+    inventory: &mut ReadInventory,
+) -> Result<Receipt> {
+    let rules = REPLAY_RULES
+        .iter()
+        .find(|rules| rules.ids.contains(&evaluator))
+        .context("unsupported receipt evaluator")?;
+    let withdrawal_rules = rules.withdrawal;
     let mut out = Receipt::default();
     let target = store.read(s, q.target, "read");
     let score = target
@@ -479,41 +542,7 @@ pub(crate) fn assess_for_evaluator(
             "unsupported query policy"
         );
         out.dependencies.extend([q.target, q.policy]);
-        let mut docs = BTreeMap::new();
-        let mut hidden_notices = false;
-        let mut bytes_left = q.byte_limit;
-        for (i, &id) in s.objects.iter().enumerate() {
-            if i >= q.budget {
-                out.frontier.insert(id);
-                continue;
-            }
-            if id.format().is_some() {
-                let size = store.size(id)?;
-                if size > bytes_left {
-                    out.frontier.insert(id);
-                    continue;
-                }
-                bytes_left -= size;
-                match store.read(s, id, "read") {
-                    Ok(d) => {
-                        if d.kind == Kind::Notice {
-                            out.visible_notices.insert(id);
-                        }
-                        docs.insert(id, d);
-                    }
-                    Err(_) if store.may_be_notice(s, id) => {
-                        out.frontier.insert(id);
-                        hidden_notices = true;
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
-        ensure!(
-            !hidden_notices,
-            "notice horizon contains inaccessible or opaque records"
-        );
-        ensure!(out.frontier.is_empty(), "notice search budget exhausted");
+        inventory.search(store, s, q, &mut out)?;
         let mut aliases = Equivalence::default();
         for &mapping in &q.mappings {
             aliases.add(store.verify_mapping(s, mapping)?);
@@ -530,7 +559,7 @@ pub(crate) fn assess_for_evaluator(
         let view = Evaluation {
             store,
             s,
-            docs,
+            inventory,
             aliases,
             policy,
             withdrawal_rules,
@@ -564,17 +593,12 @@ pub(crate) fn assess_for_evaluator(
                     a.subject == c.subject && a.scope == c.scope && a.one("claim")? == q.target,
                     "argument targets a different claim"
                 );
-                // Both measurement warrants read this occurrence. Simultaneous bounds
-                // also verifies that every gauge agrees on mode and event.
-                let reading = match a.fields.get("method").and_then(Value::as_str) {
-                    Some("recorded-difference" | "simultaneous-bounds") => {
-                        a.roles("reading").next().and_then(|id| view.docs.get(&id))
-                    }
-                    _ => None,
-                };
-                let measurement = reading
-                    .map(|reading| MeasurementUse::from_reading(reading, withdrawal_rules))
-                    .unwrap_or_default();
+                let measurement = MeasurementUse::for_argument(
+                    a,
+                    |id| view.inventory.documents.get(&id),
+                    withdrawal_rules,
+                )
+                .unwrap_or_default();
                 ensure!(
                     !view.challenged(&c.scope, &premises.visited, measurement, &mut out)?,
                     "argument under an admitted notice"
@@ -592,12 +616,17 @@ pub(crate) fn assess_for_evaluator(
             }
         }
         for &notice in &q.required_notices {
-            ensure!(
-                out.applicable_notices
-                    .iter()
-                    .any(|n| view.aliases.endpoints(*n).contains(&notice)),
-                "required notice applicability unknown"
-            );
+            let endpoints = view.aliases.endpoints(notice);
+            let applies = !endpoints.is_disjoint(&out.applicable_notices);
+            let excluded = rules.resolve_required_withdrawals
+                && out.frontier.is_empty()
+                && out.excludes_withdrawal(|check| {
+                    check
+                        .inputs
+                        .first()
+                        .is_some_and(|id| endpoints.contains(id))
+                });
+            ensure!(applies || excluded, "required notice applicability unknown");
         }
         if let Some(now) = q.current_at {
             let max_age: u64 = view.policy.field("max_age")?;
@@ -605,7 +634,7 @@ pub(crate) fn assess_for_evaluator(
             ensure!(!sources.is_empty(), "no current authority named");
             for source in sources {
                 let mut fresh = false;
-                for (&id, d) in &view.docs {
+                for (&id, d) in &view.inventory.documents {
                     if d.kind == Kind::Occurrence
                         && d.subject == source
                         && d.scope == "notice-horizon"
