@@ -9,6 +9,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "nao",
+    bin_name = "nao",
     version,
     about = "Store, exchange and evaluate immutable research evidence"
 )]

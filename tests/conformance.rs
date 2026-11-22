@@ -13,6 +13,25 @@ use std::collections::BTreeSet;
 use tempfile::tempdir;
 
 #[test]
+fn help_uses_nao_with_an_exe_filename() -> Result<()> {
+    let directory = tempdir()?;
+    let executable = directory.path().join("nao.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_nao"), &executable)?;
+    for (args, usage) in [
+        (&["--help"][..], "Usage: nao "),
+        (&["find", "--help"][..], "Usage: nao find "),
+    ] {
+        let output = std::process::Command::new(&executable)
+            .args(args)
+            .output()?;
+        assert!(output.status.success());
+        let help = String::from_utf8(output.stdout)?;
+        assert!(help.lines().any(|line| line.starts_with(usage)), "{help}");
+    }
+    Ok(())
+}
+
+#[test]
 fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
         .arg("capabilities")

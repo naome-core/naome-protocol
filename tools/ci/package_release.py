@@ -21,8 +21,9 @@ PUBLISHED_PROFILES = {
 def verify(nao, directory, version):
     version_line = subprocess.check_output([nao, "--version"], cwd=directory, text=True, timeout=60)
     help_text = subprocess.check_output([nao, "--help"], cwd=directory, text=True, timeout=60)
-    if version_line.strip() != f"nao {version}" or "Usage: nao " not in help_text:
-        raise ValueError("packaged command name or version is incorrect")
+    usage = next((line for line in help_text.splitlines() if line.startswith("Usage: ")), "")
+    if version_line.strip() != f"nao {version}" or not usage.startswith("Usage: nao "):
+        raise ValueError(f"unexpected packaged version or help: {version_line.strip()!r}, {usage!r}")
 
     def run(*args):
         return json.loads(subprocess.check_output([nao, *args], cwd=directory, timeout=60))
