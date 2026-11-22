@@ -4,6 +4,13 @@
 
 ## Install
 
+On Windows x64, install or upgrade through the WinGet community source.
+
+```powershell
+winget install --id NAOME.nao --exact --source winget
+winget upgrade --id NAOME.nao --exact --source winget
+```
+
 Download the archive for Windows x64, Apple silicon macOS, or Linux x64 (glibc 2.35 or later) from [Releases](https://github.com/naome-core/naome-protocol/releases). Verify it using the matching SHA-256 file, then extract it. Run the executable by its path or add its directory to your PATH. On Windows, use `.\nao.exe` from the extracted directory.
 
 To build from a checkout, run `cargo install --locked --path .` with Rust and a C toolchain for SQLite. For Rust library use, set `default-features = false` to omit the CLI and the bundled model integration.
