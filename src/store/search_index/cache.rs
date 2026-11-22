@@ -7,7 +7,7 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::ops::Bound::{Excluded, Unbounded};
 
-pub(super) const INDEX_VERSION: u32 = 3;
+pub(super) const INDEX_VERSION: u32 = 4;
 const BATCH: usize = 16;
 const TEXT_BATCH: usize = 4;
 
@@ -34,8 +34,8 @@ impl Archive {
                 tx.execute_batch(include_str!("replace_v1.sql"))?;
                 tx.execute_batch(include_str!("schema.sql"))?;
             }
-            Some(2) => {
-                tx.execute_batch(include_str!("replace_v2.sql"))?;
+            Some(2 | 3) => {
+                tx.execute_batch(include_str!("replace_v2_v3.sql"))?;
                 tx.execute_batch(include_str!("schema.sql"))?;
             }
             None => tx.execute_batch(include_str!("schema.sql"))?,
@@ -159,7 +159,7 @@ impl Archive {
 pub(super) fn prepared_cache_available(db: &Connection) -> Result<bool> {
     match installed_version(db)? {
         Some(INDEX_VERSION) => Ok(true),
-        None | Some(1 | 2) => Ok(false),
+        None | Some(1..=3) => Ok(false),
         Some(_) => anyhow::bail!("unsupported local search index version"),
     }
 }

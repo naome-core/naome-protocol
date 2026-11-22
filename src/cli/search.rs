@@ -230,7 +230,12 @@ impl LocalSearch {
             index_budget: args.index_budget,
             vector_budget: args.vector_budget,
         };
-        let model = if mode == SearchMode::Lexical || input.exact_id().is_some() {
+        let exact_id = input.exact_id().is_some();
+        ensure!(
+            !(exact_id && (args.prepare || args.rebuild_index)),
+            "exact ID lookups cannot prepare or rebuild the index; use prepare-search"
+        );
+        let model = if mode == SearchMode::Lexical || exact_id {
             None
         } else {
             let directory =

@@ -45,6 +45,8 @@ nao find reading --prepare --model model --python python
 
 Once set up, inference runs offline. Use `--input FILE` for a query from a supported media or text file.
 
+After a search index upgrade, the first keyword search or `nao prepare-search` starts rebuilding the index from the archive. Repeat preparation if the report shows incomplete coverage. For an exact object ID, use `nao find ID` and prepare the index separately.
+
 ## Protocol reference
 
 `nao capabilities` reports the supported formats and bootstrap digests.

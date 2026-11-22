@@ -53,11 +53,26 @@ pub(super) fn ranges(text: &str) -> impl Iterator<Item = Range<usize>> {
         while !remaining.is_char_boundary(width) {
             width -= 1;
         }
-        if width < remaining.len()
-            && let Some(boundary) = remaining[..width].rfind(char::is_whitespace)
-            && boundary >= width / 2
-        {
-            width = boundary;
+        if width < remaining.len() {
+            if let Some(boundary) = remaining[..width].rfind(char::is_whitespace)
+                && boundary >= width / 2
+            {
+                width = boundary;
+            } else {
+                // Compact data may have no whitespace between words. Look
+                // past the cut to find a word boundary before splitting.
+                let mut lookahead = (width + PASSAGE_BYTES).min(remaining.len());
+                while !remaining.is_char_boundary(lookahead) {
+                    lookahead -= 1;
+                }
+                width = remaining[..lookahead]
+                    .split_word_bound_indices()
+                    .map(|(offset, _)| offset)
+                    .take_while(|&offset| offset <= width)
+                    .last()
+                    .filter(|&offset| offset > 0)
+                    .unwrap_or(width);
+            }
         }
         let end = start + remaining[..width].trim_end().len();
         let range = start..end;
@@ -213,7 +228,7 @@ impl Archive {
         }];
         let mut cacheable = true;
         if descriptor {
-            let media = media_type(&document.subject);
+            let media = &document.subject;
             if text_media(media) {
                 match self.search_text(snapshot, &document, &mut dependencies) {
                     Ok(section) => sections.push(section),
@@ -230,7 +245,7 @@ impl Archive {
                         passages: vec![Passage {
                             text: String::new(),
                             location: SearchLocation::Media {
-                                media_type: media.to_owned(),
+                                media_type: media_type(media).into_owned(),
                                 span: MediaSpan::Whole,
                             },
                             priority: 0,

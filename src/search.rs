@@ -3,6 +3,7 @@
 use crate::{profile::Kind, wire::Id};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 #[cfg(feature = "semantic-search")]
 mod gemma;
@@ -93,8 +94,13 @@ pub struct MediaPart {
     pub vector: Vec<f32>,
 }
 
-pub(crate) fn media_type(value: &str) -> &str {
-    value.split(';').next().unwrap_or_default().trim()
+pub(crate) fn media_type(value: &str) -> Cow<'_, str> {
+    let value = value.split(';').next().unwrap_or_default().trim();
+    if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Cow::Owned(value.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(value)
+    }
 }
 
 pub fn text_media(value: &str) -> bool {
@@ -103,7 +109,7 @@ pub fn text_media(value: &str) -> bool {
         || value.ends_with("+json")
         || value.ends_with("+xml")
         || matches!(
-            value,
+            value.as_ref(),
             "application/json"
                 | "application/x-ndjson"
                 | "application/xml"
@@ -119,7 +125,7 @@ pub fn text_media(value: &str) -> bool {
 
 pub fn native_media(value: &str) -> bool {
     matches!(
-        media_type(value),
+        media_type(value).as_ref(),
         "image/png"
             | "image/jpeg"
             | "image/webp"
