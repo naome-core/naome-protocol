@@ -118,6 +118,8 @@ fn archive_retrieval_in_both_language_directions() -> Result<()> {
         [Score::default(), Score::default()],
     ];
     let mut times = [Vec::new(), Vec::new(), Vec::new()];
+    let mut bounded_scores = [Score::default(), Score::default()];
+    let mut bounded_comparisons = 0;
     let mut coverage: BTreeMap<&String, [bool; 3]> = cases
         .iter()
         .map(|case| (&case.language, [false; 3]))
@@ -153,6 +155,24 @@ fn archive_retrieval_in_both_language_directions() -> Result<()> {
                 results[i][set].add(rank);
                 ranks[i] = rank;
             }
+            let limited = archive.search_prepared(
+                &snapshot,
+                naome_protocol::search::SearchInput::Text(query),
+                SearchOptions {
+                    vector_budget: 16,
+                    ..hybrid
+                },
+                Some(&mut model),
+            )?;
+            bounded_comparisons += limited.vector_products;
+            ensure!(limited.vector_budget_exhausted && limited.vector_products <= 16 * 768);
+            bounded_scores[set].add(
+                limited
+                    .hits
+                    .iter()
+                    .position(|hit| hit.id == expected)
+                    .map(|rank| rank + 1),
+            );
             if set == 0 {
                 coverage.get_mut(&case.language).unwrap()[0] =
                     ranks[2].is_some_and(|rank| rank <= 3);
@@ -188,6 +208,14 @@ fn archive_retrieval_in_both_language_directions() -> Result<()> {
                 score.ndcg / count
             );
         }
+    }
+    println!("Projected comparison budget {bounded_comparisons} multiply-adds");
+    for (set, score) in bounded_scores.iter().enumerate() {
+        println!(
+            "bounded set {set} Recall@10 {:.3} nDCG@10 {:.3}",
+            score.found as f64 / count,
+            score.ndcg / count
+        );
     }
     println!(
         "Top-three in all three roles: {supported}/{} languages",

@@ -9,7 +9,7 @@ mod gemma;
 #[cfg(feature = "semantic-search")]
 pub use gemma::EmbeddingGemma;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum SearchMode {
@@ -195,6 +195,14 @@ pub struct SearchHit {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SearchPreparation {
+    pub head: Id,
+    pub index_complete: bool,
+    pub semantic_index_complete: Option<bool>,
+    pub limited_coverage: bool,
+}
+
+#[derive(Debug, Serialize)]
 pub struct SearchReport {
     pub head: Id,
     pub mode: SearchMode,
@@ -204,6 +212,7 @@ pub struct SearchReport {
     pub index_complete: bool,
     pub semantic_index_complete: Option<bool>,
     pub vector_budget_exhausted: bool,
+    pub vector_products: usize,
     pub limited_coverage: bool,
     pub query_limited: bool,
     pub hits: Vec<SearchHit>,

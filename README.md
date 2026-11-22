@@ -54,6 +54,7 @@ python3 -m venv .search-venv
   'sentence-transformers==6.3.0' 'torchvision==0.29.2' pillow av pypdfium2
 export NAOME_SEARCH_PYTHON="$PWD/.search-venv/bin/python"
 export NAOME_SEARCH_MODEL=/path/to/embeddinggemma-2
+rep --db evidence.sqlite prepare-search
 rep --db evidence.sqlite find "where was the calibration repeated?"
 rep --db evidence.sqlite find --input example.jpg
 rep --db evidence.sqlite find --input recording.m4a
@@ -75,13 +76,32 @@ PDF window. Audio selectors name time ranges, video selectors name ranges of
 sampled frames or audio, and PDF selectors name pages. Images and source
 documents remain available at their original resolution via `recover`.
 
-With a configured model, hybrid is the default. Without it, lexical search
-covers typed text and metadata. An unfinished build resumes on the next
-search. Use `--index-budget` to permit more preparation work per invocation
-or `--rebuild-index` to replace the selected snapshot's derived index. The
-response reports the model, the archive snapshot and incomplete coverage.
-Withdrawal removes the affected derived passages, postings and vectors in
-the custody transaction.
+With a configured model, hybrid is the default. The query phase uses
+prepared embeddings. Text and metadata are populated in bounded batches
+on first use, so an upgraded archive can be searched immediately.
+`prepare-search` advances the embedding cache independently. Repeat it
+while `semantic_index_complete` is false to cover additional batches.
+`find --prepare` combines preparation and search for one-off debugging.
+An individual media failure leaves other results available and is reported
+as limited coverage.
+
+Run `rep search-session` to reuse one local model across requests. It accepts
+one JSON object per line and returns an `ok` or `error` response for each:
+
+```json
+{"op":"prepare_search"}
+{"op":"find","query":"calibration drift"}
+{"op":"find","input":"example.jpg"}
+```
+
+Use `--index-budget` to permit more work per preparation call or
+`--rebuild-index` to rebuild the selected snapshot's view of verified
+source entries. Shared passages and embeddings are reused across overlapping
+snapshots. Withdrawals remove dependent passages and vectors in the same
+custody transaction. The response reports snapshot coverage and the
+number of vector-component comparisons. The vector budget is a limit on
+full-vector equivalents. Larger scans use projected candidates followed by
+exact cosine scoring within that limit.
 
 
 ## Bootstrap and exchange

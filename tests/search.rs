@@ -507,3 +507,246 @@ fn unified_search_accepts_media_queries_and_returns_resolvable_media_parts() -> 
     assert!(report.limited_coverage && report.hits.iter().all(|hit| hit.id != video));
     Ok(())
 }
+
+#[test]
+fn preparation_reuses_objects_across_snapshots_and_keeps_queries_read_only() -> Result<()> {
+    use naome_protocol::search::SearchInput;
+    let archive = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let first_id = claim(
+        &archive,
+        "Vibration",
+        "Vibration correction",
+        public,
+        Format::A,
+    )?;
+    let first = archive.snapshot("first", BTreeSet::new())?;
+    let second = archive.snapshot("same contents", [first.id()?].into())?;
+    let mut model = TestEmbedder {
+        id: Id::blob(b"shared model"),
+        embedded_passages: 0,
+    };
+    let options = SearchOptions {
+        mode: SearchMode::Hybrid,
+        ..Default::default()
+    };
+
+    let report = archive.search_prepared(
+        &first,
+        SearchInput::Text("Vibration"),
+        options,
+        Some(&mut model),
+    )?;
+    assert!(!report.index_complete && report.hits.is_empty());
+    assert_eq!(model.embedded_passages, 0);
+    let first_state = archive.prepare_search(&first, 100, Some(&mut model))?;
+    assert_eq!(first_state.semantic_index_complete, Some(true));
+    let first_count = model.embedded_passages;
+    assert!(first_count > 0);
+    assert_eq!(
+        archive
+            .prepare_search(&second, 100, Some(&mut model))?
+            .semantic_index_complete,
+        Some(true)
+    );
+    assert_eq!(model.embedded_passages, first_count);
+    assert_eq!(
+        archive
+            .search_prepared(
+                &second,
+                SearchInput::Text("Vibration"),
+                options,
+                Some(&mut model)
+            )?
+            .hits[0]
+            .id,
+        first_id
+    );
+
+    let acl = archive.blob(br#"{"purposes":["read"],"version":1}"#, public)?;
+    let protected = claim(&archive, "other", "Vibration", acl, Format::B)?;
+    let full = archive.snapshot("with policy", [second.id()?].into())?;
+    archive.prepare_search(&full, 100, Some(&mut model))?;
+    let restricted = naome_protocol::store::Snapshot {
+        version: full.version,
+        source: "without policy".to_owned(),
+        parents: [full.id()?].into(),
+        objects: full
+            .objects
+            .iter()
+            .copied()
+            .filter(|id| *id != acl)
+            .collect(),
+    };
+    let result = archive.find(&restricted, "Vibration", options, Some(&mut model))?;
+    assert!(result.limited_coverage);
+    assert!(result.hits.iter().all(|hit| hit.id != protected));
+    Ok(())
+}
+
+#[test]
+fn a_failed_media_embedding_preserves_other_hits_and_is_not_retried_per_query() -> Result<()> {
+    use naome_protocol::search::{EmbeddedMedia, MediaInput, SearchInput};
+    struct Failing {
+        text: TestEmbedder,
+        attempts: usize,
+    }
+    impl Embedder for Failing {
+        fn id(&self) -> Id {
+            self.text.id()
+        }
+        fn dimensions(&self) -> usize {
+            self.text.dimensions()
+        }
+        fn embed(&mut self, input: EmbeddingInput, text: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.text.embed(input, text)
+        }
+        fn embed_media(&mut self, _: EmbeddingInput, _: MediaInput<'_>) -> Result<EmbeddedMedia> {
+            self.attempts += 1;
+            anyhow::bail!("temporary encoder interruption")
+        }
+    }
+    let archive = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let id = claim(&archive, "Vibration", "Vibration report", public, Format::B)?;
+    let image = archive.capture(&b"image fixture"[..], "image/png", 10, public, Format::A)?;
+    let snapshot = archive.snapshot("media failure", BTreeSet::new())?;
+    let mut model = Failing {
+        text: TestEmbedder {
+            id: Id::blob(b"interrupted model"),
+            embedded_passages: 0,
+        },
+        attempts: 0,
+    };
+    let prepared = archive.prepare_search(&snapshot, 100, Some(&mut model))?;
+    assert_eq!(prepared.semantic_index_complete, Some(false));
+    assert!(prepared.limited_coverage);
+    let options = SearchOptions {
+        mode: SearchMode::Hybrid,
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        let report = archive.search_prepared(
+            &snapshot,
+            SearchInput::Text("Vibration"),
+            options,
+            Some(&mut model),
+        )?;
+        assert_eq!(report.hits[0].id, id);
+        assert!(report.hits.iter().all(|hit| hit.id != image));
+    }
+    archive.prepare_search(&snapshot, 100, Some(&mut model))?;
+    assert_eq!(model.attempts, 1);
+    Ok(())
+}
+
+#[test]
+fn projected_search_finds_late_candidates_under_an_actual_comparison_budget() -> Result<()> {
+    struct Projected;
+    impl Embedder for Projected {
+        fn id(&self) -> Id {
+            Id::blob(b"comparison-count model")
+        }
+        fn dimensions(&self) -> usize {
+            128
+        }
+        fn embed(&mut self, _: EmbeddingInput, text: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Ok(text
+                .iter()
+                .map(|text| {
+                    let mut v = vec![0.0; 128];
+                    v[if text.contains("target") { 0 } else { 1 }] = 1.0;
+                    v
+                })
+                .collect())
+        }
+    }
+    let archive = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let mut ids = Vec::new();
+    // A records precede B records in extraction order. With the old prefix scan,
+    // the only three matching vectors were never examined on this budget.
+    for i in 0..64 {
+        ids.push(claim(
+            &archive,
+            &format!("Source {i}"),
+            "unrelated calibration",
+            public,
+            Format::A,
+        )?);
+    }
+    let wanted = claim(
+        &archive,
+        "target accession",
+        "target measurement",
+        public,
+        Format::B,
+    )?;
+    let snapshot = archive.snapshot("projection trial", BTreeSet::new())?;
+    let mut model = Projected;
+    archive.prepare_search(&snapshot, 1024, Some(&mut model))?;
+    let exact = SearchOptions {
+        mode: SearchMode::Semantic,
+        ..Default::default()
+    };
+    let reference = archive.find(&snapshot, "target", exact, Some(&mut model))?;
+    assert_eq!(reference.hits[0].id, wanted);
+    assert!(!reference.vector_budget_exhausted);
+    let bounded = SearchOptions {
+        vector_budget: 16,
+        ..exact
+    };
+    let report = archive.find(&snapshot, "target", bounded, Some(&mut model))?;
+    assert_eq!(report.hits[0].id, wanted);
+    assert!(
+        report.vector_budget_exhausted && report.vector_products <= bounded.vector_budget * 128
+    );
+    assert!(report.vector_products < reference.vector_products);
+    assert!(ids.iter().all(|id| *id != wanted));
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn previous_draft_cache_is_rebuilt_without_changing_the_archive() -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::{
+        fs,
+        io::Write,
+        process::{Command, Stdio},
+    };
+
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("archive.sqlite");
+    fs::write(&database, include_bytes!("fixtures/search-cache-v1.sqlite"))?;
+    let mut session = Command::new(env!("CARGO_BIN_EXE_rep"))
+        .arg("--db")
+        .arg(&database)
+        .arg("search-session")
+        .env_remove("NAOME_SEARCH_MODEL")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    session.stdin.take().unwrap().write_all(
+        b"{\"op\":\"prepare_search\",\"lexical\":true}\n{\"op\":\"find\",\"query\":\"interferometer drift\"}\n",
+    )?;
+    let output = session.wait_with_output()?;
+    assert!(output.status.success());
+    let lines: Vec<serde_json::Value> = std::str::from_utf8(&output.stdout)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<serde_json::Result<_>>()?;
+    assert_eq!(lines[0]["ok"]["index_complete"], true);
+    assert_eq!(lines[1]["ok"]["index_version"], 2);
+    assert_eq!(lines[1]["ok"]["hits"][0]["id"], V012_CLAIM);
+
+    let archive = Archive::open(database)?;
+    let head = archive.head(V012_HEAD.parse()?)?;
+    assert_eq!(
+        archive.releases()?.into_iter().collect::<Vec<_>>(),
+        [head.id()?]
+    );
+    let packet = serde_json::to_vec(&archive.export(&head, "read")?)?;
+    assert_eq!(hex::encode(Sha256::digest(packet)), V012_EXCHANGE_SHA256);
+    Ok(())
+}

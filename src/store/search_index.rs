@@ -1,30 +1,24 @@
+mod cache;
 mod extract;
 mod rank;
 mod vectors;
 
-use self::{
-    extract::{normalize, terms},
-    rank::{SemanticQuery, rank},
-};
+use self::rank::{SemanticQuery, VectorWork, rank};
 use super::{Archive, Snapshot};
 use crate::{
     profile::Document,
     search::{
         Embedder, MAX_MEDIA_BYTES, SearchHit, SearchInput, SearchLocation, SearchMode,
-        SearchOptions, SearchReport, native_media,
+        SearchOptions, SearchPreparation, SearchReport, native_media,
     },
     wire::Id,
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use std::{
-    collections::BTreeSet,
-    ops::Bound::{Excluded, Unbounded},
-};
+use cache::{INDEX_VERSION, coverage, prepared_cache_available};
+use rusqlite::{OptionalExtension, params};
+use std::collections::BTreeSet;
 use vectors::{embed_query, missing_vectors};
 
-const INDEX_VERSION: u32 = 1;
-const RECORD_BATCH: usize = 16;
 const MAX_QUERY_PASSAGES: usize = 24;
 
 struct Passage {
@@ -45,19 +39,12 @@ struct IndexedRecord {
     sections: Vec<IndexedSection>,
     missing: BTreeSet<Id>,
     limited: bool,
+    cacheable: bool,
 }
 
 struct IndexedSection {
     sources: BTreeSet<Id>,
     passages: Vec<Passage>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct State {
-    cursor: Option<Id>,
-    dirty: bool,
-    finished: bool,
-    limited: bool,
 }
 
 impl Archive {
@@ -105,6 +92,65 @@ impl Archive {
         input: SearchInput<'_>,
         options: SearchOptions<'_>,
         model: Option<&mut dyn Embedder>,
+    ) -> Result<SearchReport> {
+        self.lookup_search(snapshot, input, options, model, true)
+    }
+
+    /// Query the prepared lexical and embedding cache.
+    pub fn search_prepared(
+        &self,
+        snapshot: &Snapshot,
+        input: SearchInput<'_>,
+        options: SearchOptions<'_>,
+        model: Option<&mut dyn Embedder>,
+    ) -> Result<SearchReport> {
+        self.lookup_search(snapshot, input, options, model, false)
+    }
+
+    /// Prepare a bounded slice independently of any query.
+    pub fn prepare_search(
+        &self,
+        snapshot: &Snapshot,
+        budget: usize,
+        model: Option<&mut dyn Embedder>,
+    ) -> Result<SearchPreparation> {
+        ensure!(budget > 0, "positive index budget required");
+        let head = snapshot.id()?;
+        let key = head.to_string();
+        self.init_search()?;
+        self.refresh_search(snapshot, &key, budget)?;
+        let model_key = if let Some(model) = model {
+            let id = model.id().to_string();
+            self.refresh_search_vectors(snapshot, &key, model, budget)?;
+            Some(id)
+        } else {
+            None
+        };
+        let read = self.db.unchecked_transaction()?;
+        let (index_complete, limited_coverage) = coverage(&read, &key)?;
+        let (semantic_index_complete, limited_coverage) = semantic_coverage(
+            &read,
+            &key,
+            model_key.as_deref(),
+            index_complete,
+            limited_coverage,
+        )?;
+        read.commit()?;
+        Ok(SearchPreparation {
+            head,
+            index_complete,
+            semantic_index_complete,
+            limited_coverage,
+        })
+    }
+
+    fn lookup_search(
+        &self,
+        snapshot: &Snapshot,
+        input: SearchInput<'_>,
+        options: SearchOptions<'_>,
+        model: Option<&mut dyn Embedder>,
+        prepare: bool,
     ) -> Result<SearchReport> {
         let (text, media, limited) = match input {
             SearchInput::Text(query) => {
@@ -160,6 +206,7 @@ impl Archive {
             index_complete: false,
             semantic_index_complete: None,
             vector_budget_exhausted: false,
+            vector_products: 0,
             limited_coverage: false,
             query_limited: limited || (options.mode == SearchMode::Lexical && text.len() > 1),
             hits: Vec::new(),
@@ -203,8 +250,13 @@ impl Archive {
             Some(model.context("semantic search requires a configured local embedding model")?)
         };
         let head = head.to_string();
-        self.init_search()?;
-        self.refresh_search(snapshot, &head, options.index_budget)?;
+        if prepare {
+            self.init_search()?;
+            self.refresh_search(snapshot, &head, options.index_budget)?;
+        } else if !prepared_cache_available(&self.db)? {
+            report.semantic_index_complete = model.as_ref().map(|_| false);
+            return Ok(report);
+        }
         let query_vectors = if let Some(model) = model {
             report.model = Some(model.id());
             let minimum = model.minimum_similarity();
@@ -215,34 +267,33 @@ impl Archive {
             report.minimum_similarity = Some(minimum);
             let (query_vectors, limited) = embed_query(model, &text, media)?;
             report.query_limited |= limited;
-            self.refresh_search_vectors(snapshot, &head, model, options.index_budget)?;
+            if prepare {
+                self.refresh_search_vectors(snapshot, &head, model, options.index_budget)?;
+            }
             Some(query_vectors)
         } else {
             None
         };
         let read = self.db.unchecked_transaction()?;
-        let state = read_state(&read, &head)?.context("search index disappeared")?;
-        report.index_complete = state.finished && !state.dirty;
-        report.limited_coverage = state.limited;
+        (report.index_complete, report.limited_coverage) = coverage(&read, &head)?;
         let model_key = report.model.map(|id| id.to_string());
-        if let Some(key) = model_key.as_deref() {
-            report.semantic_index_complete =
-                Some(report.index_complete && !missing_vectors(&read, &head, key)?);
-            let limited_media: bool = read.query_row(
-                "SELECT EXISTS(SELECT 1 FROM rep_search_limited_media WHERE head=? AND model=?)",
-                params![head, key],
-                |row| row.get(0),
-            )?;
-            report.limited_coverage |= limited_media;
-        }
+        (report.semantic_index_complete, report.limited_coverage) = semantic_coverage(
+            &read,
+            &head,
+            model_key.as_deref(),
+            report.index_complete,
+            report.limited_coverage,
+        )?;
         if mode == SearchMode::Lexical {
             let media_exists: bool = read.query_row(
-                "SELECT EXISTS(SELECT 1 FROM rep_search_passages WHERE head=? AND semantic AND text='')",
+                "SELECT EXISTS(SELECT 1 FROM rep_search_passages p JOIN rep_search_visibility v ON v.entry=p.entry
+                    WHERE v.head=? AND p.semantic AND p.text='')",
                 [&head],
                 |row| row.get(0),
             )?;
             report.limited_coverage |= media_exists;
         }
+        let mut work = VectorWork::default();
         let candidates = rank(
             &read,
             &head,
@@ -257,8 +308,10 @@ impl Archive {
                     vectors: vector,
                     minimum,
                 }),
-            &mut report.vector_budget_exhausted,
+            &mut work,
         )?;
+        report.vector_budget_exhausted = work.bounded;
+        report.vector_products = work.products;
         for candidate in candidates {
             let Ok(document) = self.read(snapshot, candidate.id, "read") else {
                 report.limited_coverage = true;
@@ -271,28 +324,15 @@ impl Archive {
             )?;
             let mut location = serde_json::from_str(&location)?;
             let snippet = if let SearchLocation::Media { span, .. } = &mut location {
-                // The cache stores selectors and embeddings. Originals must still
-                // resolve through the live archive before becoming search hits.
-                if self
-                    .materialize(
-                        snapshot,
-                        candidate.id,
-                        "read",
-                        MAX_MEDIA_BYTES,
-                        std::io::sink(),
-                    )
-                    .is_err()
-                {
-                    report.limited_coverage = true;
-                    continue;
-                }
+                // Candidate visibility and the withdrawal trigger cover every
+                // source dependency. Recovery verifies the original payload bytes.
                 let part = candidate
                     .semantic
                     .and_then(|item| item.part)
                     .context("missing ranked media part")?;
                 let encoded: String = read.query_row(
-                    "SELECT span FROM rep_search_vectors WHERE head=? AND model=? AND passage=? AND part=?",
-                    params![head, model_key, candidate.passage(), part],
+                    "SELECT span FROM rep_search_vectors WHERE model=? AND passage=? AND part=?",
+                    params![model_key, candidate.passage(), part],
                     |row| row.get(0),
                 )?;
                 *span = serde_json::from_str(&encoded)?;
@@ -360,185 +400,28 @@ impl Archive {
                 .collect(),
         }
     }
-
-    fn init_search(&self) -> Result<()> {
-        let exists = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='rep_search_schema')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if !exists {
-            let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-            tx.execute_batch(include_str!("search_index/schema.sql"))?;
-            tx.commit()?;
-        }
-        let version: u32 =
-            self.db
-                .query_row("SELECT version FROM rep_search_schema", [], |row| {
-                    row.get(0)
-                })?;
-        ensure!(
-            version == INDEX_VERSION,
-            "unsupported local search index version"
-        );
-        Ok(())
-    }
-
-    fn search_state(&self, head: &str) -> Result<State> {
-        let state = read_state(&self.db, head)?;
-        if let Some(state) = state
-            && !state.dirty
-        {
-            return Ok(state);
-        }
-        let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-        tx.execute(
-            "DELETE FROM rep_search_heads WHERE head=? AND dirty",
-            [head],
-        )?;
-        tx.execute(
-            "INSERT OR IGNORE INTO rep_search_heads(head) VALUES(?)",
-            [head],
-        )?;
-        let state = read_state(&tx, head)?.context("search index disappeared")?;
-        tx.commit()?;
-        Ok(state)
-    }
-
-    fn refresh_search(&self, snapshot: &Snapshot, head: &str, mut budget: usize) -> Result<()> {
-        let mut state = self.search_state(head)?;
-        while !state.finished && budget != 0 {
-            let revision = revision(&self.db)?;
-            let bound = state.cursor.map_or(Unbounded, Excluded);
-            let count = budget.min(RECORD_BATCH);
-            let records: Vec<_> = snapshot
-                .objects
-                .range((bound, Unbounded))
-                .copied()
-                .filter(|id| id.format().is_some())
-                .take(count + 1)
-                .collect();
-            let finished = records.len() <= count;
-            let indexed: Vec<_> = records
-                .into_iter()
-                .take(count)
-                .map(|id| (id, self.search_sections(snapshot, id)))
-                .collect();
-
-            let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-            if revision != self::revision(&tx)? || read_state(&tx, head)? != Some(state) {
-                return Ok(());
-            }
-            for (id, record) in &indexed {
-                if let Some(document) = &record.document {
-                    write_sections(&tx, head, *id, document, &record.sections)?;
-                }
-                for missing in &record.missing {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO rep_search_waiting VALUES(?,?)",
-                        params![missing.to_string(), head],
-                    )?;
-                }
-                state.cursor = Some(*id);
-                state.limited |= record.limited;
-            }
-            state.finished = finished;
-            tx.execute(
-                "UPDATE rep_search_heads SET cursor=?,finished=?,limited=? WHERE head=?",
-                params![
-                    state.cursor.map(|id| id.to_string()),
-                    state.finished,
-                    state.limited,
-                    head
-                ],
-            )?;
-            tx.commit()?;
-            budget -= indexed.len();
-        }
-        Ok(())
-    }
 }
 
-fn revision(db: &Connection) -> Result<i64> {
-    Ok(
-        db.query_row("SELECT value FROM rep_search_revision", [], |row| {
-            row.get(0)
-        })?,
-    )
-}
-
-fn read_state(db: &Connection, head: &str) -> Result<Option<State>> {
-    let fields = db
-        .query_row(
-            "SELECT cursor,dirty,finished,limited FROM rep_search_heads WHERE head=?",
-            [head],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                ))
-            },
-        )
-        .optional()?;
-    fields
-        .map(|(cursor, dirty, finished, limited)| {
-            Ok(State {
-                cursor: cursor.map(|id| id.parse()).transpose()?,
-                dirty,
-                finished,
-                limited,
-            })
-        })
-        .transpose()
-}
-
-fn write_sections(
-    db: &Connection,
+fn semantic_coverage(
+    db: &rusqlite::Connection,
     head: &str,
-    id: Id,
-    document: &Document,
-    sections: &[IndexedSection],
-) -> Result<()> {
-    let mut entry = db.prepare_cached(
-        "INSERT INTO rep_search_entries(head,object,kind,subject,scope) VALUES(?,?,?,?,?)",
+    model: Option<&str>,
+    complete: bool,
+    limited: bool,
+) -> Result<(Option<bool>, bool)> {
+    let Some(model) = model else {
+        return Ok((None, limited));
+    };
+    let limited_vectors: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rep_search_vector_state st
+            JOIN rep_search_passages p ON p.id=st.passage
+            JOIN rep_search_visibility v ON v.entry=p.entry
+            WHERE v.head=? AND st.model=? AND st.limited)",
+        params![head, model],
+        |row| row.get(0),
     )?;
-    let mut source = db.prepare_cached("INSERT INTO rep_search_sources VALUES(?,?)")?;
-    let mut row = db.prepare_cached(
-        "INSERT INTO rep_search_passages(head,entry,location,text,normalized,priority,semantic) VALUES(?,?,?,?,?,?,?)",
-    )?;
-    let mut posting = db.prepare_cached("INSERT INTO rep_search_terms VALUES(?,?,?)")?;
-    for section in sections
-        .iter()
-        .filter(|section| !section.passages.is_empty())
-    {
-        let entry = entry.insert(params![
-            head,
-            id.to_string(),
-            document.kind as i64,
-            document.subject,
-            document.scope
-        ])?;
-        for id in &section.sources {
-            source.execute(params![id.to_string(), entry])?;
-        }
-        for passage in &section.passages {
-            let normalized = normalize(&passage.text);
-            let location = serde_json::to_string(&passage.location)?;
-            let id = row.insert(params![
-                head,
-                entry,
-                location,
-                passage.text,
-                normalized,
-                passage.priority,
-                passage.semantic
-            ])?;
-            for term in terms(&normalized) {
-                posting.execute(params![head, term, id])?;
-            }
-        }
-    }
-    Ok(())
+    Ok((
+        Some(complete && !missing_vectors(db, head, model)?),
+        limited || limited_vectors,
+    ))
 }

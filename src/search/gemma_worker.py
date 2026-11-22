@@ -2,10 +2,12 @@
 import base64
 from contextlib import closing, redirect_stdout
 from itertools import chain
+from importlib.metadata import version
 import hashlib
 import io
 import json
 import os
+import platform
 from pathlib import Path
 import sys
 import warnings
@@ -48,7 +50,8 @@ def fingerprint(directory, device):
     digest = hashlib.sha256()
     versions = (
         torch.__version__, transformers.__version__, sentence_transformers.__version__,
-        av.__version__, Image.__version__, device,
+        av.__version__, Image.__version__, np.__version__, version("pypdfium2"),
+        platform.system(), platform.machine(), device,
     )
     digest.update(b"embeddinggemma2-media-v1")
     digest.update(repr(versions).encode())
@@ -79,35 +82,67 @@ def bounded_image(image, bound):
     return image.convert("RGB")
 
 
+def timeline_origin(container):
+    if container.start_time is not None:
+        return container.start_time / av.time_base
+    starts = [float(stream.start_time * stream.time_base) for stream in container.streams
+              if stream.start_time is not None and stream.time_base is not None]
+    return min(starts, default=0.0)
+
+
 def audio_parts(data, format_name, allow_missing=False):
     resampler = av.AudioResampler(format="fltp", layout="mono", rate=TARGET_SAMPLE_RATE)
     limit = MAX_SECONDS * TARGET_SAMPLE_RATE
-    chunks = []
-    count = 0
+    width = AUDIO_SECONDS * TARGET_SAMPLE_RATE
+    parts = []
+    frames = []
+    start = 0
+    offset = 0
     limited = False
+
+    def flush():
+        if frames:
+            waveform = np.concatenate(frames)
+            selector = interval(start * 1000 // TARGET_SAMPLE_RATE, offset * 1000 // TARGET_SAMPLE_RATE)
+            parts.append((selector, {"audio": waveform}))
+            frames.clear()
+
     with av.open(io.BytesIO(data), mode="r", format=format_name, options={"protocol_whitelist": "pipe"}) as source:
         if not source.streams.audio:
             if allow_missing:
                 return [], False
             raise ValueError("no audio track")
+        origin = timeline_origin(source)
         for decoded in chain(source.decode(source.streams.audio[0]), [None]):
             for frame in resampler.resample(decoded):
+                position = offset if frame.time is None else round((frame.time - origin) * TARGET_SAMPLE_RATE)
+                # Codec rounding can move the next timestamp by a few samples.
+                # A real discontinuity starts a distinct range on the source timeline.
+                if not frames or abs(position - offset) > TARGET_SAMPLE_RATE // 100:
+                    flush()
+                    start = offset = position
                 waveform = frame.to_ndarray().reshape(-1)
-                remaining = limit - count
-                chunks.append(waveform[:remaining])
-                count += min(len(waveform), remaining)
-                limited |= len(waveform) > remaining
+                if offset < 0:
+                    trim = min(len(waveform), -offset)
+                    waveform = waveform[trim:]
+                    offset += trim
+                    start = offset
+                while len(waveform):
+                    remaining = min(width - (offset - start), limit - offset)
+                    if remaining <= 0 or len(parts) >= 15:
+                        return parts, True
+                    piece = waveform[:remaining]
+                    frames.append(piece)
+                    offset += len(piece)
+                    waveform = waveform[len(piece):]
+                    if offset - start == width or offset == limit:
+                        flush()
+                        start = offset
+                    if offset == limit:
+                        limited |= bool(len(waveform))
             if limited:
                 break
-    if not count:
-        return [], limited
-    waveform = np.concatenate(chunks)
-    width = AUDIO_SECONDS * TARGET_SAMPLE_RATE
-    parts = []
-    for start in range(0, len(waveform), width):
-        end = min(len(waveform), start + width)
-        selector = interval(start * 1000 // TARGET_SAMPLE_RATE, end * 1000 // TARGET_SAMPLE_RATE)
-        parts.append((selector, {"audio": waveform[start:end]}))
+    flush()
     return parts, limited
 
 
@@ -121,11 +156,9 @@ def video_parts(data, format_name):
             raise ValueError("no video track")
         stream = video.streams.video[0]
         rate = float(stream.average_rate or 25)
-        origin = None
+        origin = timeline_origin(video)
         for index, frame in enumerate(video.decode(stream)):
             timestamp = frame.time if frame.time is not None else index / rate
-            if origin is None:
-                origin = timestamp
             time_ms = max(0, round((timestamp - origin) * 1000))
             if time_ms >= MAX_SECONDS * 1000 or index >= 18_000:
                 limited = True
@@ -168,9 +201,16 @@ def decode_media(media_type, data):
         return audio_parts(data, AUDIO_FORMATS[media_type])
     if media_type in VIDEO_FORMATS:
         format_name = VIDEO_FORMATS[media_type]
-        video, limited = video_parts(data, format_name)
-        audio, audio_limited = audio_parts(data, format_name, allow_missing=True)
-        return video + audio, limited or audio_limited
+        tracks = []
+        limited = False
+        for decode in (video_parts, lambda data, format_name: audio_parts(data, format_name, allow_missing=True)):
+            try:
+                parts, track_limited = decode(data, format_name)
+                tracks.extend(parts)
+                limited |= track_limited
+            except (ValueError, OSError, av.FFmpegError):
+                limited = True
+        return tracks, limited
     if media_type == "application/pdf":
         return pdf_parts(data)
     return [], True
@@ -193,7 +233,11 @@ def respond(model, message):
         options = {}
         if "video" in sample:
             options = {"processing_kwargs": {"video": {"fps": None, "max_frames": VIDEO_SECONDS}}}
-        vector = model.encode(sample, normalize_embeddings=True, show_progress_bar=False, **options)
+        try:
+            vector = model.encode(sample, normalize_embeddings=True, show_progress_bar=False, **options)
+        except (ValueError, TypeError):
+            limited = True
+            continue
         vectors.append({"span": selector, "vector": vector.tolist()})
     return {"parts": vectors, "limited": limited or not vectors}
 

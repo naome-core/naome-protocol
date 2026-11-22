@@ -109,7 +109,19 @@ fn collect_fields(
     if let Some(text) = field_text(value) {
         if text.parse::<Id>().is_err() {
             *limited |= text.len() > MAX_FIELD_BYTES;
-            add_field(passages, pointer, &text, 0, semantic && value.is_string());
+            let named = pointer.rsplit('/').next().is_some_and(|name| {
+                matches!(
+                    name,
+                    "title" | "name" | "code" | "identifier" | "accession" | "catalog_number"
+                )
+            });
+            add_field(
+                passages,
+                pointer,
+                &text,
+                if named { 2 } else { 0 },
+                semantic && value.is_string(),
+            );
         }
         return;
     }
@@ -160,6 +172,7 @@ impl Archive {
                 sections: Vec::new(),
                 missing: dependencies.missing,
                 limited: true,
+                cacheable: false,
             };
         };
 
@@ -193,6 +206,7 @@ impl Archive {
             sources: dependencies.available.clone(),
             passages,
         }];
+        let mut cacheable = true;
         if descriptor {
             let media = media_type(&document.subject);
             if text_media(media) {
@@ -220,12 +234,13 @@ impl Archive {
                             passages,
                         });
                     }
-                    Err(_) => limited = true,
+                    Err(_) => {
+                        limited = true;
+                        cacheable = false;
+                    }
                 }
             } else if native_media(media) {
-                let verified = document.materialize(MAX_MEDIA_BYTES, std::io::sink(), |id| {
-                    self.search_source(snapshot, id, &mut dependencies)
-                });
+                let verified = self.media_dependencies(snapshot, &document, &mut dependencies);
                 match verified {
                     Ok(length) if length > 0 => sections.push(IndexedSection {
                         sources: dependencies.available,
@@ -239,7 +254,10 @@ impl Archive {
                             semantic: true,
                         }],
                     }),
-                    _ => limited = true,
+                    _ => {
+                        limited = true;
+                        cacheable = false;
+                    }
                 }
             } else {
                 limited = true;
@@ -250,7 +268,52 @@ impl Archive {
             sections,
             missing: dependencies.missing,
             limited,
+            cacheable,
         }
+    }
+
+    fn media_dependencies(
+        &self,
+        snapshot: &Snapshot,
+        document: &Document,
+        dependencies: &mut Dependencies,
+    ) -> Result<u64> {
+        let length: u64 = document.field("length")?;
+        anyhow::ensure!(
+            length <= MAX_MEDIA_BYTES && !document.inputs.is_empty(),
+            "invalid media size"
+        );
+        let mut checked_policies = BTreeSet::new();
+        for link in &document.inputs {
+            let id = link.target;
+            anyhow::ensure!(
+                link.role == "chunk" && id.format().is_none(),
+                "invalid media source"
+            );
+            if let Some(missing) = self.search_missing(snapshot, id)? {
+                dependencies.missing.insert(missing);
+                anyhow::bail!("media source is unavailable");
+            }
+            anyhow::ensure!(
+                snapshot.objects.contains(&id),
+                "media source is outside the snapshot"
+            );
+            let access: String = self.db.query_row(
+                "SELECT access FROM objects WHERE id=? AND data IS NOT NULL",
+                [id.to_string()],
+                |row| row.get(0),
+            )?;
+            let access = access.parse()?;
+            anyhow::ensure!(
+                snapshot.objects.contains(&access),
+                "missing media access descriptor"
+            );
+            if checked_policies.insert(access) {
+                self.check_access(access, |policy| allows(policy, "read"))?;
+            }
+            dependencies.available.extend([id, access]);
+        }
+        Ok(length)
     }
 
     fn search_source(

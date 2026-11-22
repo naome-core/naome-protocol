@@ -18,9 +18,11 @@ Each response identifies the snapshot, ranking mode and relevant index and model
 
 ## Ownership and ranking
 
-The archive owns immutable objects, snapshot membership and current access enforcement. A small search module owns deterministic text extraction, ranking and a rebuildable local index. Store index data under the same local custody as its sources, with a schema or generation identifier. Keep search state outside the content-addressed record and exchange formats. Every entry carries the source IDs actually used to extract its text. Typed fields can be resolved through their record and profile. Payload passages also track the descriptor and chunk IDs they used.
+The archive owns immutable objects, snapshot membership and current access enforcement. The search module caches derived passages by source object and section and caches vectors by passage and model. Each snapshot keeps a view of the entries whose complete source dependency sets are readable within that snapshot. A later snapshot can reuse the same entries and embeddings. A source arrival schedules only the records waiting for that source.
 
-Use the same eligible corpus for lexical and semantic ranking. Use an inverted postings index partitioned by snapshot for lexical candidates. Only authorized and available sources contribute postings or vectors. The exact vector baseline scores eligible embeddings locally. Use a bounded, deterministic rank fusion for hybrid results and a stable identifier and segment tie-break. Record ranking parameters and distinguish budgeted results from a complete scan. Test exact ranking before considering an approximate vector index.
+Use the same eligible corpus for lexical and semantic ranking. The hybrid results put exact names, titles and codes first, followed by semantic results and lexical matches. Exact vectors are the reference when all comparisons fit. Larger requests project candidates onto normalized prefixes and compare the shortlist at full precision. Report the work and incomplete coverage.
+
+Preparation and retrieval have separate entry points. Preparation resolves and verifies original media before embedding. Retrieval checks the currently allowed entries and returns their source selectors. Recovering an original performs full byte verification. A long-lived local search session keeps its model process warm across requests.
 
 Use a local EmbeddingGemma 2 provider for both query and archive input. Bind the index to the exact weights, tokenizer, decoding implementation and runtime configuration. Validate all vectors and media selectors before persistence. An optional local worker loads the operator's checkpoint offline and receives only approved archive inputs over private process pipes.
 

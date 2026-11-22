@@ -7,10 +7,12 @@ use crate::{
     wire::Id,
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const VECTOR_BATCH: usize = 16;
 const MAX_MEDIA_PARTS: usize = 48;
+const RETRY_SECONDS: i64 = 30;
 
 struct Pending {
     id: i64,
@@ -23,6 +25,7 @@ struct Pending {
 struct CachedVectors {
     parts: Vec<(Option<MediaSpan>, Vec<f32>)>,
     limited: bool,
+    retry: bool,
 }
 
 pub(super) fn embed_query(
@@ -56,57 +59,66 @@ impl Archive {
         mut budget: usize,
     ) -> Result<()> {
         let key = model.id().to_string();
-        let mut cursor = vector_cursor(&self.db, head, &key)?;
-        while budget != 0 {
-            let pending = self.pending_vectors(head, cursor, budget.min(VECTOR_BATCH))?;
+        let mut cursor = 0;
+        let now = unix_seconds()?;
+        while budget > 0 {
+            let pending =
+                self.pending_vectors(head, &key, cursor, now, budget.min(VECTOR_BATCH))?;
             if pending.is_empty() {
                 break;
             }
-            let indexed = self.embed_passages(snapshot, &pending, model)?;
+            let indexed = self.embed_passages(snapshot, &pending, model);
             let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
             {
-                let mut insert = tx.prepare_cached(
-                    "INSERT OR IGNORE INTO rep_search_vectors(head,model,passage,part,span,vector)
-                     SELECT ?1,?2,id,?4,?5,?6 FROM rep_search_passages WHERE id=?3",
+                let mut state = tx.prepare_cached(
+                    "INSERT INTO rep_search_vector_state(passage,model,limited,retry_after)
+                     SELECT id,?2,?3,?4 FROM rep_search_passages WHERE id=?1
+                     ON CONFLICT(passage,model) DO UPDATE SET limited=excluded.limited,retry_after=excluded.retry_after
+                     WHERE rep_search_vector_state.retry_after IS NOT NULL",
                 )?;
-                let mut limited = tx.prepare_cached(
-                    "INSERT OR IGNORE INTO rep_search_limited_media(head,model,passage)
-                     SELECT ?1,?2,id FROM rep_search_passages WHERE id=?3",
+                let mut insert = tx.prepare_cached(
+                    "INSERT OR IGNORE INTO rep_search_vectors(passage,model,part,span,vector)
+                     VALUES(?1,?2,?3,?4,?5)",
                 )?;
                 for (passage, indexed) in pending.iter().zip(indexed) {
+                    let retry = indexed.retry.then_some(now.saturating_add(RETRY_SECONDS));
+                    if state.execute(params![passage.id, key, indexed.limited, retry])? == 0 {
+                        continue;
+                    }
                     for (part, (span, vector)) in indexed.parts.into_iter().enumerate() {
                         let bytes: Vec<_> = vector.into_iter().flat_map(f32::to_le_bytes).collect();
                         let span = span.map(|span| serde_json::to_string(&span)).transpose()?;
-                        insert.execute(params![head, key, passage.id, part as i64, span, bytes])?;
-                    }
-                    if indexed.limited {
-                        limited.execute(params![head, key, passage.id])?;
+                        insert.execute(params![passage.id, key, part as i64, span, bytes])?;
                     }
                 }
             }
+            // A removed passage cannot receive an embedding. The database assigns
+            // monotonically increasing passage IDs, including after a rebuild.
             cursor = pending.last().context("empty embedding batch")?.id;
-            // A withdrawal may remove queued passages while the model works.
-            // Monotonic passage IDs prevent stale vectors from attaching to rebuilt rows.
-            tx.execute(
-                "INSERT INTO rep_search_vector_progress(head,model,cursor)
-                 SELECT head,?2,?3 FROM rep_search_heads WHERE head=?1
-                 ON CONFLICT(head,model) DO UPDATE SET cursor=max(cursor,excluded.cursor)",
-                params![head, key, cursor],
-            )?;
             tx.commit()?;
             budget -= pending.len();
         }
         Ok(())
     }
 
-    fn pending_vectors(&self, head: &str, cursor: i64, limit: usize) -> Result<Vec<Pending>> {
+    fn pending_vectors(
+        &self,
+        head: &str,
+        model: &str,
+        cursor: i64,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<Pending>> {
         self.db
             .prepare_cached(
-                "SELECT p.id,e.object,p.location,p.text FROM rep_search_passages p
-             JOIN rep_search_entries e ON e.id=p.entry
-             WHERE p.head=? AND p.semantic AND p.id>? ORDER BY p.id LIMIT ?",
+                "SELECT p.id,e.object,p.location,p.text FROM rep_search_visibility v
+             JOIN rep_search_entries e ON e.id=v.entry
+             JOIN rep_search_passages p ON p.entry=e.id
+             LEFT JOIN rep_search_vector_state st ON st.passage=p.id AND st.model=?2
+             WHERE v.head=?1 AND p.semantic AND p.id>?3
+               AND (st.passage IS NULL OR st.retry_after<=?4) ORDER BY p.id LIMIT ?5",
             )?
-            .query_map(params![head, cursor, limit as i64], |row| {
+            .query_map(params![head, model, cursor, now, limit as i64], |row| {
                 Ok((
                     row.get(0)?,
                     row.get::<_, String>(1)?,
@@ -131,7 +143,7 @@ impl Archive {
         snapshot: &Snapshot,
         pending: &[Pending],
         model: &mut dyn Embedder,
-    ) -> Result<Vec<CachedVectors>> {
+    ) -> Vec<CachedVectors> {
         let text: Vec<_> = pending
             .iter()
             .filter(|passage| !matches!(passage.location, SearchLocation::Media { .. }))
@@ -140,17 +152,19 @@ impl Archive {
         let mut texts = if text.is_empty() {
             Vec::new()
         } else {
-            text_embeddings(model, EmbeddingInput::Passage, &text)?
+            text_embeddings(model, EmbeddingInput::Passage, &text).unwrap_or_default()
         }
         .into_iter();
         pending
             .iter()
             .map(|pending| {
                 let SearchLocation::Media { media_type, .. } = &pending.location else {
-                    let embedding = texts.next().context("missing text embedding")?;
-                    return Ok(CachedVectors {
-                        parts: vec![(None, embedding)],
-                        limited: false,
+                    return texts.next().map_or_else(CachedVectors::retry, |embedding| {
+                        CachedVectors {
+                            parts: vec![(None, embedding)],
+                            limited: false,
+                            retry: false,
+                        }
                     });
                 };
                 let mut bytes = Vec::new();
@@ -164,48 +178,58 @@ impl Archive {
                     )
                     .is_err()
                 {
-                    return Ok(CachedVectors {
+                    return CachedVectors {
                         limited: true,
                         ..Default::default()
-                    });
+                    };
                 }
-                let embedded = media_embeddings(
+                match media_embeddings(
                     model,
                     EmbeddingInput::Passage,
                     MediaInput {
                         media_type,
                         bytes: &bytes,
                     },
-                )?;
-                let parts = embedded
-                    .parts
-                    .into_iter()
-                    .map(|part| (Some(part.span), part.vector))
-                    .collect();
-                Ok(CachedVectors {
-                    parts,
-                    limited: embedded.limited,
-                })
+                ) {
+                    Ok(embedded) => CachedVectors {
+                        parts: embedded
+                            .parts
+                            .into_iter()
+                            .map(|part| (Some(part.span), part.vector))
+                            .collect(),
+                        limited: embedded.limited,
+                        retry: false,
+                    },
+                    Err(_) => CachedVectors::retry(),
+                }
             })
             .collect()
     }
 }
 
-fn vector_cursor(db: &Connection, head: &str, model: &str) -> Result<i64> {
-    Ok(db
-        .query_row(
-            "SELECT cursor FROM rep_search_vector_progress WHERE head=? AND model=?",
-            params![head, model],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(0))
+impl CachedVectors {
+    fn retry() -> Self {
+        Self {
+            limited: true,
+            retry: true,
+            ..Default::default()
+        }
+    }
+}
+
+fn unix_seconds() -> Result<i64> {
+    Ok(i64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+    )?)
 }
 
 pub(super) fn missing_vectors(db: &Connection, head: &str, model: &str) -> Result<bool> {
     Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM rep_search_passages WHERE head=? AND semantic AND id>?)",
-        params![head, vector_cursor(db, head, model)?],
+        "SELECT EXISTS(SELECT 1 FROM rep_search_visibility v
+         JOIN rep_search_passages p ON p.entry=v.entry
+         LEFT JOIN rep_search_vector_state st ON st.passage=p.id AND st.model=?2
+         WHERE v.head=?1 AND p.semantic AND (st.passage IS NULL OR st.retry_after IS NOT NULL))",
+        params![head, model],
         |row| row.get(0),
     )?)
 }

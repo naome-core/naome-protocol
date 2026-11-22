@@ -2,7 +2,7 @@
 
 use anyhow::{Result, ensure};
 use naome_protocol::{
-    profile::PUBLIC,
+    profile::{Document, Kind, PUBLIC},
     search::{
         EmbeddingGemma, MediaInput, MediaSpan, SearchInput, SearchLocation, SearchMode,
         SearchOptions,
@@ -51,12 +51,54 @@ fn embeddinggemma_searches_original_media_in_both_directions() -> Result<()> {
         )?;
         assets.push((bytes, id, media_type, query));
     }
+    let mut captions = Vec::new();
+    for (subject, statement) in [
+        (
+            "Bridge engineering report",
+            "The Golden Gate Bridge is a red suspension bridge over the entrance to San Francisco Bay.",
+        ),
+        (
+            "A poetry recording and transcript",
+            "Roses are red, violets are blue. This recording contains a person reciting the opening line of the poem.",
+        ),
+        (
+            "Animal observation protocol",
+            "A domestic cat lies curled up and dozes quietly in the footage.",
+        ),
+        (
+            "Field chemistry report",
+            "The line plot shows the concentration of nitrate in river samples during hydrological monitoring.",
+        ),
+    ] {
+        let document = Document::new(
+            Kind::Claim,
+            subject,
+            "trial",
+            serde_json::json!({"statement": statement}),
+            vec![],
+        )?;
+        captions.push(archive.document(&document, Format::A, Id::blob(PUBLIC))?);
+    }
+    for subject in [
+        "Geomagnetic survey",
+        "Electron transport in a semiconductor",
+        "Microplate sample preparation",
+    ] {
+        let document = Document::new(
+            Kind::Claim,
+            subject,
+            "trial",
+            serde_json::json!({"statement": subject}),
+            vec![],
+        )?;
+        archive.document(&document, Format::A, Id::blob(PUBLIC))?;
+    }
     let snap = archive.snapshot("media trial", Default::default())?;
     let options = SearchOptions {
         mode: SearchMode::Hybrid,
         ..Default::default()
     };
-    for (bytes, id, media_type, query) in &assets {
+    for (index, (bytes, id, media_type, query)) in assets.iter().enumerate() {
         let start = Instant::now();
         let report = archive.find(&snap, query, options, Some(&mut model))?;
         println!(
@@ -87,6 +129,38 @@ fn embeddinggemma_searches_original_media_in_both_directions() -> Result<()> {
         let report = archive.find_input(&snap, input, options, Some(&mut model))?;
         let first = report.hits.first().expect("same media is a result");
         ensure!(first.id == *id, "matching input artifact should rank first");
+        let report = archive.search_prepared(
+            &snap,
+            input,
+            SearchOptions {
+                kind: Some(Kind::Claim),
+                ..options
+            },
+            Some(&mut model),
+        )?;
+        ensure!(
+            report
+                .hits
+                .first()
+                .is_some_and(|hit| hit.id == captions[index]),
+            "input {media_type} should retrieve the distinct matching text record"
+        );
+        println!("file {media_type} -> its distinct report is rank one");
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the local search Python media dependencies"]
+fn audio_selectors_use_the_container_time_axis() -> Result<()> {
+    let python = std::env::var_os("NAOME_SEARCH_PYTHON").unwrap_or_else(|| "python3".into());
+    let output = std::process::Command::new(python)
+        .args(["-B", "tests/fixtures/search_audio_timeline.py"])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }

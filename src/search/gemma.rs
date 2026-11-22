@@ -82,22 +82,51 @@ impl EmbeddingGemma {
         Ok(worker)
     }
 
+    pub(crate) fn is_available(&self) -> bool {
+        self.input.is_some()
+    }
+
+    fn invalidate(&mut self) {
+        self.input.take();
+        let _ = self.child.kill();
+    }
+
     fn response<T: DeserializeOwned>(&mut self) -> Result<T> {
-        let value = self
-            .responses
-            .recv_timeout(WORKER_TIMEOUT)
-            .context("EmbeddingGemma 2 worker timed out or closed")??;
+        let value = match self.responses.recv_timeout(WORKER_TIMEOUT) {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                self.invalidate();
+                return Err(error);
+            }
+            Err(error) => {
+                self.invalidate();
+                return Err(error).context("EmbeddingGemma 2 worker timed out or closed");
+            }
+        };
         if let Some(error) = value.get("error").and_then(Value::as_str) {
             bail!("EmbeddingGemma 2 worker: {error}");
         }
-        Ok(serde_json::from_value(value)?)
+        match serde_json::from_value(value) {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                self.invalidate();
+                Err(error.into())
+            }
+        }
     }
 
     fn request<T: DeserializeOwned>(&mut self, request: &Value) -> Result<T> {
-        let input = self.input.as_mut().context("worker input closed")?;
-        serde_json::to_writer(&mut *input, request)?;
-        input.write_all(b"\n")?;
-        input.flush()?;
+        let write = (|| -> Result<()> {
+            let input = self.input.as_mut().context("worker input closed")?;
+            serde_json::to_writer(&mut *input, request)?;
+            input.write_all(b"\n")?;
+            input.flush()?;
+            Ok(())
+        })();
+        if let Err(error) = write {
+            self.invalidate();
+            return Err(error);
+        }
         self.response()
     }
 }
