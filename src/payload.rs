@@ -79,28 +79,39 @@ impl Archive {
         id: Id,
         purpose: &str,
         budget: u64,
-        mut output: impl Write,
+        output: impl Write,
     ) -> Result<u64> {
-        let d = self.read(s, id, purpose)?;
+        self.read(s, id, purpose)?
+            .materialize(budget, output, |chunk| self.resolve(s, chunk, purpose))
+    }
+}
+
+impl Document {
+    pub(crate) fn materialize(
+        &self,
+        budget: u64,
+        mut output: impl Write,
+        mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
+    ) -> Result<u64> {
         ensure!(
-            d.kind == Kind::Descriptor
-                && d.scope == "ordered-chunks-1"
-                && d.field::<String>("algorithm")? == "SHA-256"
-                && d.field::<String>("media")? == d.subject,
+            self.kind == Kind::Descriptor
+                && self.scope == "ordered-chunks-1"
+                && self.field::<String>("algorithm")? == "SHA-256"
+                && self.field::<String>("media")? == self.subject,
             "unknown descriptor"
         );
-        let length: u64 = d.field("length")?;
+        let length: u64 = self.field("length")?;
         ensure!(length <= budget, "payload budget exhausted");
         let mut digest = Sha256::new();
         let mut offset = 0u64;
-        for e in d.inputs.iter() {
+        for e in &self.inputs {
             ensure!(
                 e.role == "chunk"
                     && e.qualifier == offset.to_string()
                     && e.target.format().is_none(),
                 "invalid position or chunk reference"
             );
-            let b = self.resolve(s, e.target, purpose)?;
+            let b = resolve(e.target)?;
             ensure!(!b.is_empty(), "empty chunk");
             offset = offset
                 .checked_add(b.len() as u64)
@@ -110,7 +121,7 @@ impl Archive {
             output.write_all(&b)?;
         }
         ensure!(
-            offset == length && hex::encode(digest.finalize()) == d.field::<String>("sha256")?,
+            offset == length && hex::encode(digest.finalize()) == self.field::<String>("sha256")?,
             "payload digest or length disagrees"
         );
         Ok(offset)

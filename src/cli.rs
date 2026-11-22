@@ -1,3 +1,6 @@
+mod search;
+pub use search::{FindArguments, LocalSearch, PrepareSearchArguments, SearchRequest};
+
 use crate::{
     evaluation, executor, fixture, kit, learning,
     profile::{self, Document, Kind, PUBLIC},
@@ -117,6 +120,12 @@ pub enum ArchiveCommand {
         #[arg(long, default_value_t = 100)]
         budget: usize,
     },
+    /// Search authorized archive records and text passages by word or meaning.
+    Find(FindArguments),
+    /// Prepare archive text, media and embeddings independently of a search.
+    PrepareSearch(PrepareSearchArguments),
+    /// Reuse a local model for JSON-line find and prepare-search requests on stdin.
+    SearchSession,
     /// Trace required input edges and the unresolved frontier.
     Explain {
         head: Id,
@@ -424,6 +433,13 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 budget,
                 after,
             )?)
+        }
+        ArchiveCommand::Find(arguments) => print(LocalSearch::default().find(&db, arguments)?),
+        ArchiveCommand::PrepareSearch(arguments) => {
+            print(LocalSearch::default().prepare(&db, arguments)?)
+        }
+        ArchiveCommand::SearchSession => {
+            LocalSearch::default().serve(&db, std::io::stdin().lock(), std::io::stdout().lock())
         }
         ArchiveCommand::Explain {
             head,

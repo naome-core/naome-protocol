@@ -17,6 +17,7 @@ pub mod migration;
 pub mod payload;
 pub mod profile;
 pub mod projection;
+pub mod search;
 pub mod store;
 pub mod training_target;
 pub mod wire;
