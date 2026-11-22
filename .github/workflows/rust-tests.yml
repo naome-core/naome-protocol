@@ -87,25 +87,24 @@ jobs:
         with:
           python-version: '3.12.10'
 
-      - name: Install the qualified inference runtime
-        if: ${{ inputs.model_search }}
-        run: |
-          if [[ "$RUNNER_OS" != macOS ]]; then
-            python -m pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-search-torch.txt
-          fi
-          python -m pip install -r requirements-search.txt
-
-      - name: Package and test the release download
+      - name: Stage the native release candidate
         if: ${{ inputs.package_target != '' }}
         env:
           PACKAGE_TARGET: ${{ inputs.package_target }}
-          MODEL_SEARCH: ${{ inputs.model_search }}
-        run: |
-          args=()
-          if [[ "$MODEL_SEARCH" == true ]]; then
-            args+=(--model)
-          fi
-          python tools/ci/package_release.py "$PACKAGE_TARGET" "${args[@]}"
+        run: python tools/ci/package_release.py stage "$PACKAGE_TARGET"
+
+      - name: Stage the Cargo model test executables
+        if: ${{ inputs.model_search }}
+        run: python tools/ci/search_qualification.py stage
+
+      - name: Upload the Cargo model test executables
+        if: ${{ inputs.model_search }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: search-tests-${{ inputs.package_target }}
+          path: target/search-test-binaries/*
+          if-no-files-found: error
+          compression-level: 0
 
       - name: Verify and stage the source package and whitepaper
         if: ${{ inputs.package_target == 'x86_64-unknown-linux-gnu' }}
@@ -114,11 +113,11 @@ jobs:
           mkdir -p target/source-distribution
           cp target/package/naome-protocol-*.crate spec/research-evidence-protocol.pdf target/source-distribution/
 
-      - name: Upload the verified native release files
+      - name: Upload the native release candidate
         if: ${{ inputs.package_target != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nao-${{ inputs.package_target }}
+          name: release-candidate-${{ inputs.package_target }}
           path: target/distribution/*
           if-no-files-found: error
           compression-level: 0

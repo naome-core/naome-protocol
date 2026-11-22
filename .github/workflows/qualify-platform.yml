@@ -1,0 +1,121 @@
+name: Native platform qualification
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        required: true
+      profile:
+        type: string
+        required: true
+      target:
+        type: string
+        required: true
+      model_search:
+        type: boolean
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Full workspace
+    uses: ./.github/workflows/rust-tests.yml
+    with:
+      runner: ${{ inputs.runner }}
+      profile: ${{ inputs.profile }}
+      package_target: ${{ inputs.profile == 'release' && inputs.target || '' }}
+      model_search: ${{ inputs.model_search }}
+
+  qualification:
+    name: ${{ matrix.suite }}
+    if: ${{ inputs.profile == 'release' }}
+    needs: build
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(inputs.model_search && '["search_media","search_multilingual","packaged_cli"]' || '["packaged_cli"]') }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the native inputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ format('{0}-{1}', matrix.suite == 'packaged_cli' && 'release-candidate' || 'search-tests', inputs.target) }}
+          path: ${{ matrix.suite == 'packaged_cli' && 'target/distribution' || 'target/search-test-binaries' }}
+
+      - name: Set up Python for release verification
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+
+      - name: Install the qualified inference runtime
+        if: ${{ inputs.model_search }}
+        run: |
+          if [[ "$RUNNER_OS" != macOS ]]; then
+            python -m pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-search-torch.txt
+          fi
+          python -m pip install -r requirements-search.txt
+
+      - name: Run the native model test suite
+        if: ${{ matrix.suite != 'packaged_cli' }}
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: python tools/ci/search_qualification.py run "$SUITE"
+
+      - name: Verify the packaged CLI
+        if: ${{ matrix.suite == 'packaged_cli' }}
+        env:
+          PACKAGE_TARGET: ${{ inputs.target }}
+          MODEL_SEARCH: ${{ inputs.model_search }}
+        run: |
+          args=()
+          if [[ "$MODEL_SEARCH" == true ]]; then
+            args+=(--model)
+          fi
+          python tools/ci/package_release.py verify "$PACKAGE_TARGET" "${args[@]}"
+
+      - name: Verify tracked sources are unchanged
+        run: git diff --exit-code HEAD
+
+  publish:
+    name: Upload the qualified native release
+    if: ${{ always() && inputs.profile == 'release' }}
+    needs: [build, qualification]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out gate implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require the build and all qualification suites to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 tools/ci/check_results.py build qualification
+
+      - name: Download the qualified release candidate
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-candidate-${{ inputs.target }}
+          path: target/distribution
+
+      - name: Upload the verified native release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nao-${{ inputs.target }}
+          path: target/distribution/*
+          if-no-files-found: error
+          compression-level: 0

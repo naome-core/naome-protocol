@@ -1,18 +1,20 @@
 """Run the offline multilingual and multimodal release cases with pinned inputs."""
 
+import argparse
 import hashlib
 import json
 import os
+import shutil
+import stat
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 from urllib.request import urlopen
 
-from huggingface_hub import snapshot_download
-from PIL import Image, ImageDraw
-
-
+ROOT = Path(__file__).resolve().parents[2]
+TEST_DIRECTORY = ROOT / "target" / "search-test-binaries"
+TEST_SUITES = ("search_media", "search_multilingual")
 MODEL = "google/embeddinggemma-2"
 REVISION = "f9972ac22e696a105c482202646979e33e4b5a1e"
 FIXTURES = {
@@ -34,6 +36,8 @@ FIXTURES = {
 
 
 def create_fixtures(directory):
+    from PIL import Image, ImageDraw
+
     directory.mkdir()
     for name, (url, expected) in FIXTURES.items():
         with urlopen(url, timeout=60) as response:
@@ -65,30 +69,74 @@ def verify_packaged_search(nao, root, environment):
     print("Verified multilingual text and image queries through the packaged CLI")
 
 
-def qualify(nao=None):
+def test_binary(suite):
+    return TEST_DIRECTORY / (suite + (".exe" if os.name == "nt" else ""))
+
+
+def stage_tests():
+    command = ["cargo", "test", "--release", "--locked", "--no-run", "--message-format=json"]
+    for suite in TEST_SUITES:
+        command.extend(["--test", suite])
+    result = subprocess.run(command, check=True, cwd=ROOT, text=True, stdout=subprocess.PIPE)
+    executables = {}
+    for line in result.stdout.splitlines():
+        event = json.loads(line)
+        if event["reason"] != "compiler-artifact" or not event.get("executable"):
+            continue
+        target = event["target"]
+        if target["kind"] == ["test"] and target["name"] in TEST_SUITES:
+            executables[target["name"]] = event["executable"]
+    if executables.keys() != set(TEST_SUITES):
+        raise ValueError(f"missing Cargo test executables: {set(TEST_SUITES) - executables.keys()}")
+    TEST_DIRECTORY.mkdir(exist_ok=True)
+    for suite, executable in executables.items():
+        shutil.copy2(executable, test_binary(suite))
+
+
+def model_environment(root):
+    environment = os.environ.copy()
+    if "NAOME_SEARCH_MODEL" not in environment:
+        from huggingface_hub import snapshot_download
+
+        environment["NAOME_SEARCH_MODEL"] = snapshot_download(
+            MODEL, revision=REVISION, local_dir=root / "model weights"
+        )
+    if "NAOME_MEDIA_FIXTURES" not in environment:
+        fixtures = root / "media"
+        create_fixtures(fixtures)
+        environment["NAOME_MEDIA_FIXTURES"] = str(fixtures)
+    environment["NAOME_SEARCH_PYTHON"] = sys.executable
+    environment["NAOME_SEARCH_DEVICE"] = "cpu"
+    environment["HF_HUB_OFFLINE"] = "1"
+    return environment
+
+
+def run_tests(suite):
+    executable = test_binary(suite)
+    if os.name != "nt":
+        executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    with tempfile.TemporaryDirectory(prefix="nao-search-qualification-") as temporary:
+        subprocess.run(
+            [executable, "--ignored", "--nocapture"],
+            check=True,
+            cwd=ROOT,
+            env=model_environment(Path(temporary)),
+        )
+
+
+def qualify_packaged(nao):
     with tempfile.TemporaryDirectory(prefix="nao-search-qualification-") as temporary:
         root = Path(temporary)
-        environment = os.environ.copy()
-        if "NAOME_SEARCH_MODEL" not in environment:
-            environment["NAOME_SEARCH_MODEL"] = snapshot_download(
-                MODEL, revision=REVISION, local_dir=root / "model weights"
-            )
-        if "NAOME_MEDIA_FIXTURES" not in environment:
-            fixtures = root / "media"
-            create_fixtures(fixtures)
-            environment["NAOME_MEDIA_FIXTURES"] = str(fixtures)
-        environment["NAOME_SEARCH_PYTHON"] = sys.executable
-        environment["NAOME_SEARCH_DEVICE"] = "cpu"
-        environment["HF_HUB_OFFLINE"] = "1"
-        subprocess.run(
-            ["cargo", "test", "--release", "--locked", "--test", "search_multilingual",
-             "--test", "search_media", "--", "--ignored", "--nocapture"],
-            check=True,
-            env=environment,
-        )
-        if nao is not None:
-            verify_packaged_search(nao, root, environment)
+        verify_packaged_search(nao, root, model_environment(root))
 
 
 if __name__ == "__main__":
-    qualify()
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("stage")
+    commands.add_parser("run").add_argument("suite", choices=TEST_SUITES)
+    args = parser.parse_args()
+    if args.command == "stage":
+        stage_tests()
+    else:
+        run_tests(args.suite)

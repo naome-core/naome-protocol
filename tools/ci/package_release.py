@@ -1,4 +1,4 @@
-"""Stage a native nao download and exercise the executable from the archive."""
+"""Stage and verify the native nao download."""
 
 import argparse
 import hashlib
@@ -56,20 +56,33 @@ def verify(nao, directory, version):
     print(f"Verified {nao.name}: published profiles, both exchange formats, and key generation")
 
 
-def package(target, model):
+def release_version():
+    with (ROOT / "Cargo.toml").open("rb") as manifest:
+        return tomllib.load(manifest)["package"]["version"]
+
+
+def package_path(target, version):
+    suffix = "zip" if os.name == "nt" else "tar.gz"
+    return ROOT / "target" / "distribution" / f"nao-v{version}-{target}.{suffix}"
+
+
+def checksum(path):
+    with path.open("rb") as contents:
+        return f"{hashlib.file_digest(contents, 'sha256').hexdigest()}  {path.name}\n".encode("ascii")
+
+
+def stage(target):
     rust_version = subprocess.check_output(["rustc", "-vV"], cwd=ROOT, text=True)
     host = next(line.removeprefix("host: ") for line in rust_version.splitlines()
                 if line.startswith("host: "))
     if host != target:
         raise ValueError(f"expected a native {target} runner, found {host}")
-    with (ROOT / "Cargo.toml").open("rb") as manifest:
-        version = tomllib.load(manifest)["package"]["version"]
+    version = release_version()
+    download = package_path(target, version)
     name = "nao.exe" if os.name == "nt" else "nao"
     archive_format = "zip" if os.name == "nt" else "gztar"
-    target_directory = ROOT / "target"
-    build_directory = target_directory / os.environ.get("CARGO_BUILD_TARGET", "")
-    output = target_directory / "distribution"
-    output.mkdir(exist_ok=True)
+    build_directory = ROOT / "target" / os.environ.get("CARGO_BUILD_TARGET", "")
+    download.parent.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="nao-release-") as temporary:
         root = Path(temporary)
         staging = root / "staging"
@@ -77,33 +90,43 @@ def package(target, model):
         shutil.copy2(build_directory / "release" / name, staging)
         for path in [ROOT / "LICENSE", ROOT / "README.md", *ROOT.glob("requirements-search*.txt")]:
             shutil.copy2(path, staging)
-
-        package_path = Path(shutil.make_archive(
+        archive = shutil.make_archive(
             str(root / f"nao-v{version}-{target}"), archive_format, root_dir=staging
-        ))
-        unpacked = root / "Test workspace µ"
-        if archive_format == "gztar":
-            shutil.unpack_archive(package_path, unpacked, filter="data")
+        )
+        shutil.copy2(archive, download)
+    download.with_name(f"{download.name}.sha256").write_bytes(checksum(download))
+    print(f"Staged {download.name}")
+
+
+def verify_download(target, model):
+    version = release_version()
+    download = package_path(target, version)
+    if download.with_name(f"{download.name}.sha256").read_bytes() != checksum(download):
+        raise ValueError("release download checksum mismatch")
+    with tempfile.TemporaryDirectory(prefix="nao-release-") as temporary:
+        unpacked = Path(temporary) / "Test workspace µ"
+        if os.name == "nt":
+            shutil.unpack_archive(download, unpacked)
+            nao = unpacked / "nao.exe"
         else:
-            shutil.unpack_archive(package_path, unpacked)
-        nao = unpacked / name
+            shutil.unpack_archive(download, unpacked, filter="data")
+            nao = unpacked / "nao"
         verify(nao, unpacked, version)
         if model:
-            from search_qualification import qualify
+            from search_qualification import qualify_packaged
 
-            qualify(nao)
-        with package_path.open("rb") as contents:
-            digest = hashlib.file_digest(contents, "sha256").hexdigest()
-        (output / f"{package_path.name}.sha256").write_bytes(
-            f"{digest}  {package_path.name}\n".encode("ascii")
-        )
-        shutil.copy2(package_path, output)
-        print(f"Staged {package_path.name} ({digest})")
+            qualify_packaged(nao)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("target")
-    parser.add_argument("--model", action="store_true")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("stage").add_argument("target")
+    verify_parser = commands.add_parser("verify")
+    verify_parser.add_argument("target")
+    verify_parser.add_argument("--model", action="store_true")
     args = parser.parse_args()
-    package(args.target, args.model)
+    if args.command == "stage":
+        stage(args.target)
+    else:
+        verify_download(args.target, args.model)

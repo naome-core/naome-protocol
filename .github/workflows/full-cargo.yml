@@ -37,11 +37,11 @@ jobs:
           - name: Windows x86_64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
-    uses: ./.github/workflows/rust-tests.yml
+    uses: ./.github/workflows/qualify-platform.yml
     with:
       runner: ${{ matrix.platform.runner }}
       profile: ${{ matrix.profile }}
-      package_target: ${{ matrix.profile == 'release' && matrix.platform.target || '' }}
+      target: ${{ matrix.platform.target }}
       model_search: ${{ matrix.profile == 'release' && inputs.model_search }}
 
   result:
