@@ -16,6 +16,8 @@ use std::{
 const DIMENSIONS: usize = 768;
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const WORKER_TIMEOUT: Duration = Duration::from_secs(180);
+// A media request can encode multiple video segments, audio ranges, or PDF pages on CPU.
+const MEDIA_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// An offline EmbeddingGemma 2 worker using explicitly installed model files.
 /// It keeps the encoders warm for the lifetime of this handle.
@@ -71,7 +73,7 @@ impl EmbeddingGemma {
             responses,
             model: Id::blob(&[]),
         };
-        let hello: Value = worker.response()?;
+        let hello: Value = worker.response(WORKER_TIMEOUT)?;
         let fingerprint = hello["fingerprint"]
             .as_str()
             .context("missing EmbeddingGemma 2 fingerprint")?;
@@ -98,8 +100,8 @@ impl EmbeddingGemma {
         let _ = self.child.kill();
     }
 
-    fn response<T: DeserializeOwned>(&mut self) -> Result<T> {
-        let value = match self.responses.recv_timeout(WORKER_TIMEOUT) {
+    fn response<T: DeserializeOwned>(&mut self, timeout: Duration) -> Result<T> {
+        let value = match self.responses.recv_timeout(timeout) {
             Ok(Ok(value)) => value,
             Ok(Err(error)) => {
                 self.invalidate();
@@ -122,7 +124,7 @@ impl EmbeddingGemma {
         }
     }
 
-    fn request<T: DeserializeOwned>(&mut self, request: &Value) -> Result<T> {
+    fn request<T: DeserializeOwned>(&mut self, request: &Value, timeout: Duration) -> Result<T> {
         let write = (|| -> Result<()> {
             let input = self.input.as_mut().context("worker input closed")?;
             serde_json::to_writer(&mut *input, request)?;
@@ -134,7 +136,7 @@ impl EmbeddingGemma {
             self.invalidate();
             return Err(error);
         }
-        self.response()
+        self.response(timeout)
     }
 }
 
@@ -184,7 +186,10 @@ impl Embedder for EmbeddingGemma {
             EmbeddingInput::Query => "SearchQuery",
             EmbeddingInput::Passage => "Document",
         };
-        self.request(&json!({"kind": "text", "prompt": prompt, "text": text}))
+        self.request(
+            &json!({"kind": "text", "prompt": prompt, "text": text}),
+            WORKER_TIMEOUT,
+        )
     }
 
     fn embed_media(
@@ -192,10 +197,13 @@ impl Embedder for EmbeddingGemma {
         _input: EmbeddingInput,
         input: MediaInput<'_>,
     ) -> Result<EmbeddedMedia> {
-        self.request(&json!({
-            "kind": "media",
-            "media_type": media_type(input.media_type),
-            "data": STANDARD.encode(input.bytes),
-        }))
+        self.request(
+            &json!({
+                "kind": "media",
+                "media_type": media_type(input.media_type),
+                "data": STANDARD.encode(input.bytes),
+            }),
+            MEDIA_TIMEOUT,
+        )
     }
 }
