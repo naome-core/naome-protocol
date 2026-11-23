@@ -360,6 +360,9 @@ pub fn trial(directory: &Path) -> Result<Value> {
     for path in [&a_path, &b_path, &p_path] {
         ensure!(!path.exists(), "trial requires fresh archive files")
     }
+    let case_dir = directory.join("conformance");
+    std::fs::create_dir(&case_dir)
+        .with_context(|| format!("create fresh conformance directory {}", case_dir.display()))?;
     let mut a = Archive::open(a_path)?;
     let mut b = Archive::open(b_path)?;
     let mut p = Archive::open(p_path)?;
@@ -545,8 +548,6 @@ pub fn trial(directory: &Path) -> Result<Value> {
         &[[140, 210]],
         &["fail"],
     )?;
-    let case_dir = directory.join("conformance");
-    std::fs::create_dir(&case_dir)?;
     let mut cases = crate::conformance::Cases::new();
     let mut answers = crate::conformance::Answers::new();
     for (name, archive, view, qs, want) in [

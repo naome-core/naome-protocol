@@ -542,6 +542,27 @@ fn controlled_test_exemptions_require_witness_and_a_scientific_pass() -> Result<
 }
 
 #[test]
+fn trial_rejects_an_existing_conformance_directory_before_creating_archives() -> Result<()> {
+    let directory = tempdir()?;
+    let cases = directory.path().join("conformance");
+    std::fs::create_dir(&cases)?;
+    let marker = cases.join("existing.json");
+    std::fs::write(&marker, b"existing result")?;
+
+    let trial = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
+        .arg("trial")
+        .arg(directory.path())
+        .output()?;
+    assert!(!trial.status.success());
+    let error = String::from_utf8(trial.stderr)?;
+    assert!(error.contains("fresh conformance directory"), "{error}");
+    assert_eq!(std::fs::read(&marker)?, b"existing result");
+    let remaining = std::fs::read_dir(directory.path())?.collect::<std::io::Result<Vec<_>>>()?;
+    assert_eq!(remaining.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn public_interchange_runs_through_cli_and_grades_external_output() -> Result<()> {
     use std::process::Command;
     let dir = tempdir()?;
@@ -580,6 +601,30 @@ fn public_interchange_runs_through_cli_and_grades_external_output() -> Result<()
     assert!(!bad.status.success());
     let score: Value = serde_json::from_slice(&bad.stdout)?;
     assert_eq!(score["incorrect_acceptance"], 1);
+
+    let cases_path = cases.join("cases.json");
+    let original: Value = serde_json::from_slice(&std::fs::read(&cases_path)?)?;
+    let full = &original["corrected/score-above"];
+    let mut record_limited = full.clone();
+    record_limited["query"]["budget"] = json!(1);
+    let mut byte_limited = full.clone();
+    byte_limited["query"]["byte_limit"] = json!(1);
+    let mixed = json!({
+        "a-record-limit": record_limited,
+        "b-full": full,
+        "c-byte-limit": byte_limited,
+    });
+    std::fs::write(cases_path, serde_json::to_vec(&mixed)?)?;
+    let run = Command::new(nao).arg("suite").arg(cases).output()?;
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&run.stdout)?,
+        json!({"a-record-limit": "unknown", "b-full": "fail", "c-byte-limit": "unknown"})
+    );
     Ok(())
 }
 

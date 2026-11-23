@@ -1,5 +1,5 @@
 use crate::{
-    evaluation::{Query, assess},
+    evaluation::{EVALUATOR_ID, Query, ReadInventory, assess_with_inventory},
     store::{Archive, Bundle, Snapshot},
 };
 use anyhow::{Context, Result, ensure};
@@ -58,8 +58,14 @@ pub fn add_cases(
 }
 pub fn run(dir: &Path, cases: &Cases) -> Result<Answers> {
     let mut answers = Answers::new();
-    let packets: BTreeSet<_> = cases.values().map(|c| &c.packet).collect();
-    for name in packets {
+    let mut packets: BTreeMap<&str, Vec<_>> = BTreeMap::new();
+    for (key, case) in cases {
+        packets
+            .entry(&case.packet)
+            .or_default()
+            .push((key, &case.query));
+    }
+    for (name, queries) in packets {
         ensure!(
             !name.is_empty()
                 && name
@@ -71,8 +77,17 @@ pub fn run(dir: &Path, cases: &Cases) -> Result<Answers> {
         let bundle = Bundle::read(File::open(dir.join(name))?)?;
         let mut archive = Archive::memory()?;
         archive.import(&bundle)?;
-        for (key, case) in cases.iter().filter(|(_, c)| &c.packet == name) {
-            let r = assess(&archive, &bundle.snapshot, &case.query)?;
+        // All queries for this packet read the same isolated archive and snapshot.
+        let mut inventory = ReadInventory::default();
+        for (key, query) in queries {
+            let r = assess_with_inventory(
+                &archive,
+                &bundle.snapshot,
+                query,
+                EVALUATOR_ID,
+                &mut inventory,
+            )?
+            .receipt;
             let value = if let Some(standing) = r.result {
                 serde_json::to_value(standing)?
                     .as_str()

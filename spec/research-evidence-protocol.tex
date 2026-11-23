@@ -3,7 +3,7 @@
 \usepackage{amsmath,amssymb,tabularx,booktabs,xcolor,enumitem,fancyhdr,verbatim,hyperref}
 \definecolor{ink}{HTML}{172D37}
 \definecolor{accent}{HTML}{00665C}
-\newcommand{\edition}{1.8}
+\newcommand{\edition}{1.9}
 \hypersetup{colorlinks=true,linkcolor=accent,urlcolor=accent,linktoc=all,
   pdftitle={NAOME Research Evidence Protocol},
   pdfsubject={Research Evidence Protocol, white paper edition \edition. Conditional validity of scientific claims and reassessment when assumptions change.},
@@ -30,7 +30,7 @@
 \begin{document}
 \thispagestyle{empty}
 \pdfbookmark[1]{Title and abstract}{abstract}
-{\sffamily\small\bfseries\color{accent}PROTOCOL WHITE PAPER \hfill EDITION \edition\enspace / \enspace 22 NOVEMBER 2026\par}
+{\sffamily\small\bfseries\color{accent}PROTOCOL WHITE PAPER \hfill EDITION \edition\enspace / \enspace 23 NOVEMBER 2026\par}
 \vspace{11mm}
 
 {\raggedright\fontsize{28}{33}\selectfont\bfseries\color{ink}NAOME Research\\
@@ -41,14 +41,14 @@ when assumptions change\par}
 \vspace{7mm}
 
 \topic{Abstract}
-The NAOME Research Evidence Protocol defines how to record the evidence, assumptions and inference rules behind scientific claims, and how to reassess those claims when their premises change. It is designed for research across disciplines. A proof, a measurement and an interpretation of a historical source can share a record structure while retaining their own standards of justification.
+The NAOME Research Evidence Protocol defines how to record the evidence, assumptions and inference rules behind scientific claims, and how to reassess those claims when their premises change. It is designed for independently operated research systems that build on one another's findings across disciplines. A proof, a measurement and an interpretation of a historical source can share a record structure while retaining their own standards of justification.
 
 The protocol's guarantee concerns the standing of a particular claim. A conforming assessment may report a claim as supported only when the recorded evidence and an admitted rule warrant that judgement within the declared scope, and no examined argument for its negation is admitted. The receipt identifies the assumptions, policy and evidence available to the evaluator. The strength of the conclusion follows from the rule used. A deduction can establish a theorem under its axioms. A statistical inference retains the uncertainty specified by its model.
 
 Recorded dependencies let a recipient trace which arguments and later uses a correction can affect. An evaluator can reassess those arguments, and a recipient can recover the earlier judgement and the grounds for its revision.
 
 \topic{Scope and evidence}
-Each deployment supplies its scientific profiles, trust anchors, access rules, resource limits and connections to research tools. The Rust reference implementation exercises capture, exchange and reassessment in bounded local cases (Appendix~\ref{app:release}). Documentation effort, reuse by independently built agents and performance with physical instruments remain to be measured.
+Each deployment supplies its scientific profiles, trust anchors, access rules, resource limits and connections to research tools. The Rust reference implementation exercises capture, exchange and reassessment in bounded local cases (Appendix~\ref{app:reference-evaluation}). Documentation effort, reuse by independently built agents and performance with physical instruments remain to be measured.
 
 \clearpage
 \pdfbookmark[1]{Contents and key terms}{contents}
@@ -693,22 +693,22 @@ A claim and an outcome reference the same target profile. A named outcome author
 
 Projects supply the domain mapping from native data, including the scientific assumptions and how selectors refer to the original bytes. The reference implementation validates declared target types and attestations. Sample selection, instrument calibration, consent authority and the accuracy of scientific interpretation still depend on the underlying evidence and the recipient's policy.
 
-\partpage{Reference implementation and release evidence}\label{app:release}
-Edition \edition{} accompanies \texttt{naome-protocol} v0.1.7. The \href{https://github.com/naome-core/naome-protocol/tree/39b89b980cf3951c70b26747e5f78d9f28a34eb5}{implementation revision} contains the Rust library, the offline \texttt{nao} command and the tests described here. This code passed the \href{https://github.com/naome-core/naome-protocol/actions/runs/45071268541}{release checks on Linux, macOS and Windows}. The earlier reference implementation is available at \href{https://github.com/naome-core/naome-protocol/tree/v0.1.2}{v0.1.2}.
+\partpage{Reference evaluation}\label{app:reference-evaluation}
+The reference implementation exercises the protocol in local computational cases and a synthetic evidence exchange. The \href{https://github.com/naome-core/naome-protocol#reproduce-the-reference-trial}{reproduction guide} explains how to obtain the source and fixtures accompanying this edition and rerun the exchange.
 
-\topic{What was executed}
+\topic{Methods and observations}
 In a local computational case, the executor reads the authorised plan, checks the bytes of a named payload, and writes an occurrence and a signed readback. It then records a closure linking the plan, decision and occurrence. These records are produced by executing the check. The question, plan and authority are inputs supplied to the case.
 
 In both native formats, five measurements use the same reference. A withdrawal covers axial events 3 through 5. At events 3 and 5 the physical claim becomes unresolved. Axial events 2 and 6 and radial event 4 retain their original bounds and supported verdict. Further tests cover a stored empty mode and a known mismatch paired with an invalid restriction. A current training label survives an inapplicable withdrawal when its features remain eligible. Earlier receipts identify their evaluator for historical replay.
 
-Version 0.1.7 shares the correction applicability rules across assessment, impact analysis and training review. A regression test in both formats checks that an axial withdrawal leaves the direct radial assessment supported, requires reassessment of a delegated use, and preserves historical replay.
+The same applicability rules govern assessment, impact analysis and training review. In both formats an axial withdrawal leaves the direct radial assessment supported, requires reassessment of a delegated use, and preserves historical replay.
 
 Two local archives use the native encodings of Appendix~\ref{app:exchange}. For the original transition and both calibration notices, the implementation recomputed the scores and scientific results in Sections~\ref{sec:archive} and~\ref{sec:bar}. The projection producer replayed the corrected receipt and signed the permitted hull. A fresh recipient received the hull, scoring predicates and public verification context. The source retained the link to the underlying measurements. The recipient could apply both scoring rules and identified the missing warrant for each physical claim.
 
 \small
 \begin{tabularx}{\linewidth}{@{}L{.24\linewidth}Y@{}}
 \toprule
-\textbf{Local release check} & \textbf{Observable condition} \\ \midrule
+\textbf{Reference check} & \textbf{Observable condition} \\ \midrule
 Bootstrap and transport & Each of the two canonical kits supplies six vectors. The structural probe yields the two published digests. A malformed exchange rolls back. A withdrawn payload stays unavailable after re-import. \\
 Public exchange suite & Six isolated inventories exercise four queries each. The 24 expected answers cover the source, its native translation, the later correction, rival notices, the restricted projection and the projection's return. The grading command also detects an incorrect acceptance in an altered submission. \\
 Evidence and learning & Tests cover the release, origin, split and reassessment rules in Appendix~\ref{app:learning}. A censored endpoint, a measurement interval and two text variants survive exchange. The control stays outside the calibration notice scope. \\
@@ -717,8 +717,8 @@ Action and adoption & A restarted executor recognises its earlier reservation. A
 \end{tabularx}
 \normalsize
 
-\topic{Scientific interpretation of the release}
-The implementation supplies a particular research profile, typed training targets and additional signed tests under recipient-selected rules. Its two codec paths share one scientific evaluator. Agreement across those paths tests transport, local interpretation and the stated fixtures. The independent development, blinded baseline comparisons and prospective instrument trial specified in Section~\ref{sec:trial} and the preceding pages remain external validation tasks. The release makes no estimate of population error rates, physical calibration accuracy or model improvement.
+\topic{Limits of the evaluation}
+The implementation supplies a particular research profile, typed training targets and additional signed tests under recipient-selected rules. Its two codec paths share one scientific evaluator. Agreement across those paths tests transport, local interpretation and the stated fixtures. The independent development, blinded baseline comparisons and prospective instrument trial specified in Section~\ref{sec:trial} and the preceding pages remain external validation tasks. The cases provide no estimate of population error rates, physical calibration accuracy or model improvement.
 
 \partpage{Sources and design lineage}
 \small
