@@ -15,3 +15,7 @@ Freeze the following checks before collecting results.
 - Replay archived v1 receipts on their existing rules. Verify the release package, paper and legacy wire fixtures. Physical multi-terabyte throughput, WAN transport, failure rates and production concurrency require independent deployment measurements.
 
 These are engineering acceptance criteria chosen for the experiment. Synthetic counts or virtual payload sizes do not qualify as physical bytes processed.
+
+## Follow-up on physical history cost
+
+The first v2 run preserved each changed logical page as a full JSON blob. Across three independent 12,800-record runs the origin grew by 358,772,736 bytes for 1,755,290 bytes of input records. This observation motivates a second, predeclared comparison. Keep these runs in `full-page-samples.json`. Preserve every logical page ID, head, wire byte and routing result. Store an insertion or replacement against a retained prior page only when it saves bytes. Bound the physical reconstruction chain to four deltas and record all backing-page reads and bytes separately from logical I/O. Rerun the original workload unchanged, report the full storage and time tradeoff and verify identical logical roots. The follow-up criterion is a lower actual file size at 12,800 records with no more than five backing-page reads per logical read. No runtime improvement is assumed.

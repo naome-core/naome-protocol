@@ -1,4 +1,5 @@
 mod exchange;
+pub mod paged;
 mod search_index;
 pub mod sharing;
 mod snapshot;

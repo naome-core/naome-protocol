@@ -1,3 +1,4 @@
+mod paged;
 mod search;
 pub use search::{FindArguments, LocalSearch, PrepareSearchArguments, SearchRequest};
 
@@ -20,6 +21,11 @@ use std::{
 
 #[derive(Subcommand)]
 pub enum ArchiveCommand {
+    /// Operate on bounded, per-lab version-two inventories.
+    Paged {
+        #[command(subcommand)]
+        command: paged::Command,
+    },
     /// Show supported formats, evaluators and independently pinned kit digests.
     Capabilities,
     /// Run all cases in an externally pinned bootstrap package.
@@ -312,9 +318,10 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
     let public = Id::blob(PUBLIC);
     let open = || Archive::open(&db_path);
     match command {
+        ArchiveCommand::Paged { command } => paged::run(&db_path, command),
         ArchiveCommand::Capabilities => print(json!({
             "version": env!("CARGO_PKG_VERSION"),
-            "capabilities": ["carrier","profile-reader","evaluator","local-executor-reservations"],
+            "capabilities": ["carrier","paged-custody-v2","profile-reader","evaluator","local-executor-reservations"],
             "kits": {"A":kit::pin(Format::A),"B":kit::pin(Format::B)},
             "profile": Id::blob(profile::PROFILE),
             "measurement_profile": Id::blob(profile::MEASUREMENT_PROFILE),
