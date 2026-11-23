@@ -1,11 +1,11 @@
 //! Offline inventory packets and atomic import into a custody archive.
-use super::{Archive, Snapshot, insert, validate};
+use super::{Archive, Snapshot, insert, save_imported_head, validate};
 use crate::{
     profile::allows,
     wire::{Id, MAX_BYTES},
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -174,7 +174,7 @@ impl Archive {
             add_packet(&tx, p, &mut bytes)?;
         }
         ensure!(ids == b.snapshot.objects, "inventory mismatch");
-        save_head(&tx, b.head, &b.snapshot)?;
+        save_imported_head(&tx, b.head, &b.snapshot)?;
         tx.commit()?;
         Ok(b.head)
     }
@@ -193,13 +193,5 @@ fn add_packet(db: &Connection, packet: &Packet, bytes: &mut Vec<u8>) -> Result<(
     decode_packet_hex(&packet.hex, bytes)?;
     validate(packet.id, bytes, packet.access)?;
     insert(db, packet.id, bytes, packet.access)?;
-    Ok(())
-}
-
-fn save_head(db: &Connection, head: Id, snapshot: &Snapshot) -> Result<()> {
-    db.execute(
-        "INSERT OR IGNORE INTO heads VALUES(?,?)",
-        params![head.to_string(), serde_json::to_vec(snapshot)?],
-    )?;
     Ok(())
 }

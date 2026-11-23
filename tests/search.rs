@@ -1085,3 +1085,64 @@ fn limited_semantic_results_survive_different_cache_histories() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(feature = "cli")]
+#[test]
+fn offline_imports_preserve_search_context_across_reopen() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("search.sqlite");
+    let mut local = Archive::open(&database)?;
+    let mut mirror = Archive::memory()?;
+    let peer = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let own = claim(&local, "latticeclear", "latticeclear", public, Format::A)?;
+    let work = local.snapshot("local work", Default::default())?;
+    let work_id = work.id()?;
+    let draft = claim(&peer, "otherlab", "otherlab", public, Format::A)?;
+    let first = peer.selected_snapshot("first peer", Default::default(), [draft].into())?;
+    let first_id = first.id()?;
+    let latest = peer.selected_snapshot("second peer", [first_id].into(), [draft].into())?;
+    let latest_id = latest.id()?;
+    let first_packet = peer.export(&first, "read")?;
+    let mut stream = Vec::new();
+    peer.export_stream(&latest, "read", &mut stream)?;
+    for recipient in [&mut local, &mut mirror] {
+        assert_eq!(recipient.import(&first_packet)?, first_id);
+        assert_eq!(recipient.import_stream(stream.as_slice())?, latest_id);
+    }
+    assert_eq!(mirror.search_head(None)?.id()?, first_id);
+    // A round trip of a local snapshot should not turn it into a remote default.
+    let ours = local.export(&work, "read")?;
+    assert_eq!(local.import(&ours)?, work_id);
+    drop(local);
+
+    let local = Archive::open(&database)?;
+    let command = |args: &[&str]| -> Result<serde_json::Value> {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
+            .arg("--db")
+            .arg(&database)
+            .args(args)
+            .env_remove("NAOME_SEARCH_MODEL")
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    let result = command(&["find", "latticeclear"])?;
+    assert_eq!(result["head"], json!(work_id));
+    assert_eq!(result["hits"][0]["id"], json!(own));
+    assert_eq!(
+        command(&["find", "otherlab", "--head", &latest_id.to_string()])?["head"],
+        json!(latest_id)
+    );
+
+    local.set_search_head(Some(first_id))?;
+    let new_local = local.snapshot("reconciled working inventory", [work_id, latest_id].into())?;
+    assert_eq!(local.search_head(None)?.id()?, first_id);
+    local.set_search_head(None)?;
+    assert_eq!(local.search_head(None)?.id()?, new_local.id()?);
+    Ok(())
+}

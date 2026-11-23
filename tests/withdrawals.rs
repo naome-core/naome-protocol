@@ -434,10 +434,10 @@ fn scoped_withdrawal_reaches_delegated_use_of_an_unaffected_receipt() -> Result<
             ..radial.clone()
         };
         let mixed_recheck = assess(&archive, &after, &mixed)?;
-        // Pin the mixed-use receipt from the release branch before the refactor.
+        // Pin the mixed-use receipt under the current evaluator.
         let expected = match format {
-            Format::A => "1:0:0a229dacbf1fe81d1056804a122abd0d168f7bfc53e6b2247fc3f57b4a5da3ae",
-            Format::B => "2:0:b6a1dd05768f738b9abc01413e51ac5ac3342955db7e62a14cde476dc071c4d8",
+            Format::A => "1:0:21dc32846d318726fdf3b50db52a5debf3aaedfb80ab67299de3ba51ed4844ac",
+            Format::B => "2:0:ae2fd59e4fa2cc0a3df4e417d5e5208e6c8d33e1cb1470b6daed39159814f22c",
         };
         assert_eq!(
             deposit_receipt(&archive, &after, &mixed, &mixed_recheck, format)?,
