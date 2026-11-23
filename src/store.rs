@@ -17,6 +17,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    ops::Bound::{Excluded, Unbounded},
     path::Path,
     time::Duration,
 };
@@ -523,7 +524,8 @@ impl Archive {
         let mut excluded = 0;
         let mut last = None;
         let mut more = false;
-        for &id in s.objects.iter().filter(|id| after.is_none_or(|x| **id > x)) {
+        let bound = after.map_or(Unbounded, Excluded);
+        for &id in s.objects.range((bound, Unbounded)) {
             if examined == budget {
                 more = true;
                 break;
