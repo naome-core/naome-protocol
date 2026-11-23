@@ -22,8 +22,7 @@ The custody descriptor serializes `origins`, `inventory`, `count`, `bootstrap`, 
 
 The membership tree stores the canonical ID string as key and that same ID as value. The custody tree additionally indexes access descriptors, edges and positions. Both roots are derived during admission. Scientific discovery and evaluation can materialize a complete membership view. Direct CLI resolution and ordinary read-stream interchange traverse authenticated pages. Sealing a full cut with a compatible full parent reads new deposit rows using an indexed serial watermark. A withdrawal changes the epoch and forces the next full cut to rebuild membership. A first or unrelated full cut visits all available members in bounded batches. Size and complexity of matching evidence, full scientific scans and selected dependency closures can grow with the request.
 
-
-Admission verifies each member's bytes and envelope access. It permits at most 1 MiB per member, 4 MiB of bytes including the genesis bootstrap, and 4,096 declared envelope edges across the batch. It derives the following entries within the same transaction.
+Admission verifies each member's bytes and envelope access. It indexes up to 4,096 declared envelope edges per batch. A record exceeding the remaining edge budget stays readable and marks the coverage opaque. The member and byte limits are specified below. It derives the following entries within the same transaction.
 
 | Key | Bound value |
 | --- | --- |

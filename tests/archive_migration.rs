@@ -198,3 +198,40 @@ fn a_changed_historical_manifest_rolls_back_upgrade_and_copy_publication() -> Re
     )?);
     Ok(())
 }
+
+#[test]
+fn cli_admits_and_transfers_a_large_single_logical_payload() -> Result<()> {
+    use std::process::Command;
+    let dir = tempfile::tempdir()?;
+    let origin = dir.path().join("lab.sqlite");
+    let data = vec![13; 5 * 1024 * 1024 + 3];
+    let id = Id::blob(&data);
+    fs::write(dir.path().join("large.bin"), &data)?;
+    fs::write(
+        dir.path().join("members.json"),
+        serde_json::to_vec(&serde_json::json!([{
+            "id":id,"access":Id::blob(PUBLIC),"file":"large.bin"
+        }]))?,
+    )?;
+    let out = Command::new(env!("CARGO_BIN_EXE_nao"))
+        .current_dir(dir.path())
+        .arg("--db")
+        .arg(&origin)
+        .args(["custody", "append", "lab", "members.json"])
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let admitted: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let head: Id = serde_json::from_value(admitted["head"].clone())?;
+    let source = Archive::open(origin)?;
+    source.custody_share(head, true)?;
+    let receiver = Archive::memory()?;
+    let transfer = receiver.custody_pull(&source, head, 1)?;
+    assert!(transfer.complete);
+    assert_eq!(transfer.payload_bytes, data.len());
+    assert_eq!(receiver.resolve_head(head, id, "read")?, data);
+    Ok(())
+}

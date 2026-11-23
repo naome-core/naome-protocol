@@ -211,11 +211,15 @@ pub(super) fn run(db_path: &Path, command: Command) -> Result<()> {
         } => {
             let specs: Vec<Input> = serde_json::from_slice(&load(&manifest, 64 * 1024)?)?;
             ensure!((1..=MEMBERS).contains(&specs.len()), "invalid batch size");
-            let mut remaining = BATCH_BYTES;
+            let mut remaining = if specs.len() == 1 {
+                crate::wire::MAX_BYTES
+            } else {
+                BATCH_BYTES
+            };
             let mut items = Vec::new();
             let directory = manifest.parent().context("manifest path")?;
             for spec in specs {
-                let bytes = load(&directory.join(spec.file), remaining.min(1024 * 1024))?;
+                let bytes = load(&directory.join(spec.file), remaining)?;
                 remaining -= bytes.len();
                 items.push(Item {
                     member: Member {
