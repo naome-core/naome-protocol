@@ -52,6 +52,8 @@ Two actual threads owned independent writer shards. Each submitted twelve mixed 
 
 Tests cover sibling tips, cross-lab premises, direct and transitive routing, an independent control, missing sources and pages, insufficient budgets, restrictions and withdrawal. They interrupt transfers, replay frames, retract a grant between steps and retain historical receipts after a withdrawal. A correctly hashed descriptor that omits the index changes for a notice fails independent reconstruction; staged members and the tip roll back. The native package smoke uses ordinary CLI commands for capture, frame and direct pulls, range reading and receipt retrieval.
 
+The first hosted Windows debug run exposed stack exhaustion during eager CLI construction, including standalone commands. The paged command group now initializes on demand. With a 1 MiB main-stack limit on macOS the debug executable passed version, capabilities, paged help, capture, both transfer paths, range and receipt checks. The custody algorithms and measured data paths are unchanged.
+
 Historical scientific replay reproduced the rules-2, rules-3, rules-4 and rules-5 training manifests. The current trial matched the independent rules-6 writer control across eight conformance files and all 24 graded answers. A structural review supplies candidates for scientific assessment. Its closed search covers declared relationships in the named sources.
 
 ## Capacity model and remaining limits

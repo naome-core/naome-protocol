@@ -22,10 +22,7 @@ use std::{
 #[derive(Subcommand)]
 pub enum ArchiveCommand {
     /// Operate on bounded, per-lab version-two inventories.
-    Paged {
-        #[command(subcommand)]
-        command: paged::Command,
-    },
+    Paged(paged::Arguments),
     /// Show supported formats, evaluators and independently pinned kit digests.
     Capabilities,
     /// Run all cases in an externally pinned bootstrap package.
@@ -318,7 +315,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
     let public = Id::blob(PUBLIC);
     let open = || Archive::open(&db_path);
     match command {
-        ArchiveCommand::Paged { command } => paged::run(&db_path, command),
+        ArchiveCommand::Paged(args) => paged::run(&db_path, args.0),
         ArchiveCommand::Capabilities => print(json!({
             "version": env!("CARGO_PKG_VERSION"),
             "capabilities": ["carrier","paged-custody-v2","profile-reader","evaluator","local-executor-reservations"],

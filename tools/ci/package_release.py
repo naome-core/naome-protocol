@@ -83,7 +83,7 @@ def verify(nao, directory, version):
     run("keygen", "signing seed")
     if (directory / "signing seed").stat().st_size != 32:
         raise ValueError("key generation did not write a 32-byte seed")
-    print(f"Verified {nao.name}: published profiles, both exchange formats, and key generation")
+    print(f"Verified {nao.name}: published profiles, v1 exchange, paged custody transfer and review, and key generation")
 
 
 def package(target, model):

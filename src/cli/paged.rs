@@ -5,6 +5,26 @@ use anyhow::Context;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
+// Build this command group after the top-level builder returns, including in debug builds
+// on hosts with a 1 MiB main-thread stack.
+pub struct Arguments(pub Command);
+impl clap::Args for Arguments {
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        cmd.subcommand_required(true)
+            .defer(Command::augment_subcommands)
+    }
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        cmd.defer(Command::augment_subcommands_for_update)
+    }
+}
+impl clap::FromArgMatches for Arguments {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        Ok(Self(Command::from_arg_matches(matches)?))
+    }
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        self.0.update_from_arg_matches(matches)
+    }
+}
 #[derive(Subcommand)]
 pub enum Command {
     /// Admit up to 64 members from a JSON array of {id,access,position,file}.
