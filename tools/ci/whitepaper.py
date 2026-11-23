@@ -17,9 +17,10 @@ SPEC = ROOT / "spec"
 PAPER = "research-evidence-protocol"
 TECTONIC_VERSION = "0.17.0"
 TECTONIC_ARCHIVES = {
+    # Keep the engine independent of the Linux runner's glibc version.
     ("Linux", "x86_64"): (
-        "x86_64-unknown-linux-gnu",
-        "1a715688baf591e650c8aeb160ae934e181685eecbb38b317de30b269ac5d606",
+        "x86_64-unknown-linux-musl",
+        "8533d07f9ccbd7a65824b9e0459041bca34af1eb33daba48f59215593753a3b7",
     ),
     ("Darwin", "arm64"): (
         "aarch64-apple-darwin",
