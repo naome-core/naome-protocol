@@ -11,6 +11,8 @@ use std::ops::Bound::{Excluded, Unbounded};
 pub(super) const INDEX_VERSION: u32 = 4;
 const BATCH: usize = 16;
 const TEXT_BATCH: usize = 4;
+const ADD_MEDIA_PASSAGE_INDEX: &str = "CREATE INDEX IF NOT EXISTS rep_search_media_passages
+    ON rep_search_passages(entry) WHERE semantic AND text=''";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct State {
@@ -25,7 +27,14 @@ enum Record {
 
 impl Archive {
     pub(super) fn init_search(&self) -> Result<()> {
-        if installed_version(&self.db)? == Some(INDEX_VERSION) {
+        if installed_version(&self.db)? == Some(INDEX_VERSION)
+            && self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+                    WHERE type='index' AND name='rep_search_media_passages')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
             return Ok(());
         }
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
@@ -42,6 +51,7 @@ impl Archive {
             None => tx.execute_batch(include_str!("schema.sql"))?,
             Some(_) => anyhow::bail!("unsupported local search index version"),
         }
+        tx.execute_batch(ADD_MEDIA_PASSAGE_INDEX)?;
         tx.commit()?;
         Ok(())
     }
