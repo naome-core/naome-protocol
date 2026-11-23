@@ -1,8 +1,11 @@
 //! The streaming exchange carries the exact inventory once, followed by
 //! ordered packets and a mandatory null terminator. Missing packets are
 //! withheld objects, as in the original exchange format.
-use super::{Archive, Packet, Snapshot, add_packet, save_head, verify_head};
-use crate::wire::{Id, MAX_BYTES};
+use super::{Archive, Packet, Snapshot, add_packet, verify_head};
+use crate::{
+    store::save_imported_head,
+    wire::{Id, MAX_BYTES},
+};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Read, Write};
@@ -85,7 +88,7 @@ impl Archive {
             input.fill_buf()?.is_empty(),
             "trailing data in exchange stream"
         );
-        save_head(&tx, header.head, &header.snapshot)?;
+        save_imported_head(&tx, header.head, &header.snapshot)?;
         tx.commit()?;
         Ok(header.head)
     }

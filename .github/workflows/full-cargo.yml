@@ -12,6 +12,10 @@ on:
       model_search:
         type: boolean
         default: false
+      reuse_platform_debug:
+        description: The caller separately requires the macOS and Windows debug jobs.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,26 +26,28 @@ concurrency:
 
 jobs:
   platform:
-    name: Cargo (${{ matrix.platform.name }}, ${{ matrix.profile }})
+    name: Cargo (${{ matrix.name }}, ${{ matrix.profile }})
     strategy:
       fail-fast: false
       matrix:
         profile: [test, release]
-        platform:
-          - name: Linux x86_64
-            runner: ubuntu-22.04
+        runner: [ubuntu-22.04, macos-15, windows-2025]
+        exclude: ${{ fromJSON(inputs.reuse_platform_debug && '[{"runner":"macos-15","profile":"test"},{"runner":"windows-2025","profile":"test"}]' || '[]') }}
+        include:
+          - runner: ubuntu-22.04
+            name: Linux x86_64
             target: x86_64-unknown-linux-gnu
-          - name: macOS ARM64
-            runner: macos-15
+          - runner: macos-15
+            name: macOS ARM64
             target: aarch64-apple-darwin
-          - name: Windows x86_64
-            runner: windows-2025
+          - runner: windows-2025
+            name: Windows x86_64
             target: x86_64-pc-windows-msvc
     uses: ./.github/workflows/rust-tests.yml
     with:
-      runner: ${{ matrix.platform.runner }}
+      runner: ${{ matrix.runner }}
       profile: ${{ matrix.profile }}
-      package_target: ${{ matrix.profile == 'release' && matrix.platform.target || '' }}
+      package_target: ${{ matrix.profile == 'release' && matrix.target || '' }}
       model_search: ${{ matrix.profile == 'release' && inputs.model_search }}
 
   result:

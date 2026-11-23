@@ -27,6 +27,8 @@ nao --db receiver.sqlite import exchange.json
 
 Add `--stream` to both commands for streaming exchange. Use `nao --help` and `nao COMMAND --help` for command options. Keep archive files and signing keys in a private directory.
 
+Import keeps the current search context. Use `nao find QUERY --head SNAPSHOT_ID` for a one-off search in a received snapshot, or `nao search-head SNAPSHOT_ID` to pin it. Without a pin, the newest local snapshot is the default. An archive containing only received snapshots starts with the first one it received. On upgrade, existing snapshots keep their prior ordering because older archives did not record how each snapshot arrived.
+
 ## Search with a local model
 
 Keyword search runs in the CLI. Semantic and hybrid search use a local EmbeddingGemma 2 checkpoint and Python 3.12. Activate a Python 3.12 virtual environment before running these commands. On Windows and Linux, install the CPU PyTorch packages first.
@@ -45,9 +47,11 @@ nao find reading --prepare --model model --python python
 
 Once set up, inference runs offline. Use `--input FILE` for a query from a supported media or text file.
 
+After a search index upgrade, the first keyword search or `nao prepare-search` starts rebuilding the index from the archive. Repeat preparation if the report shows incomplete coverage. For an exact object ID, use `nao find ID` and prepare the index separately.
+
 ## Protocol reference
 
-`nao capabilities` reports the supported formats and bootstrap digests.
+`nao capabilities` reports the supported formats and bootstrap digests. The notice and impact scan budgets count records. Checks that follow a dependency still account for the objects they need, including payload blocks.
 
 - [Whitepaper](spec/research-evidence-protocol.pdf)
 - [Bootstrap kit A](spec/kits/A.json) and [bootstrap kit B](spec/kits/B.json)

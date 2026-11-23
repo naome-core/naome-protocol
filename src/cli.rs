@@ -122,9 +122,10 @@ pub enum ArchiveCommand {
     },
     /// Search authorized archive records and text passages by word or meaning.
     Find(FindArguments),
-    /// Show or pin the active search snapshot. Clear the pin to use the latest registered snapshot.
+    /// Show or pin the active search snapshot.
     SearchHead {
         head: Option<Id>,
+        /// Use the newest local snapshot, or the first import if there is no local snapshot.
         #[arg(long, conflicts_with = "head")]
         clear: bool,
     },
@@ -183,6 +184,10 @@ pub enum ArchiveCommand {
         notice: Id,
         #[arg(long)]
         mapping: Vec<Id>,
+        /// Check cross-archive identity or input correction authority under a recipient policy.
+        #[arg(long)]
+        policy: Option<Id>,
+        /// Bound the record scan and each proof dependency walk.
         #[arg(long, default_value_t = 10000)]
         budget: usize,
     },
@@ -306,6 +311,8 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 "measurement_profile": Id::blob(profile::MEASUREMENT_PROFILE),
                 "public": public,
                 "receipt_evaluator": evaluation::EVALUATOR_ID,
+                "calibration_identity_evaluator": evaluation::EVALUATOR_ID,
+                "input_correction_evaluator": evaluation::EVALUATOR_ID,
                 "replay_evaluators": evaluation::replay_evaluator_ids().collect::<Vec<_>>(),
                 "evaluators": ["simultaneous-bounds","certified-hull","signed-tests","typed-outcome","delegated","recorded-difference","least-zero","domain-inclusion","source-independence","sample-description","survey-identification","unit-grid-map"],
             }));
@@ -531,8 +538,9 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             head,
             notice,
             mapping,
+            policy,
             budget,
-        } => print(db.impact(&db.head(head)?, notice, &mapping, budget)?),
+        } => print(db.impact_with_policy(&db.head(head)?, notice, &mapping, budget, policy)?),
         ArchiveCommand::Adopt {
             head,
             request,

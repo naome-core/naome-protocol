@@ -67,12 +67,31 @@ fn invalid_cli_search_preserves_the_index_and_session_validation() -> Result<()>
     )?;
     assert!(!index_created);
 
+    let id_argument = id.to_string();
+    let direct = run(&["find", &id_argument, "--mode", "semantic"])?;
+    assert!(direct.status.success());
+    let direct: serde_json::Value = serde_json::from_slice(&direct.stdout)?;
+    assert_eq!(direct["hits"][0]["id"], json!(id));
+    assert_eq!(direct["hits"][0]["exact_id"], true);
+    for flag in ["--prepare", "--rebuild-index"] {
+        let result = run(&["find", &id_argument, flag])?;
+        assert!(!result.status.success(), "{flag}");
+        assert!(String::from_utf8_lossy(&result.stderr).contains("prepare-search"));
+    }
+    let index_created: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='rep_search_schema')",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(!index_created);
+
     let prepared = archive.prepare_search(&snapshot, 100, None)?;
     assert!(prepared.index_complete);
     let model = "missing model";
     for args in [
         &["find", "calibration", "--limit", "0", "--rebuild-index"][..],
         &["find", "calibration", "--model", model, "--rebuild-index"][..],
+        &["find", &id_argument, "--rebuild-index"][..],
         &["prepare-search", "--index-budget", "0", "--rebuild-index"][..],
         &["prepare-search", "--model", model, "--rebuild-index"][..],
     ] {
@@ -559,7 +578,7 @@ fn unified_search_accepts_media_queries_and_returns_resolvable_media_parts() -> 
     let archive = Archive::memory()?;
     let public = Id::blob(PUBLIC);
     let original = b"bridge footage";
-    let video = archive.capture(original.as_slice(), "video/mp4", 5, public, Format::B)?;
+    let video = archive.capture(original.as_slice(), "Video/MP4", 5, public, Format::B)?;
     let dataset = archive.capture(
         br#"{"monitoring_site":"bridge","channel":"strain"}"#.as_slice(),
         "application/json",
@@ -576,7 +595,7 @@ fn unified_search_accepts_media_queries_and_returns_resolvable_media_parts() -> 
     let report = archive.find(&snapshot, "bridge", options, Some(&mut model))?;
     assert_eq!(report.semantic_index_complete, Some(true));
     let hit = report.hits.iter().find(|hit| hit.id == video).unwrap();
-    assert_eq!(hit.media_type.as_deref(), Some("video/mp4"));
+    assert_eq!(hit.media_type.as_deref(), Some("Video/MP4"));
     assert_eq!(
         hit.location,
         SearchLocation::Media {
@@ -810,6 +829,60 @@ fn projected_search_finds_late_candidates_under_an_actual_comparison_budget() ->
 
 #[cfg(feature = "cli")]
 #[test]
+fn preparation_adds_the_media_passage_index_to_an_existing_cache() -> Result<()> {
+    use naome_protocol::search::SearchInput;
+    use rusqlite::Connection;
+
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("archive.sqlite");
+    let archive = Archive::open(&database)?;
+    let public = Id::blob(PUBLIC);
+    let wanted = claim(
+        &archive,
+        "interferometer",
+        "alignment verification",
+        public,
+        Format::A,
+    )?;
+    archive.capture(&b"audio bytes"[..], "audio/wav", 128, public, Format::B)?;
+    let snapshot = archive.snapshot("prepared archive", BTreeSet::new())?;
+    assert!(archive.prepare_search(&snapshot, 100, None)?.index_complete);
+    drop(archive);
+
+    let db = Connection::open(&database)?;
+    db.execute_batch("DROP INDEX rep_search_media_passages")?;
+    let index_exists = || -> rusqlite::Result<bool> {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='rep_search_media_passages')",
+            [],
+            |row| row.get(0),
+        )
+    };
+    let passage_ids = || -> rusqlite::Result<Vec<i64>> {
+        db.prepare("SELECT id FROM rep_search_passages ORDER BY id")?
+            .query_map([], |row| row.get(0))?
+            .collect()
+    };
+    let before = passage_ids()?;
+    assert!(!before.is_empty());
+
+    let archive = Archive::open(&database)?;
+    let query = "interferometer";
+    let options = SearchOptions::default();
+    let old = archive.search_prepared(&snapshot, SearchInput::Text(query), options, None)?;
+    assert!(old.index_complete && old.limited_coverage);
+    assert_eq!(old.hits[0].id, wanted);
+    assert!(!index_exists()?);
+
+    let current = archive.find(&snapshot, query, options, None)?;
+    assert!(index_exists()?);
+    assert_eq!(passage_ids()?, before);
+    assert_eq!(serde_json::to_value(current)?, serde_json::to_value(old)?);
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
+#[test]
 fn previous_caches_are_rebuilt_without_changing_the_archive() -> Result<()> {
     use sha2::{Digest, Sha256};
     use std::{
@@ -844,7 +917,7 @@ fn previous_caches_are_rebuilt_without_changing_the_archive() -> Result<()> {
             .map(serde_json::from_str)
             .collect::<serde_json::Result<_>>()?;
         assert_eq!(lines[0]["ok"]["index_complete"], true);
-        assert_eq!(lines[1]["ok"]["index_version"], 3);
+        assert_eq!(lines[1]["ok"]["index_version"], 4);
         assert_eq!(lines[1]["ok"]["hits"][0]["id"], V012_CLAIM);
 
         let archive = Archive::open(database)?;
@@ -856,6 +929,95 @@ fn previous_caches_are_rebuilt_without_changing_the_archive() -> Result<()> {
         let packet = serde_json::to_vec(&archive.export(&head, "read")?)?;
         assert_eq!(hex::encode(Sha256::digest(packet)), V012_EXCHANGE_SHA256);
     }
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn released_v016_cache_recovers_missing_hits_without_changing_evidence() -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::{fs, process::Command};
+
+    // Populated by v0.1.6 with capture, snapshot, publish, search-head, and
+    // prepare-search. That release returned no hits for either expected term.
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("archive.sqlite");
+    fs::write(&database, include_bytes!("fixtures/search-cache-v3.sqlite"))?;
+    let head = "1:1:27f30cce4a93bfd6936aa43ad5844b39ff555463a4a8f486813260892edb306c";
+    let compact = "1:0:0b246181f0a55b988fda676dd0eaa914b4294cf2020ab09f5c169002f7b39c9c";
+    let reading = "2:0:291d0ebd275db569d9443a428e479bfd3866147e6d3d62bbd0d1f3234333c4b3";
+    {
+        let archive = Archive::open(&database)?;
+        let snapshot = archive.search_head(None)?;
+        let stale = archive.search_prepared(
+            &snapshot,
+            naome_protocol::search::SearchInput::Text("spectralmarker"),
+            SearchOptions::default(),
+            None,
+        )?;
+        assert!(!stale.index_complete && stale.hits.is_empty());
+    }
+    let run = |args: &[&str]| -> Result<serde_json::Value> {
+        let output = Command::new(env!("CARGO_BIN_EXE_nao"))
+            .arg("--db")
+            .arg(&database)
+            .current_dir(directory.path())
+            .args(args)
+            .env_remove("NAOME_SEARCH_MODEL")
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+
+    for (query, expected) in [("spectralmarker", compact), ("calibrationmarker", reading)] {
+        let report = run(&["find", query])?;
+        assert_eq!(report["head"], head);
+        assert_eq!(report["index_complete"], true);
+        assert_eq!(report["hits"][0]["id"], expected, "{query}");
+        assert_eq!(report["limited_coverage"], false, "{query}");
+        assert_eq!(report["hits"][0]["location"]["type"], "payload");
+    }
+    fs::write(directory.path().join("query.txt"), "calibrationmarker")?;
+    let report = run(&["find", "--input", "query.txt", "--media-type", "Text/Plain"])?;
+    assert_eq!(report["hits"][0]["id"], reading);
+    assert_eq!(run(&["heads"])?, json!([head]));
+    run(&["export", head, "exchange.json"])?;
+    assert_eq!(
+        hex::encode(Sha256::digest(fs::read(
+            directory.path().join("exchange.json")
+        )?)),
+        "2f6cedbf1f79592282b5ea55a68b363223eed1ce0123c6026c35a68ac01fba8b"
+    );
+    Ok(())
+}
+
+#[test]
+fn fresh_index_finds_whole_words_across_passage_boundaries() -> Result<()> {
+    let archive = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let prefix = "x".repeat(742);
+    let text = format!(r#"{{"padding":"{prefix}","label":"spectralmarker"}}"#);
+    let marker = text.find("spectralmarker").unwrap();
+    assert_eq!(marker, 765);
+    let expected = archive.capture(text.as_bytes(), "application/json", 40, public, Format::A)?;
+    let snapshot = archive.snapshot("compact JSON", BTreeSet::new())?;
+
+    let report = archive.find(&snapshot, "spectralmarker", SearchOptions::default(), None)?;
+    assert!(report.index_complete && !report.limited_coverage);
+    assert_eq!(
+        report.hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        [expected]
+    );
+    let hit = &report.hits[0];
+    let SearchLocation::Payload { start, end } = hit.location else {
+        panic!("expected a payload selector");
+    };
+    assert!(start <= marker && end >= marker + "spectralmarker".len());
+    assert_eq!(hit.snippet.as_deref(), Some(&text[start..end]));
     Ok(())
 }
 
@@ -918,6 +1080,48 @@ fn text_queries_and_large_captures_use_later_passages() -> Result<()> {
 }
 
 #[test]
+fn withdrawing_a_large_text_chunk_discards_its_prepared_passages() -> Result<()> {
+    use naome_protocol::search::SearchInput;
+
+    let archive = Archive::memory()?;
+    let marker = b"retiredreading";
+    let offset = 140_000;
+    let mut bytes = vec![b' '; 320 * 1024];
+    bytes[offset..offset + marker.len()].copy_from_slice(marker);
+    let descriptor = archive.capture(
+        bytes.as_slice(),
+        "text/plain",
+        bytes.len(),
+        Id::blob(PUBLIC),
+        Format::B,
+    )?;
+    let snapshot = archive.snapshot("long reading", BTreeSet::new())?;
+    let preparation = archive.prepare_search(&snapshot, 8, None)?;
+    assert!(!preparation.index_complete);
+
+    let query = SearchInput::Text("retiredreading");
+    let options = SearchOptions::default();
+    let report = archive.search_prepared(&snapshot, query, options, None)?;
+    assert_eq!(report.hits.len(), 1);
+    assert_eq!(report.hits[0].id, descriptor);
+    assert_eq!(
+        report.hits[0].location,
+        SearchLocation::Payload {
+            start: offset,
+            end: offset + marker.len(),
+        }
+    );
+    let chunk = archive.read(&snapshot, descriptor, "read")?.inputs[0].target;
+    archive.withdraw(chunk)?;
+
+    let preparation = archive.prepare_search(&snapshot, 8, None)?;
+    assert!(preparation.limited_coverage);
+    let report = archive.search_prepared(&snapshot, query, options, None)?;
+    assert!(report.limited_coverage && report.hits.is_empty());
+    Ok(())
+}
+
+#[test]
 fn limited_semantic_results_survive_different_cache_histories() -> Result<()> {
     struct ExactSubject(String);
     impl Embedder for ExactSubject {
@@ -975,5 +1179,66 @@ fn limited_semantic_results_survive_different_cache_histories() -> Result<()> {
         }
         expected = Some(result.head);
     }
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn offline_imports_preserve_search_context_across_reopen() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("search.sqlite");
+    let mut local = Archive::open(&database)?;
+    let mut mirror = Archive::memory()?;
+    let peer = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let own = claim(&local, "latticeclear", "latticeclear", public, Format::A)?;
+    let work = local.snapshot("local work", Default::default())?;
+    let work_id = work.id()?;
+    let draft = claim(&peer, "otherlab", "otherlab", public, Format::A)?;
+    let first = peer.selected_snapshot("first peer", Default::default(), [draft].into())?;
+    let first_id = first.id()?;
+    let latest = peer.selected_snapshot("second peer", [first_id].into(), [draft].into())?;
+    let latest_id = latest.id()?;
+    let first_packet = peer.export(&first, "read")?;
+    let mut stream = Vec::new();
+    peer.export_stream(&latest, "read", &mut stream)?;
+    for recipient in [&mut local, &mut mirror] {
+        assert_eq!(recipient.import(&first_packet)?, first_id);
+        assert_eq!(recipient.import_stream(stream.as_slice())?, latest_id);
+    }
+    assert_eq!(mirror.search_head(None)?.id()?, first_id);
+    // A round trip of a local snapshot should not turn it into a remote default.
+    let ours = local.export(&work, "read")?;
+    assert_eq!(local.import(&ours)?, work_id);
+    drop(local);
+
+    let local = Archive::open(&database)?;
+    let command = |args: &[&str]| -> Result<serde_json::Value> {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
+            .arg("--db")
+            .arg(&database)
+            .args(args)
+            .env_remove("NAOME_SEARCH_MODEL")
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    let result = command(&["find", "latticeclear"])?;
+    assert_eq!(result["head"], json!(work_id));
+    assert_eq!(result["hits"][0]["id"], json!(own));
+    assert_eq!(
+        command(&["find", "otherlab", "--head", &latest_id.to_string()])?["head"],
+        json!(latest_id)
+    );
+
+    local.set_search_head(Some(first_id))?;
+    let new_local = local.snapshot("reconciled working inventory", [work_id, latest_id].into())?;
+    assert_eq!(local.search_head(None)?.id()?, first_id);
+    local.set_search_head(None)?;
+    assert_eq!(local.search_head(None)?.id()?, new_local.id()?);
     Ok(())
 }

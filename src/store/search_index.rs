@@ -56,7 +56,7 @@ struct IndexedSection {
 }
 
 impl Archive {
-    /// Resolve an explicit head, the pinned search head, or the latest registered inventory.
+    /// Resolve an explicit head, the pinned head, or the archive's stable default for search.
     pub fn search_head(&self, head: Option<Id>) -> Result<Snapshot> {
         let head = match head {
             Some(head) => head,
@@ -65,7 +65,10 @@ impl Archive {
                 .query_row(
                     "SELECT coalesce(
                         (SELECT head FROM rep_search_selection WHERE singleton=1),
-                        (SELECT id FROM heads ORDER BY rowid DESC LIMIT 1)
+                        (SELECT id FROM heads
+                         WHERE NOT EXISTS (SELECT 1 FROM rep_imported_heads WHERE head=heads.id)
+                         ORDER BY rowid DESC LIMIT 1),
+                        (SELECT id FROM heads ORDER BY rowid LIMIT 1)
                     )",
                     [],
                     |row| row.get::<_, Option<String>>(0),

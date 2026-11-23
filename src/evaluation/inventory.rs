@@ -1,6 +1,7 @@
 use super::{Query, Receipt};
 use crate::{
-    profile::{Document, Kind},
+    migration::Equivalence,
+    profile::{CALIBRATION_EVENT_IDENTITY, Document, Kind, verify_attestation},
     store::{Archive, Snapshot},
     wire::Id,
 };
@@ -15,8 +16,10 @@ pub(crate) struct ReadInventory {
     inspected: BTreeMap<Id, bool>,
     remaining_cache_bytes: Option<usize>,
     attestations: BTreeMap<Id, BTreeSet<Id>>,
+    identity_checks: BTreeSet<Id>,
+    skipped_identity_checks: bool,
     sizes: BTreeMap<Id, usize>,
-    complete_bytes: Option<usize>,
+    complete_scan: Option<(usize, usize)>,
 }
 
 impl ReadInventory {
@@ -33,7 +36,7 @@ impl ReadInventory {
         retain_for_replay: bool,
     ) -> Result<Self> {
         let mut inventory = Self::for_replay();
-        for &id in snapshot.objects.iter().filter(|id| id.format().is_some()) {
+        for id in snapshot.records() {
             let retain = if retain_for_replay {
                 let size = inventory.size(store, id)?;
                 inventory.reserve_cache_bytes(size)
@@ -77,7 +80,21 @@ impl ReadInventory {
             .map(|&id| (id, &self.documents[&id]))
     }
 
-    fn read(&mut self, store: &Archive, snapshot: &Snapshot, id: Id, retain: bool) {
+    pub(crate) fn identity_checks(&self) -> Result<&BTreeSet<Id>> {
+        ensure!(
+            !self.skipped_identity_checks,
+            "identity check retention budget exhausted"
+        );
+        Ok(&self.identity_checks)
+    }
+
+    pub(crate) fn read(
+        &mut self,
+        store: &Archive,
+        snapshot: &Snapshot,
+        id: Id,
+        retain: bool,
+    ) -> bool {
         let hidden = match store.read(snapshot, id, "read") {
             Ok(document) => {
                 match document.kind {
@@ -89,18 +106,34 @@ impl ReadInventory {
                             self.attestations.entry(target).or_default().insert(id);
                         }
                     }
+                    Kind::Assessment
+                        if document
+                            .fields
+                            .get("test")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(CALIBRATION_EVENT_IDENTITY) =>
+                    {
+                        if !retain {
+                            self.skipped_identity_checks = true;
+                            self.inspected.insert(id, false);
+                            return true;
+                        }
+                        self.identity_checks.insert(id);
+                    }
                     _ if !retain => {
                         self.inspected.insert(id, false);
-                        return;
+                        return true;
                     }
                     _ => {}
                 }
                 self.documents.insert(id, document);
-                false
+                self.inspected.insert(id, false);
+                return true;
             }
             Err(_) => store.may_be_notice(snapshot, id),
         };
         self.inspected.insert(id, hidden);
+        false
     }
 
     pub(super) fn search(
@@ -109,11 +142,15 @@ impl ReadInventory {
         snapshot: &Snapshot,
         query: &Query,
         out: &mut Receipt,
+        records_only: bool,
     ) -> Result<()> {
-        if snapshot.objects.len() <= query.budget
-            && self
-                .complete_bytes
-                .is_some_and(|size| size <= query.byte_limit)
+        if let Some((records, bytes)) = self.complete_scan
+            && (if records_only {
+                records
+            } else {
+                snapshot.objects.len()
+            }) <= query.budget
+            && bytes <= query.byte_limit
         {
             out.visible_notices.extend(&self.notices);
             return Ok(());
@@ -121,7 +158,13 @@ impl ReadInventory {
 
         let mut hidden = false;
         let mut bytes_left = query.byte_limit;
-        for (index, &id) in snapshot.objects.iter().enumerate() {
+        let mut records = 0;
+        let objects = snapshot
+            .objects
+            .iter()
+            .copied()
+            .filter(|id| !records_only || id.format().is_some());
+        for (index, id) in objects.enumerate() {
             if index >= query.budget {
                 out.frontier.insert(id);
                 continue;
@@ -129,6 +172,7 @@ impl ReadInventory {
             if id.format().is_none() {
                 continue;
             }
+            records += 1;
             let size = self.size(store, id)?;
             if size > bytes_left {
                 out.frontier.insert(id);
@@ -153,7 +197,38 @@ impl ReadInventory {
             "notice horizon contains inaccessible or opaque records"
         );
         ensure!(out.frontier.is_empty(), "notice search budget exhausted");
-        self.complete_bytes = Some(query.byte_limit - bytes_left);
+        self.complete_scan = Some((records, query.byte_limit - bytes_left));
         Ok(())
+    }
+}
+
+pub(crate) struct EvidenceView<'a> {
+    pub store: &'a Archive,
+    pub snapshot: &'a Snapshot,
+    pub inventory: &'a ReadInventory,
+    pub aliases: &'a Equivalence,
+}
+
+impl EvidenceView<'_> {
+    pub(crate) fn signature(
+        &self,
+        id: Id,
+        scope: &str,
+        role: &str,
+        trusted: &BTreeSet<String>,
+    ) -> Option<Id> {
+        for endpoint in self.aliases.endpoints(id) {
+            if self.store.resolve(self.snapshot, endpoint, "read").is_err() {
+                continue;
+            }
+            for (signature, record) in self.inventory.attestations(endpoint) {
+                if verify_attestation(record, endpoint, scope, role, "research-policy-1", trusted)
+                    .is_ok()
+                {
+                    return Some(signature);
+                }
+            }
+        }
+        None
     }
 }

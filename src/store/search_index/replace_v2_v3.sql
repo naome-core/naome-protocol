@@ -5,6 +5,7 @@ DROP TABLE rep_search_vector_state;
 DROP TABLE rep_search_terms;
 DROP TABLE rep_search_passages;
 DROP TABLE rep_search_sources;
+DROP TABLE IF EXISTS rep_search_text;
 DROP TABLE rep_search_visibility;
 DROP TABLE rep_search_entries;
 DROP TABLE rep_search_waiting;

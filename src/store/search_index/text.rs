@@ -9,6 +9,13 @@ use std::{io, ops::Range};
 pub(super) const MAX_TEXT_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const TEXT_WINDOW: usize = 64 * 1024;
 
+/// Retain one resolved chunk while reading the same snapshot at one archive revision.
+#[derive(Default)]
+pub(super) struct VerifiedTextChunk {
+    id: Option<Id>,
+    bytes: Vec<u8>,
+}
+
 /// Validate UTF-8 across chunk boundaries without retaining the payload.
 #[derive(Default)]
 pub(super) struct Utf8Check {
@@ -71,10 +78,11 @@ impl Archive {
         object: Id,
         cursor: usize,
         length: usize,
+        chunk: &mut VerifiedTextChunk,
     ) -> Result<(Vec<Passage>, usize)> {
         let document = self.read(snapshot, object, "read")?;
         let end = (cursor + TEXT_WINDOW).min(length);
-        let bytes = self.read_verified_text_span(snapshot, &document, cursor..end)?;
+        let bytes = chunk.read_span(self, snapshot, &document, cursor..end)?;
         let text = match std::str::from_utf8(&bytes) {
             Ok(text) => text,
             Err(error) if end < length && error.error_len().is_none() => {
@@ -100,11 +108,14 @@ impl Archive {
         ensure!(next > cursor, "text index did not advance");
         Ok((passages, next))
     }
+}
 
+impl VerifiedTextChunk {
     /// Index entries refer to a descriptor and chunks already verified through
-    /// materialize. Resolve only overlapping chunks, with current permissions.
-    pub(super) fn read_verified_text_span(
-        &self,
+    /// materialize. Resolve overlapping chunks on first use at this revision.
+    pub(super) fn read_span(
+        &mut self,
+        archive: &Archive,
         snapshot: &Snapshot,
         document: &Document,
         range: Range<usize>,
@@ -125,10 +136,18 @@ impl Archive {
             if offset >= range.end {
                 break;
             }
-            let chunk = self.resolve(snapshot, link.target, "read")?;
+            if self.id != Some(link.target) {
+                *self = Self::default();
+                self.bytes = archive.resolve(snapshot, link.target, "read")?;
+                self.id = Some(link.target);
+            }
             let start = range.start.saturating_sub(offset);
-            let end = (range.end - offset).min(chunk.len());
-            bytes.extend_from_slice(chunk.get(start..end).context("invalid text chunk range")?);
+            let end = (range.end - offset).min(self.bytes.len());
+            bytes.extend_from_slice(
+                self.bytes
+                    .get(start..end)
+                    .context("invalid text chunk range")?,
+            );
         }
         ensure!(bytes.len() == range.len(), "incomplete text range");
         Ok(bytes)

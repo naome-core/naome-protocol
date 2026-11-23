@@ -1,15 +1,18 @@
 use super::{
     Archive, IndexedRecord, Passage, Snapshot,
     extract::{normalize, terms},
+    text::VerifiedTextChunk,
 };
 use crate::{profile::Document, wire::Id};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::ops::Bound::{Excluded, Unbounded};
 
-pub(super) const INDEX_VERSION: u32 = 3;
+pub(super) const INDEX_VERSION: u32 = 4;
 const BATCH: usize = 16;
 const TEXT_BATCH: usize = 4;
+const ADD_MEDIA_PASSAGE_INDEX: &str = "CREATE INDEX IF NOT EXISTS rep_search_media_passages
+    ON rep_search_passages(entry) WHERE semantic AND text=''";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct State {
@@ -24,7 +27,14 @@ enum Record {
 
 impl Archive {
     pub(super) fn init_search(&self) -> Result<()> {
-        if installed_version(&self.db)? == Some(INDEX_VERSION) {
+        if installed_version(&self.db)? == Some(INDEX_VERSION)
+            && self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+                    WHERE type='index' AND name='rep_search_media_passages')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
             return Ok(());
         }
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
@@ -34,13 +44,14 @@ impl Archive {
                 tx.execute_batch(include_str!("replace_v1.sql"))?;
                 tx.execute_batch(include_str!("schema.sql"))?;
             }
-            Some(2) => {
-                tx.execute_batch(include_str!("replace_v2.sql"))?;
+            Some(2 | 3) => {
+                tx.execute_batch(include_str!("replace_v2_v3.sql"))?;
                 tx.execute_batch(include_str!("schema.sql"))?;
             }
             None => tx.execute_batch(include_str!("schema.sql"))?,
             Some(_) => anyhow::bail!("unsupported local search index version"),
         }
+        tx.execute_batch(ADD_MEDIA_PASSAGE_INDEX)?;
         tx.commit()?;
         Ok(())
     }
@@ -108,8 +119,15 @@ impl Archive {
     }
 
     fn refresh_text(&self, snapshot: &Snapshot, head: &str, budget: usize) -> Result<()> {
+        let mut chunk = VerifiedTextChunk::default();
+        let mut chunk_revision = None;
         for _ in 0..budget {
             let revision = revision(&self.db)?;
+            // A source can be withdrawn between windows or before the publish transaction.
+            if chunk_revision != Some(revision) {
+                chunk = VerifiedTextChunk::default();
+                chunk_revision = Some(revision);
+            }
             let Some((entry, object, cursor, length)) = self
                 .db
                 .query_row(
@@ -136,6 +154,7 @@ impl Archive {
                 object.parse()?,
                 usize::try_from(cursor)?,
                 usize::try_from(length)?,
+                &mut chunk,
             );
             let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
             if self::revision(&tx)? != revision {
@@ -159,7 +178,7 @@ impl Archive {
 pub(super) fn prepared_cache_available(db: &Connection) -> Result<bool> {
     match installed_version(db)? {
         Some(INDEX_VERSION) => Ok(true),
-        None | Some(1 | 2) => Ok(false),
+        None | Some(1..=3) => Ok(false),
         Some(_) => anyhow::bail!("unsupported local search index version"),
     }
 }

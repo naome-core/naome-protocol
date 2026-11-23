@@ -3,11 +3,11 @@
 \usepackage{amsmath,amssymb,tabularx,booktabs,xcolor,enumitem,fancyhdr,verbatim,hyperref}
 \definecolor{ink}{HTML}{172D37}
 \definecolor{accent}{HTML}{00665C}
-\newcommand{\edition}{1.7}
+\newcommand{\edition}{1.8}
 \hypersetup{colorlinks=true,linkcolor=accent,urlcolor=accent,linktoc=all,
-  pdftitle={NAOME: A Protocol for Scientific Knowledge Creation},
+  pdftitle={NAOME Research Evidence Protocol},
   pdfsubject={Research Evidence Protocol, white paper edition \edition. Conditional validity of scientific claims and reassessment when assumptions change.},
-  pdfkeywords={knowledge creation, autonomous science, conditional validity, research documentation, knowledge orchestration, scientific evidence},
+  pdfkeywords={research evidence protocol, conditional validity, research documentation, scientific evidence, reassessment, provenance},
   pdflang={en-GB},pdfdisplaydoctitle=true,bookmarksnumbered=true}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{5.7pt plus .2pt minus .2pt}
@@ -30,22 +30,22 @@
 \begin{document}
 \thispagestyle{empty}
 \pdfbookmark[1]{Title and abstract}{abstract}
-{\sffamily\small\bfseries\color{accent}RESEARCH EVIDENCE PROTOCOL \hfill EDITION \edition\enspace / \enspace 22 NOVEMBER 2026\par}
+{\sffamily\small\bfseries\color{accent}PROTOCOL WHITE PAPER \hfill EDITION \edition\enspace / \enspace 22 NOVEMBER 2026\par}
 \vspace{11mm}
 
-{\raggedright\fontsize{28}{33}\selectfont\bfseries\color{ink}NAOME: A Protocol for\\
-Scientific Knowledge Creation\par}
+{\raggedright\fontsize{28}{33}\selectfont\bfseries\color{ink}NAOME Research\\
+Evidence Protocol\par}
 \vspace{3mm}
-{\large How autonomous systems document research and determine\\
-which findings survive a change in assumptions\par}
+{\large Recording research evidence and reassessing claims\\
+when assumptions change\par}
 \vspace{7mm}
 
 \topic{Abstract}
-The NAOME Research Evidence Protocol is a protocol for knowledge creation. It lets autonomous systems document how a scientific claim arose, establish what warrants it under stated assumptions, and determine which conclusions remain warranted as those assumptions change. It is designed for research across disciplines. A proof, a measurement and an interpretation of a historical source can share a record structure while retaining their own standards of justification.
+The NAOME Research Evidence Protocol defines how to record the evidence, assumptions and inference rules behind scientific claims, and how to reassess those claims when their premises change. It is designed for research across disciplines. A proof, a measurement and an interpretation of a historical source can share a record structure while retaining their own standards of justification.
 
-NAOME's guarantee concerns the standing of a particular claim. A conforming assessment may report a claim as supported only when the recorded evidence and an admitted rule warrant that judgement within the declared scope, and no examined argument for its negation is admitted. The receipt identifies the assumptions, policy and evidence available to the evaluator. The strength of the conclusion follows from the rule used. A deduction can establish a theorem under its axioms. A statistical inference retains the uncertainty specified by its model.
+The protocol's guarantee concerns the standing of a particular claim. A conforming assessment may report a claim as supported only when the recorded evidence and an admitted rule warrant that judgement within the declared scope, and no examined argument for its negation is admitted. The receipt identifies the assumptions, policy and evidence available to the evaluator. The strength of the conclusion follows from the rule used. A deduction can establish a theorem under its axioms. A statistical inference retains the uncertainty specified by its model.
 
-Automatic research documentation records these dependencies as work proceeds. Knowledge orchestration uses them to find the arguments affected by a correction, reassess the claims they bear on, and identify downstream uses that need review. A successor can recover both the earlier judgement and the grounds for its revision.
+Recorded dependencies let a recipient trace which arguments and later uses a correction can affect. An evaluator can reassess those arguments, and a recipient can recover the earlier judgement and the grounds for its revision.
 
 \topic{Scope and evidence}
 Each deployment supplies its scientific profiles, trust anchors, access rules, resource limits and connections to research tools. The Rust reference implementation exercises capture, exchange and reassessment in bounded local cases (Appendix~\ref{app:release}). Documentation effort, reuse by independently built agents and performance with physical instruments remain to be measured.
@@ -64,8 +64,8 @@ Snapshot & An identified view of the evidence and notices visible to a query. \\
 Receipt & A verifier's record of the query, checks, result, dependencies and outstanding questions. \\
 \end{tabularx}
 
-\partpage{What NAOME guarantees}\label{sec:guarantee}
-NAOME serves as the source of truth for the scientific standing recorded in a specified evidence snapshot. An investigator can ask which claim was assessed, what assumptions its justification requires, which evidence was examined and which objections remain open. A claim enters the archive when it is recorded. It acquires a scientific standing when an evaluator assesses the arguments for and against it under a declared policy.
+\partpage{What the protocol guarantees}\label{sec:guarantee}
+An assessment records a claim's scientific standing for a specified evidence snapshot and policy. It identifies the claim, the assumptions on which its justification depends, the evidence examined and the objections still open. Recording a claim and assessing the arguments for and against it are separate operations.
 
 \topic{Validity under stated assumptions}
 The protocol guarantees that a conforming verdict follows the admission rules in Section~\ref{sec:receipt} for the stated question, arguments and evidence horizon. Scientific validity also depends on the premises holding, the evidence having its declared meaning, and the inference rule and evaluator being sound for that use. For example, if two calibrated gauges each give a guaranteed interval for the same displacement, the displacement must lie in their intersection. Replacing those guarantees with two 95\% confidence intervals changes what can be inferred. A claim about their joint coverage then needs a statistical argument about the two measurements.
@@ -79,6 +79,27 @@ A reverse-dependency search identifies possible downstream uses for review. Reas
 
 \topic{How far the guarantee reaches}
 The account of what survives is only as complete as the recorded dependencies and the search for applicable corrections. A hidden common calibration can make two apparently separate arguments depend on the same premise. If a required source or correction cannot be checked, the evaluator records the outstanding obligation. A recipient requiring a current judgement leaves it unresolved until the necessary evidence is available.
+
+\partpage{Correcting a versioned input}\label{sec:inputcorrections}
+An assessment binds the immutable version of each input it used. Its argument or a recorded premise identifies the portion used when known. The selector describes actual use in that version, including any normalisation convention needed to locate it. A whole-dataset citation without a selector records the source but leaves its use unresolved.
+
+An input correction binds the original source version, evidence for the correction and its declared coverage. The recipient checks that the signer has the correction role for that version and scope under its chosen policy. It traces an unadmitted notice as a candidate when asked and leaves the standing of existing uses unchanged by that notice.
+
+\topic{Applicability and downstream review}
+An applicable profile is a pinned, versioned rule for interpreting the input and correction selectors. The profile compares selectors only when their coordinates can be interpreted on the same basis. The common evaluator records one of three outcomes.
+
+\begin{itemize}
+\item \textbf{Affected.} The correction overlaps a recorded use.
+\item \textbf{Outside.} The recorded use and correction have demonstrably disjoint coverage.
+\item \textbf{Open.} The use is coarse, supporting evidence is unavailable, or the coverage rule cannot be evaluated.
+\end{itemize}
+
+Follow recorded dependencies to arguments, assessments and derived uses. An affected path requires review. An open path also requires review unless a separate analysis can resolve it. An incomplete dependency or notice search leaves a frontier. The current assessment evaluates surviving arguments and records its outstanding review obligations. A historical assessment replays at its original snapshot with its original evaluator and policy. Recompute the affected result with the appropriate domain tool. Deposit a new assessment binding the revised source version, its used portion, the correction and the method. References to earlier results and notices preserve the audit trail.
+
+\topic{Two reference profiles}
+The \texttt{table-rows-1} profile uses sorted, non-overlapping half-open ranges of zero-based data rows in the named version and, optionally, named columns. An omitted column list denotes all columns in those rows. A revision of one Medicare service-count cell is a tabular example. The control uses rows that exclude that cell. The \texttt{instrument-time-1} profile uses a half-open interval of signed integer ticks, a named clock basis and an instrument mode. A different mode or a disjoint interval on a common clock can establish exclusion. Incomparable clocks leave applicability open.
+
+The reference evaluator reads a \texttt{source-input} link whose target is the original version and whose qualifier encodes the named profile and selector. A notice with action \texttt{correct-input} links to the same version and its evidence, and encodes its selector in the coverage field. The policy pins authorised keys by scope and version. The evaluator uses these records for dependency review. The linked domain procedure supplies the revised calculation.
 
 \partpage{Documenting an investigation as it runs}\label{sec:attempt}
 The unit of documentation is an investigation attempt. Several agents may propose plans for the same question. The agent choosing a plan records its objective, selection criterion, rationale, cost ceiling, authorisation and stopping conditions. The planner, executor and evaluator each contribute the part of the record they can observe. Their references connect those contributions across the following stages.
@@ -229,7 +250,7 @@ Distinct attestations can share a signer, controller or evidence source. A repli
 \topic{Cycles and termination}
 An immutable record refers by digest to already identified inputs. Reject cyclic justification within a claimed proof of support unless the scientific profile provides independently checkable fixed-point or inductive semantics with a valid base. The query graph can expose cycles through derived inverse edges or later records asserting relations between earlier objects. Navigating a cycle adds no support. Stop on a declared compute, depth or disclosure limit and return the unvisited frontier. Report what ran before a timeout and which checks still need resources.
 
-\partpage{Orchestrating knowledge across investigations}\label{sec:archive}
+\partpage{Reusing evidence across investigations}\label{sec:archive}
 A successor can start with an earlier claim, retrieve its supporting and contrary evidence, and decide whether to use it in a new plan. The operations below let the successor do this within its access and resource limits. Each query identifies the sources searched, the archive versions reached and known gaps in coverage. It reports unavailable dependencies to the extent disclosure permits. An archive head identifies one published set of records. Typed provenance and machine discovery draw on PROV and FAIR. \src{19}\src{20}
 
 \small
@@ -248,7 +269,7 @@ Deposit / reconcile & Submit an immutable record, payload or signed notice. Repe
 \topic{Retrieval and change}
 Indexes may use identifiers, units, spatial or temporal bounds, graph patterns, formal subsumption and learned similarity. A retrieved candidate becomes evidence only through an explicit argument. An empty search establishes absence within a bounded collection only if its completeness and exhaustive application of the matching rule are warranted. Approximate search must report its method. Responses bind the exact record set or manifest, index configuration and known notice heads. A consumer requiring current status names its notice authorities and the maximum permitted age of their evidence. If it cannot check a required authority, freshness is unknown. It can still report the result for the available snapshot. A query that requires freshness for the entire result remains unresolved until that requirement is met.
 
-A correction or withdrawal names its target, scope and reason. Follow reverse dependencies to identify affected arguments, then reassess their claims using all arguments in the query, including surviving alternatives (Section~\ref{sec:guarantee}). A later investigator can replay the earlier judgement at its snapshot and use the revised assessment in a new decision. A conflict that survives reassessment can motivate a new observation (Appendix~\ref{app:planning}).
+A correction or withdrawal names its target, scope and reason. Follow reverse dependencies to identify affected or open uses, then reassess their claims using surviving and revised arguments (Sections~\ref{sec:guarantee} and~\ref{sec:inputcorrections}). A later investigator can replay the earlier judgement at its snapshot and use the revised assessment in a new decision. A conflict that survives reassessment can motivate a new observation (Appendix~\ref{app:planning}).
 
 \topic{Scale and fidelity}
 Index descriptors and retrieve payloads on demand. Summaries bind source manifests, omissions and supported queries. Replay criteria specify bit identity, numerical tolerance or a distributional test with predefined sampling and error criteria.
@@ -276,6 +297,21 @@ Receipts and authority & Retain original receipts, signatures, policies, notices
 For each migrated object required by a named query, record a source--target pair, including pairs for receipt representations. An untranslated original keeps its source reference. Maintain an access-controlled index in both directions, with typed dependency and correction targets. Given a new claim, a receiver can recover its source claim and calibration, then the notices addressed to either. Given an old correction, a receiver can find every mapped use in the declared inventory. Apply the notice only within its event interval and instrument mode. A later mapping can help read an earlier snapshot. Its creation time cannot count as evidence available to the original investigator. Later notices extend a new snapshot. Keep earlier receipts reproducible against their original notice horizon. If a required authority is unreachable, report the historical result and the open freshness check.
 
 A mapping can preserve integer arithmetic while losing calibration evidence. In that case arithmetic may pass, the required calibration check is unknown, and the physical claim is unresolved unless another admitted argument decides it. Competing admissible mappings remain addressable with their warrants. If originals have been withdrawn, return a permitted unavailability marker and identify which claims can still be checked from other evidence. A digest or a lookup entry alone supplies no proof of translation.
+
+\clearpage
+\pdfbookmark[2]{Identifying a calibration across archives}{calibrationidentity}
+\subsection*{Identifying a calibration across archives}\label{sec:calibrationidentity}
+Two laboratories can describe one physical calibration with different report identifiers, local scope names and original bytes. Search identifies material to inspect. A recipient needs a separate, warranted assertion of physical identity before it can use a foreign notice to reassess a local dependency. The assertion names two immutable calibration records in source and recipient roles and states whether the claim concerns a single execution or a session. A certificate or a result aggregated across a campaign can identify the documented aggregate; it may leave its constituent executions indistinguishable.
+
+\topic{Evidence and admission}
+Preserve both originals. Record the physical asset or the evidence connecting its aliases, the occurrence window, configuration, reference and discriminating execution evidence. Cite the source records for conversions of units, clock offsets or sign conventions. Retain plausible alternatives, the reason to exclude each and the collection actually checked. A missing discriminator, incompatible observations or a material search gap leaves identity unresolved. An archive inventory bounds visibility. Completeness of that inventory for the physical question requires its own evidence.
+
+The reference measurement profile uses a claim with directed calibration endpoints and a signed assessment of the identity check. The assessment binds the original evidence, scoped search inventories and the recipient scope. The recipient supplies the trusted identity-checking keys. A passing check states that its cited evidence supports the defined physical identity and excludes relevant alternatives within the declared search boundary. A failing or unknown check can remain in the archive. The evaluator verifies admission and evidence availability. The authority that signed the check is responsible for its interpretation of the physical sources.
+
+\topic{Using an admitted link}
+A recipient follows only a direct, admitted identity assertion when connecting a notice's source calibration to a recorded local dependency. A link does not grant correction authority. The notice retains its original target, scope, signature and evidence. The recipient admits notice keys by original scope and role. It checks the local dependency, effective mode and time on the declared common axes. A source may issue a replacement bias or withdraw the calibration for a scoped use. The reference profile admits cross-scope corrections on this path for a single execution with compatible mode, bias units and event-time basis. Session-level assertions can be recorded for review. Their individual executions need separate warrants.
+
+A current assessment binds the identity evidence and applicable correction in its receipt. A challenged or incomplete identity warrant leaves required foreign-notice applicability open. Keep historical receipts at their original evidence horizon. For the cross-archive qualification case, require exactly the dependent local use in the corrected interval to change standing. Include an unrelated repeat, a use outside the interval, a missing discriminator, and an inadmissible correction issuer. Replay the earlier result and test the later loss of the identity warrant.
 
 \clearpage
 \pdfbookmark[2]{When archives disagree about a calibration}{rivalnotices}
@@ -482,7 +518,7 @@ Reverse direction and conflict & Issue $M$ in B against B's calibration ID and e
 Withhold the endpoint mapping in a separate trial. A receiver may authenticate the notice under its original identifier. Its applicability to a new target remains unknown absent another warranted path. A policy requiring that check must leave current standing unresolved. A full exchange passes only if the receiver can name the evidence for each verdict, the excluded inputs in each restricted trial and the outstanding obligations.
 
 \topic{Conclusion}
-NAOME makes the justification of a scientific claim available to the next investigator. In the gauge example the recorded readings survive the loss of a calibration, the threshold claim loses its original warrant, and a replacement calibration supplies grounds for refutation. A successor can trace those distinctions from the observations to the training labels that used them. The proposed independent trial tests whether a second system can recover which knowledge still holds, on what assumptions, and where further investigation is needed.
+The protocol makes the justification of a scientific claim available to the next investigator. In the gauge example the recorded readings survive the loss of a calibration, the threshold claim loses its original warrant, and a replacement calibration supplies grounds for refutation. A successor can trace those distinctions from the observations to the training labels that used them. The proposed independent trial tests whether a second system can recover which knowledge still holds, on what assumptions, and where further investigation is needed.
 
 \appendix
 \partpage{Example exchange between two agents}\label{app:exchange}
@@ -658,12 +694,14 @@ A claim and an outcome reference the same target profile. A named outcome author
 Projects supply the domain mapping from native data, including the scientific assumptions and how selectors refer to the original bytes. The reference implementation validates declared target types and attestations. Sample selection, instrument calibration, consent authority and the accuracy of scientific interpretation still depend on the underlying evidence and the recipient's policy.
 
 \partpage{Reference implementation and release evidence}\label{app:release}
-Edition \edition{} accompanies \texttt{naome-protocol} \href{https://github.com/naome-core/naome-protocol/releases/tag/v0.1.2}{v0.1.2}. The \href{https://github.com/naome-core/naome-protocol/tree/v0.1.2}{tagged source} contains the Rust library, the offline command-line tool and the tests described here. Starting with v0.1.6, the command is named \texttt{nao}. The preceding published baseline was \href{https://github.com/naome-core/naome-protocol/tree/v0.1.1}{v0.1.1}.
+Edition \edition{} accompanies \texttt{naome-protocol} v0.1.7. The \href{https://github.com/naome-core/naome-protocol/tree/39b89b980cf3951c70b26747e5f78d9f28a34eb5}{implementation revision} contains the Rust library, the offline \texttt{nao} command and the tests described here. This code passed the \href{https://github.com/naome-core/naome-protocol/actions/runs/45071268541}{release checks on Linux, macOS and Windows}. The earlier reference implementation is available at \href{https://github.com/naome-core/naome-protocol/tree/v0.1.2}{v0.1.2}.
 
 \topic{What was executed}
 In a local computational case, the executor reads the authorised plan, checks the bytes of a named payload, and writes an occurrence and a signed readback. It then records a closure linking the plan, decision and occurrence. These records are produced by executing the check. The question, plan and authority are inputs supplied to the case.
 
 In both native formats, five measurements use the same reference. A withdrawal covers axial events 3 through 5. At events 3 and 5 the physical claim becomes unresolved. Axial events 2 and 6 and radial event 4 retain their original bounds and supported verdict. Further tests cover a stored empty mode and a known mismatch paired with an invalid restriction. A current training label survives an inapplicable withdrawal when its features remain eligible. Earlier receipts identify their evaluator for historical replay.
+
+Version 0.1.7 shares the correction applicability rules across assessment, impact analysis and training review. A regression test in both formats checks that an axial withdrawal leaves the direct radial assessment supported, requires reassessment of a delegated use, and preserves historical replay.
 
 Two local archives use the native encodings of Appendix~\ref{app:exchange}. For the original transition and both calibration notices, the implementation recomputed the scores and scientific results in Sections~\ref{sec:archive} and~\ref{sec:bar}. The projection producer replayed the corrected receipt and signed the permitted hull. A fresh recipient received the hull, scoring predicates and public verification context. The source retained the link to the underlying measurements. The recipient could apply both scoring rules and identified the missing warrant for each physical claim.
 

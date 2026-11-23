@@ -17,6 +17,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    ops::Bound::{Excluded, Unbounded},
     path::Path,
     time::Duration,
 };
@@ -32,6 +33,13 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn id(&self) -> Result<Id> {
         Ok(Id::blob(&serde_json::to_vec(self)?))
+    }
+
+    pub(crate) fn records(&self) -> impl Iterator<Item = Id> + '_ {
+        self.objects
+            .iter()
+            .copied()
+            .filter(|id| id.format().is_some())
     }
 }
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -52,6 +60,19 @@ pub struct Page {
 pub struct Archive {
     pub(crate) db: Connection,
 }
+// A caller owns the write transaction. A previously known head retains its local status.
+fn save_imported_head(db: &Connection, head: Id, snapshot: &Snapshot) -> Result<()> {
+    let id = head.to_string();
+    if db.execute(
+        "INSERT OR IGNORE INTO heads VALUES(?,?)",
+        params![id, serde_json::to_vec(snapshot)?],
+    )? != 0
+    {
+        db.execute("INSERT INTO rep_imported_heads VALUES(?)", [&id])?;
+    }
+    Ok(())
+}
+
 impl Archive {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -79,6 +100,7 @@ impl Archive {
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;
         CREATE TABLE IF NOT EXISTS objects(id TEXT PRIMARY KEY, data BLOB, access TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS heads(id TEXT PRIMARY KEY, manifest BLOB NOT NULL);
+        CREATE TABLE IF NOT EXISTS rep_imported_heads(head TEXT PRIMARY KEY REFERENCES heads(id));
         CREATE TABLE IF NOT EXISTS rep_search_selection(singleton INTEGER PRIMARY KEY CHECK(singleton=1), head TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS releases(head TEXT PRIMARY KEY REFERENCES heads(id));
         CREATE TABLE IF NOT EXISTS suspended_releases(head TEXT PRIMARY KEY REFERENCES releases(head));
@@ -147,11 +169,8 @@ impl Archive {
     pub(crate) fn size(&self, id: Id) -> Result<usize> {
         Ok(usize::try_from(
             self.db
-                .query_row(
-                    "SELECT coalesce(length(data),0) FROM objects WHERE id=?",
-                    [id.to_string()],
-                    |r| r.get::<_, i64>(0),
-                )
+                .prepare_cached("SELECT coalesce(length(data),0) FROM objects WHERE id=?")?
+                .query_row([id.to_string()], |r| r.get::<_, i64>(0))
                 .optional()?
                 .unwrap_or(0),
         )?)
@@ -159,11 +178,8 @@ impl Archive {
     pub(crate) fn raw(&self, id: Id) -> Result<Option<(Vec<u8>, Id)>> {
         let item: Option<(Vec<u8>, String)> = self
             .db
-            .query_row(
-                "SELECT data,access FROM objects WHERE id=? AND data IS NOT NULL",
-                [id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .prepare_cached("SELECT data,access FROM objects WHERE id=? AND data IS NOT NULL")?
+            .query_row([id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?;
         item.map(|(b, a)| {
             id.verify(&b)?;
@@ -195,6 +211,18 @@ impl Archive {
         ensure!(s.objects.contains(&acl), "missing access descriptor");
         self.check_access(acl, allows)?;
         Ok((b, acl))
+    }
+    /// Check presence and read permission without materializing the payload.
+    pub(crate) fn readable(&self, s: &Snapshot, id: Id) -> Result<()> {
+        ensure!(s.objects.contains(&id), "outside snapshot");
+        let acl: String = self.db.query_row(
+            "SELECT access FROM objects WHERE id = ?1 AND data IS NOT NULL",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        let acl = acl.parse()?;
+        ensure!(s.objects.contains(&acl), "missing access descriptor");
+        self.check_access(acl, |policy| crate::profile::allows(policy, "read"))
     }
     fn check_access(&self, acl: Id, allows: impl FnOnce(&[u8]) -> bool) -> Result<()> {
         let (policy, parent) = self.raw(acl)?.context("unavailable access policy")?;
@@ -444,12 +472,9 @@ impl Archive {
         let mut arguments = vec![];
         let mut notices = BTreeMap::new();
         let mut unsearched = BTreeSet::new();
-        for (n, &object) in s.objects.iter().enumerate() {
+        for (n, object) in s.records().enumerate() {
             if n >= budget {
                 unsearched.insert(object);
-                continue;
-            }
-            if object.format().is_none() {
                 continue;
             }
             let Ok(d) = self.read(s, object, purpose) else {
@@ -499,7 +524,8 @@ impl Archive {
         let mut excluded = 0;
         let mut last = None;
         let mut more = false;
-        for &id in s.objects.iter().filter(|id| after.is_none_or(|x| **id > x)) {
+        let bound = after.map_or(Unbounded, Excluded);
+        for &id in s.objects.range((bound, Unbounded)) {
             if examined == budget {
                 more = true;
                 break;

@@ -267,3 +267,17 @@ fn record_access_comes_from_the_envelope() -> Result<()> {
     receiver.accept(id, source.released_member(head, id)?)?;
     Ok(())
 }
+
+#[test]
+fn replicated_releases_do_not_replace_the_local_search_head() -> Result<()> {
+    let source = Archive::memory()?;
+    let target = Archive::memory()?;
+    let work = target.snapshot("local work", Default::default())?.id()?;
+    let peer = source.snapshot("peer release", Default::default())?;
+    let peer_id = replica(&source, &peer)?.commit(&target)?;
+
+    assert!(target.releases()?.contains(&peer_id));
+    assert_eq!(target.search_head(None)?.id()?, work);
+    assert_eq!(target.search_head(Some(peer_id))?.id()?, peer_id);
+    Ok(())
+}

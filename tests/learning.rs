@@ -218,17 +218,15 @@ fn training_reuses_inventories_without_widening_query_budgets() -> Result<()> {
     let plan = archive
         .read(&evidence, query.arguments[0], "read")?
         .one("plan")?;
-    let record_bytes = evidence
-        .objects
-        .iter()
-        .filter(|id| id.format().is_some())
-        .try_fold(0, |total, &id| -> Result<usize> {
-            Ok(total + archive.resolve(&evidence, id, "read")?.len())
-        })?;
+    let mut records = evidence.objects.iter().filter(|id| id.format().is_some());
+    let record_count = records.clone().count();
+    let record_bytes = records.try_fold(0, |total, &id| -> Result<usize> {
+        Ok(total + archive.resolve(&evidence, id, "read")?.len())
+    })?;
     let queries = [
         query.clone(),
         Query {
-            budget: evidence.objects.len(),
+            budget: record_count,
             ..query.clone()
         },
         Query {
