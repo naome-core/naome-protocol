@@ -19,6 +19,24 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Construct argument-heavy subcommands after the top-level parser releases its stack frame.
+pub struct DeferredArgs<T>(pub T);
+impl<T: clap::Args + 'static> clap::Args for DeferredArgs<T> {
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        cmd.defer(T::augment_args)
+    }
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        cmd.defer(T::augment_args_for_update)
+    }
+}
+impl<T: clap::FromArgMatches> clap::FromArgMatches for DeferredArgs<T> {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        T::from_arg_matches(matches).map(Self)
+    }
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        self.0.update_from_arg_matches(matches)
+    }
+}
 #[derive(Subcommand)]
 pub enum ArchiveCommand {
     /// Append, replicate and review bounded archive changes.
@@ -131,7 +149,7 @@ pub enum ArchiveCommand {
         budget: usize,
     },
     /// Search authorized archive records and text passages by word or meaning.
-    Find(FindArguments),
+    Find(DeferredArgs<FindArguments>),
     /// Show or pin the active search snapshot.
     SearchHead {
         head: Option<Id>,
@@ -140,7 +158,7 @@ pub enum ArchiveCommand {
         clear: bool,
     },
     /// Prepare archive text, media and embeddings independently of a search.
-    PrepareSearch(PrepareSearchArguments),
+    PrepareSearch(DeferredArgs<PrepareSearchArguments>),
     /// Reuse a local model for JSON-line find and prepare-search requests on stdin.
     SearchSession,
     /// Trace required input edges and the unresolved frontier.
@@ -490,7 +508,9 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 after,
             )?)
         }
-        ArchiveCommand::Find(arguments) => print(LocalSearch::default().find(&open()?, arguments)?),
+        ArchiveCommand::Find(DeferredArgs(arguments)) => {
+            print(LocalSearch::default().find(&open()?, arguments)?)
+        }
         ArchiveCommand::SearchHead { head, clear } => {
             let db = open()?;
             if head.is_some() || clear {
@@ -498,7 +518,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             }
             print(db.search_head(None)?.id()?)
         }
-        ArchiveCommand::PrepareSearch(arguments) => {
+        ArchiveCommand::PrepareSearch(DeferredArgs(arguments)) => {
             print(LocalSearch::default().prepare(&open()?, arguments)?)
         }
         ArchiveCommand::SearchSession => LocalSearch::default().serve(
