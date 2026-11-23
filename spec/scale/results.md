@@ -10,17 +10,17 @@ Reproduce the current run with an optimized Rust build on macOS or Linux.
     python3 tools/scale/qualify.py new-samples.json
     python3 tools/scale/qualify.py spec/scale/manifest-samples.json --verify-saved
 
-The 48 observations in `manifest-samples.json` include three fresh processes per workload and size. Verification checks the invariant inputs, shared virtual root, bounded page work, single-delta byte count, fork behavior, and deterministic results within each workload. The same 203-byte claim was admitted through the laboratory API and transferred to an independent SQLite recipient. Time includes process startup, admission, scoped lookup and reverse query in the delta phase. RSS is the OS process high-water value. These experiments used real small files and a simulated million-ID payload inventory.
+The measured implementation is `2936850510c9b23dcb634c68609553f0fb231cb1`. The 48 observations in `manifest-samples.json` include three fresh processes per workload and size. Verification checks the invariant inputs, shared virtual root, bounded page work, single-delta byte count, fork behavior, and deterministic results within each workload. The same 203-byte claim was admitted through the laboratory API and transferred to an independent SQLite recipient. Time includes process startup, admission, scoped lookup and reverse query in the delta phase. RSS is the OS process high-water value. These experiments used real small files and a simulated million-ID payload inventory.
 
 | Prior records | Pages read | Pages created | Backing reads | Frame bytes | Median RSS, MiB | Median delta, ms | Median receiver, ms |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 128 | 18 | 10 | 36 | 1,008 | 5.77 | 8.07 | 7.43 |
-| 1,024 | 28 | 15 | 97 | 1,223 | 7.67 | 12.82 | 11.73 |
-| 12,800 | 37 | 21 | 128 | 1,438 | 7.94 | 12.71 | 12.02 |
+| 128 | 18 | 10 | 36 | 1,008 | 5.86 | 6.89 | 6.42 |
+| 1,024 | 28 | 15 | 97 | 1,223 | 7.73 | 9.20 | 8.28 |
+| 12,800 | 37 | 21 | 128 | 1,438 | 8.06 | 11.92 | 11.41 |
 
-The 12,800-record first admission verified 1,755,290 payload bytes across 200 batches. The origin database grew by 189.88 MB. Median first admission and first pull took 14.97 and 18.03 seconds. The first transfer carried 13.11 MB including authenticated descriptors and ancestry proofs.
+The 12,800-record first admission verified 1,755,290 payload bytes across 200 batches. The origin database grew by 189.88 MB. Median first admission and first pull took 12.21 and 16.78 seconds. The first transfer carried 13.11 MB including authenticated descriptors and ancestry proofs.
 
-The ordinary full-snapshot command also has a catalog watermark. A separate regression seals 180 generated payloads, deposits one new object, checks exactly one admitted delta member and the preserved parent, then withdraws it and verifies historical membership and current unavailability. This control checks behavior; the table measures the independent-lab admission API. Scientific views can still materialize all member IDs, exact-subset closure costs depend on the requested graph, and a withdrawal changes the full-seal epoch. Production throughput and physical terabyte recovery remain unmeasured.
+The ordinary full-snapshot command also has a catalog watermark. A separate regression seals 180 generated payloads, deposits one new object, checks exactly one admitted delta member and the preserved parent, then withdraws it and verifies historical membership and current unavailability. This control checks behavior. The table measures the independent-lab admission API. Scientific views can still materialize all member IDs, exact-subset closure costs depend on the requested graph, and a withdrawal changes the full-seal epoch. Production throughput and physical terabyte recovery remain unmeasured.
 
 ## Historical physical-page comparison
 

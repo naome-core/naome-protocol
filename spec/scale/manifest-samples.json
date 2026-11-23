@@ -6,14 +6,14 @@
   "samples": [
     {
       "database_growth": 0,
-      "elapsed_ms": 252.02362499999998,
+      "elapsed_ms": 195.27129200000002,
       "phase": "mixed",
       "result": {
         "announcements": 8,
         "batches": 24,
         "descriptor_bytes": 44964,
         "duplicate_deliveries": 8,
-        "elapsed_ms": 251.95362500000002,
+        "elapsed_ms": 195.21608300000003,
         "federated_tips": [
           "1:1:a725369bb72834b5bb447a4baf2e1c78a4672b3e090c35f7ca850d5a06d7e0d3",
           "1:1:fdb16d4df7e0c9b1b6a4a0a53a2d7aefa44013c06213642c888758ba8538d314"
@@ -26,26 +26,26 @@
         "review_standing": "review",
         "service_pause_ms": 3,
         "writer_finish_us": [
-          172715,
-          150254
+          108067,
+          128293
         ],
         "writers": 2
       },
       "size": 24,
-      "process_ms": 446.88,
-      "peak_rss_bytes": 13402112,
+      "process_ms": 399.055,
+      "peak_rss_bytes": 13123584,
       "repetition": 1
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 271.524333,
+      "elapsed_ms": 215.622125,
       "phase": "mixed",
       "result": {
         "announcements": 8,
         "batches": 24,
         "descriptor_bytes": 44964,
         "duplicate_deliveries": 8,
-        "elapsed_ms": 271.45754100000005,
+        "elapsed_ms": 215.571125,
         "federated_tips": [
           "1:1:a725369bb72834b5bb447a4baf2e1c78a4672b3e090c35f7ca850d5a06d7e0d3",
           "1:1:fdb16d4df7e0c9b1b6a4a0a53a2d7aefa44013c06213642c888758ba8538d314"
@@ -58,26 +58,26 @@
         "review_standing": "review",
         "service_pause_ms": 3,
         "writer_finish_us": [
-          180547,
-          202556
+          120258,
+          142563
         ],
         "writers": 2
       },
       "size": 24,
-      "process_ms": 287.655,
-      "peak_rss_bytes": 13713408,
+      "process_ms": 221.476,
+      "peak_rss_bytes": 13123584,
       "repetition": 2
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 248.941375,
+      "elapsed_ms": 208.99020800000002,
       "phase": "mixed",
       "result": {
         "announcements": 8,
         "batches": 24,
         "descriptor_bytes": 44964,
         "duplicate_deliveries": 8,
-        "elapsed_ms": 248.88674999999998,
+        "elapsed_ms": 208.940458,
         "federated_tips": [
           "1:1:a725369bb72834b5bb447a4baf2e1c78a4672b3e090c35f7ca850d5a06d7e0d3",
           "1:1:fdb16d4df7e0c9b1b6a4a0a53a2d7aefa44013c06213642c888758ba8538d314"
@@ -90,19 +90,19 @@
         "review_standing": "review",
         "service_pause_ms": 3,
         "writer_finish_us": [
-          163187,
-          140898
+          120406,
+          141449
         ],
         "writers": 2
       },
       "size": 24,
-      "process_ms": 262.495,
-      "peak_rss_bytes": 14548992,
+      "process_ms": 215.352,
+      "peak_rss_bytes": 13025280,
       "repetition": 3
     },
     {
       "database_growth": 16384,
-      "elapsed_ms": 0.768416,
+      "elapsed_ms": 0.568459,
       "phase": "inventory",
       "result": {
         "delta_io": {
@@ -127,13 +127,13 @@
         "root": "1:1:099a070fe4dbf60cec1a0cce433c011d4a8455bd11bfd605c1f2d282f6eeaa50"
       },
       "size": 100,
-      "process_ms": 19.958,
-      "peak_rss_bytes": 5210112,
+      "process_ms": 5.967,
+      "peak_rss_bytes": 5226496,
       "repetition": 1
     },
     {
       "database_growth": 16384,
-      "elapsed_ms": 1.863166,
+      "elapsed_ms": 0.5526249999999999,
       "phase": "inventory",
       "result": {
         "delta_io": {
@@ -158,13 +158,13 @@
         "root": "1:1:099a070fe4dbf60cec1a0cce433c011d4a8455bd11bfd605c1f2d282f6eeaa50"
       },
       "size": 100,
-      "process_ms": 34.533,
+      "process_ms": 5.876,
       "peak_rss_bytes": 5226496,
       "repetition": 2
     },
     {
       "database_growth": 16384,
-      "elapsed_ms": 0.76025,
+      "elapsed_ms": 0.45804199999999995,
       "phase": "inventory",
       "result": {
         "delta_io": {
@@ -189,13 +189,13 @@
         "root": "1:1:099a070fe4dbf60cec1a0cce433c011d4a8455bd11bfd605c1f2d282f6eeaa50"
       },
       "size": 100,
-      "process_ms": 24.123,
-      "peak_rss_bytes": 5210112,
+      "process_ms": 5.137,
+      "peak_rss_bytes": 5242880,
       "repetition": 3
     },
     {
       "database_growth": 1789952,
-      "elapsed_ms": 32.79375,
+      "elapsed_ms": 13.811667,
       "phase": "inventory",
       "result": {
         "delta_io": {
@@ -220,13 +220,13 @@
         "root": "1:1:1e0ddde841382f83eb81de6ef24dc93b323d88d16d953326408816131306e205"
       },
       "size": 10000,
-      "process_ms": 55.717,
-      "peak_rss_bytes": 8110080,
+      "process_ms": 18.148,
+      "peak_rss_bytes": 8208384,
       "repetition": 1
     },
     {
       "database_growth": 1789952,
-      "elapsed_ms": 29.779957999999997,
+      "elapsed_ms": 14.092875,
       "phase": "inventory",
       "result": {
         "delta_io": {
@@ -251,13 +251,13 @@
         "root": "1:1:1e0ddde841382f83eb81de6ef24dc93b323d88d16d953326408816131306e205"
       },
       "size": 10000,
-      "process_ms": 54.46,
-      "peak_rss_bytes": 8093696,
+      "process_ms": 19.066,
+      "peak_rss_bytes": 8175616,
       "repetition": 2
     },
     {
       "database_growth": 1789952,
-      "elapsed_ms": 25.635959,
+      "elapsed_ms": 13.587458999999999,
       "phase": "inventory",
       "result": {
         "delta_io": {
@@ -282,13 +282,13 @@
         "root": "1:1:1e0ddde841382f83eb81de6ef24dc93b323d88d16d953326408816131306e205"
       },
       "size": 10000,
-      "process_ms": 62.434,
-      "peak_rss_bytes": 8142848,
+      "process_ms": 18.626,
+      "peak_rss_bytes": 8126464,
       "repetition": 3
     },
     {
       "database_growth": 183644160,
-      "elapsed_ms": 3894.730833,
+      "elapsed_ms": 2485.7405,
       "phase": "inventory",
       "result": {
         "delta_io": {
@@ -313,13 +313,13 @@
         "root": "1:1:61e7c7c285c4af1abf86c2e700ee97c0a1799f04ba2f6ab4af839104e8207ab7"
       },
       "size": 1000000,
-      "process_ms": 3913.93,
-      "peak_rss_bytes": 8339456,
+      "process_ms": 2491.036,
+      "peak_rss_bytes": 8372224,
       "repetition": 1
     },
     {
       "database_growth": 183644160,
-      "elapsed_ms": 3123.333166,
+      "elapsed_ms": 2528.014416,
       "phase": "inventory",
       "result": {
         "delta_io": {
@@ -344,13 +344,13 @@
         "root": "1:1:61e7c7c285c4af1abf86c2e700ee97c0a1799f04ba2f6ab4af839104e8207ab7"
       },
       "size": 1000000,
-      "process_ms": 3138.96,
-      "peak_rss_bytes": 8306688,
+      "process_ms": 2533.379,
+      "peak_rss_bytes": 8454144,
       "repetition": 2
     },
     {
       "database_growth": 183644160,
-      "elapsed_ms": 3104.768125,
+      "elapsed_ms": 2628.3496250000003,
       "phase": "inventory",
       "result": {
         "delta_io": {
@@ -375,13 +375,13 @@
         "root": "1:1:61e7c7c285c4af1abf86c2e700ee97c0a1799f04ba2f6ab4af839104e8207ab7"
       },
       "size": 1000000,
-      "process_ms": 3120.355,
-      "peak_rss_bytes": 8290304,
+      "process_ms": 2633.815,
+      "peak_rss_bytes": 8421376,
       "repetition": 3
     },
     {
       "database_growth": 425984,
-      "elapsed_ms": 11.108917,
+      "elapsed_ms": 8.866957999999999,
       "phase": "first",
       "result": {
         "head": "1:1:7329a7ccda13a1a34f3239a2ec1b521337fcb05a2dafcca473e86d9ea4150541",
@@ -397,13 +397,13 @@
         "payload_bytes": 17298
       },
       "size": 128,
-      "process_ms": 27.635,
-      "peak_rss_bytes": 7045120,
+      "process_ms": 14.327,
+      "peak_rss_bytes": 7012352,
       "repetition": 1
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 32.5105,
+      "elapsed_ms": 24.084708,
       "phase": "pull-first",
       "result": {
         "batches": 2,
@@ -430,13 +430,13 @@
         }
       },
       "size": 128,
-      "process_ms": 37.71,
-      "peak_rss_bytes": 7241728,
+      "process_ms": 28.323,
+      "peak_rss_bytes": 7503872,
       "repetition": 1
     },
     {
       "database_growth": 28672,
-      "elapsed_ms": 2.6059579999999998,
+      "elapsed_ms": 2.614334,
       "phase": "delta",
       "result": {
         "admit": {
@@ -474,178 +474,46 @@
         }
       },
       "size": 128,
-      "process_ms": 7.028,
-      "peak_rss_bytes": 6062080,
-      "repetition": 1
-    },
-    {
-      "database_growth": 0,
-      "elapsed_ms": 2.6115,
-      "phase": "pull-delta",
-      "result": {
-        "batches": 1,
-        "descriptor_bytes": 805,
-        "payload_bytes": 203,
-        "receiver_growth": 28672,
-        "receiver_io": {
-          "backing_read_bytes": 147045,
-          "backing_reads": 36,
-          "backing_written_bytes": 9819,
-          "read_bytes": 82372,
-          "reads": 18,
-          "writes": 10,
-          "written_bytes": 43982
-        },
-        "sender_io": {
-          "backing_read_bytes": 27100,
-          "backing_reads": 8,
-          "backing_written_bytes": 0,
-          "read_bytes": 17866,
-          "reads": 4,
-          "writes": 0,
-          "written_bytes": 0
-        }
-      },
-      "size": 128,
-      "process_ms": 6.958,
-      "peak_rss_bytes": 6144000,
-      "repetition": 1
-    },
-    {
-      "database_growth": 425984,
-      "elapsed_ms": 8.946166999999999,
-      "phase": "first",
-      "result": {
-        "head": "1:1:7329a7ccda13a1a34f3239a2ec1b521337fcb05a2dafcca473e86d9ea4150541",
-        "io": {
-          "backing_read_bytes": 679019,
-          "backing_reads": 212,
-          "backing_written_bytes": 219740,
-          "read_bytes": 679019,
-          "reads": 212,
-          "writes": 46,
-          "written_bytes": 234522
-        },
-        "payload_bytes": 17298
-      },
-      "size": 128,
-      "process_ms": 21.92,
-      "peak_rss_bytes": 6815744,
-      "repetition": 2
-    },
-    {
-      "database_growth": 0,
-      "elapsed_ms": 36.52225,
-      "phase": "pull-first",
-      "result": {
-        "batches": 2,
-        "descriptor_bytes": 35376,
-        "payload_bytes": 17298,
-        "receiver_growth": 425984,
-        "receiver_io": {
-          "backing_read_bytes": 679019,
-          "backing_reads": 212,
-          "backing_written_bytes": 219740,
-          "read_bytes": 679019,
-          "reads": 212,
-          "writes": 46,
-          "written_bytes": 234522
-        },
-        "sender_io": {
-          "backing_read_bytes": 2874424,
-          "backing_reads": 768,
-          "backing_written_bytes": 0,
-          "read_bytes": 2021387,
-          "reads": 512,
-          "writes": 0,
-          "written_bytes": 0
-        }
-      },
-      "size": 128,
-      "process_ms": 41.334,
-      "peak_rss_bytes": 7307264,
-      "repetition": 2
-    },
-    {
-      "database_growth": 28672,
-      "elapsed_ms": 4.2783750000000005,
-      "phase": "delta",
-      "result": {
-        "admit": {
-          "head": "1:1:8aa72f21da08ed6d57e305dd4423e3163647fd589f8a65beb09fc75bbc837c96",
-          "io": {
-            "backing_read_bytes": 147045,
-            "backing_reads": 36,
-            "backing_written_bytes": 9819,
-            "read_bytes": 82372,
-            "reads": 18,
-            "writes": 10,
-            "written_bytes": 43982
-          },
-          "sequence": 3
-        },
-        "member_io": {
-          "backing_read_bytes": 27100,
-          "backing_reads": 8,
-          "backing_written_bytes": 0,
-          "read_bytes": 17866,
-          "reads": 4,
-          "writes": 0,
-          "written_bytes": 0
-        },
-        "payload_bytes": 203,
-        "receipt_bytes": 457,
-        "reverse_io": {
-          "backing_read_bytes": 42971,
-          "backing_reads": 11,
-          "backing_written_bytes": 0,
-          "read_bytes": 30095,
-          "reads": 6,
-          "writes": 0,
-          "written_bytes": 0
-        }
-      },
-      "size": 128,
-      "process_ms": 10.726,
-      "peak_rss_bytes": 6045696,
-      "repetition": 2
-    },
-    {
-      "database_growth": 0,
-      "elapsed_ms": 2.887917,
-      "phase": "pull-delta",
-      "result": {
-        "batches": 1,
-        "descriptor_bytes": 805,
-        "payload_bytes": 203,
-        "receiver_growth": 28672,
-        "receiver_io": {
-          "backing_read_bytes": 147045,
-          "backing_reads": 36,
-          "backing_written_bytes": 9819,
-          "read_bytes": 82372,
-          "reads": 18,
-          "writes": 10,
-          "written_bytes": 43982
-        },
-        "sender_io": {
-          "backing_read_bytes": 27100,
-          "backing_reads": 8,
-          "backing_written_bytes": 0,
-          "read_bytes": 17866,
-          "reads": 4,
-          "writes": 0,
-          "written_bytes": 0
-        }
-      },
-      "size": 128,
-      "process_ms": 7.432,
+      "process_ms": 7.098,
       "peak_rss_bytes": 6160384,
-      "repetition": 2
+      "repetition": 1
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 2.434291,
+      "phase": "pull-delta",
+      "result": {
+        "batches": 1,
+        "descriptor_bytes": 805,
+        "payload_bytes": 203,
+        "receiver_growth": 28672,
+        "receiver_io": {
+          "backing_read_bytes": 147045,
+          "backing_reads": 36,
+          "backing_written_bytes": 9819,
+          "read_bytes": 82372,
+          "reads": 18,
+          "writes": 10,
+          "written_bytes": 43982
+        },
+        "sender_io": {
+          "backing_read_bytes": 27100,
+          "backing_reads": 8,
+          "backing_written_bytes": 0,
+          "read_bytes": 17866,
+          "reads": 4,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 6.232,
+      "peak_rss_bytes": 6275072,
+      "repetition": 1
     },
     {
       "database_growth": 425984,
-      "elapsed_ms": 10.111291999999999,
+      "elapsed_ms": 8.815208,
       "phase": "first",
       "result": {
         "head": "1:1:7329a7ccda13a1a34f3239a2ec1b521337fcb05a2dafcca473e86d9ea4150541",
@@ -661,13 +529,13 @@
         "payload_bytes": 17298
       },
       "size": 128,
-      "process_ms": 24.669,
-      "peak_rss_bytes": 7045120,
-      "repetition": 3
+      "process_ms": 14.129,
+      "peak_rss_bytes": 7061504,
+      "repetition": 2
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 35.912166,
+      "elapsed_ms": 24.406541999999998,
       "phase": "pull-first",
       "result": {
         "batches": 2,
@@ -694,13 +562,13 @@
         }
       },
       "size": 128,
-      "process_ms": 40.263,
-      "peak_rss_bytes": 7159808,
-      "repetition": 3
+      "process_ms": 28.431,
+      "peak_rss_bytes": 7454720,
+      "repetition": 2
     },
     {
       "database_growth": 28672,
-      "elapsed_ms": 2.977375,
+      "elapsed_ms": 2.6077909999999997,
       "phase": "delta",
       "result": {
         "admit": {
@@ -738,13 +606,13 @@
         }
       },
       "size": 128,
-      "process_ms": 8.073,
-      "peak_rss_bytes": 5996544,
-      "repetition": 3
+      "process_ms": 6.84,
+      "peak_rss_bytes": 6144000,
+      "repetition": 2
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 3.210209,
+      "elapsed_ms": 2.259708,
       "phase": "pull-delta",
       "result": {
         "batches": 1,
@@ -771,13 +639,145 @@
         }
       },
       "size": 128,
-      "process_ms": 7.585,
-      "peak_rss_bytes": 6094848,
+      "process_ms": 6.424,
+      "peak_rss_bytes": 6225920,
+      "repetition": 2
+    },
+    {
+      "database_growth": 425984,
+      "elapsed_ms": 8.563792000000001,
+      "phase": "first",
+      "result": {
+        "head": "1:1:7329a7ccda13a1a34f3239a2ec1b521337fcb05a2dafcca473e86d9ea4150541",
+        "io": {
+          "backing_read_bytes": 679019,
+          "backing_reads": 212,
+          "backing_written_bytes": 219740,
+          "read_bytes": 679019,
+          "reads": 212,
+          "writes": 46,
+          "written_bytes": 234522
+        },
+        "payload_bytes": 17298
+      },
+      "size": 128,
+      "process_ms": 13.932,
+      "peak_rss_bytes": 6995968,
+      "repetition": 3
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 23.195375000000002,
+      "phase": "pull-first",
+      "result": {
+        "batches": 2,
+        "descriptor_bytes": 35376,
+        "payload_bytes": 17298,
+        "receiver_growth": 425984,
+        "receiver_io": {
+          "backing_read_bytes": 679019,
+          "backing_reads": 212,
+          "backing_written_bytes": 219740,
+          "read_bytes": 679019,
+          "reads": 212,
+          "writes": 46,
+          "written_bytes": 234522
+        },
+        "sender_io": {
+          "backing_read_bytes": 2874424,
+          "backing_reads": 768,
+          "backing_written_bytes": 0,
+          "read_bytes": 2021387,
+          "reads": 512,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 27.179,
+      "peak_rss_bytes": 7520256,
+      "repetition": 3
+    },
+    {
+      "database_growth": 28672,
+      "elapsed_ms": 2.5699579999999997,
+      "phase": "delta",
+      "result": {
+        "admit": {
+          "head": "1:1:8aa72f21da08ed6d57e305dd4423e3163647fd589f8a65beb09fc75bbc837c96",
+          "io": {
+            "backing_read_bytes": 147045,
+            "backing_reads": 36,
+            "backing_written_bytes": 9819,
+            "read_bytes": 82372,
+            "reads": 18,
+            "writes": 10,
+            "written_bytes": 43982
+          },
+          "sequence": 3
+        },
+        "member_io": {
+          "backing_read_bytes": 27100,
+          "backing_reads": 8,
+          "backing_written_bytes": 0,
+          "read_bytes": 17866,
+          "reads": 4,
+          "writes": 0,
+          "written_bytes": 0
+        },
+        "payload_bytes": 203,
+        "receipt_bytes": 457,
+        "reverse_io": {
+          "backing_read_bytes": 42971,
+          "backing_reads": 11,
+          "backing_written_bytes": 0,
+          "read_bytes": 30095,
+          "reads": 6,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 6.894,
+      "peak_rss_bytes": 6111232,
+      "repetition": 3
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 2.4025000000000003,
+      "phase": "pull-delta",
+      "result": {
+        "batches": 1,
+        "descriptor_bytes": 805,
+        "payload_bytes": 203,
+        "receiver_growth": 28672,
+        "receiver_io": {
+          "backing_read_bytes": 147045,
+          "backing_reads": 36,
+          "backing_written_bytes": 9819,
+          "read_bytes": 82372,
+          "reads": 18,
+          "writes": 10,
+          "written_bytes": 43982
+        },
+        "sender_io": {
+          "backing_read_bytes": 27100,
+          "backing_reads": 8,
+          "backing_written_bytes": 0,
+          "read_bytes": 17866,
+          "reads": 4,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 6.765,
+      "peak_rss_bytes": 6258688,
       "repetition": 3
     },
     {
       "database_growth": 8822784,
-      "elapsed_ms": 347.935292,
+      "elapsed_ms": 300.69683299999997,
       "phase": "first",
       "result": {
         "head": "1:1:c43fab8a58eb53d3ef489731cee4cf76a52e7c2d6aec2e077ec96b48d72f521e",
@@ -793,13 +793,13 @@
         "payload_bytes": 139178
       },
       "size": 1024,
-      "process_ms": 361.421,
-      "peak_rss_bytes": 9355264,
+      "process_ms": 306.024,
+      "peak_rss_bytes": 9306112,
       "repetition": 1
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 587.8104579999999,
+      "elapsed_ms": 517.079542,
       "phase": "pull-first",
       "result": {
         "batches": 16,
@@ -826,13 +826,13 @@
         }
       },
       "size": 1024,
-      "process_ms": 595.224,
-      "peak_rss_bytes": 11403264,
+      "process_ms": 521.087,
+      "peak_rss_bytes": 11681792,
       "repetition": 1
     },
     {
       "database_growth": 32768,
-      "elapsed_ms": 5.325749999999999,
+      "elapsed_ms": 4.706,
       "phase": "delta",
       "result": {
         "admit": {
@@ -870,13 +870,13 @@
         }
       },
       "size": 1024,
-      "process_ms": 11.331,
-      "peak_rss_bytes": 8044544,
+      "process_ms": 8.947,
+      "peak_rss_bytes": 8093696,
       "repetition": 1
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 5.373832999999999,
+      "elapsed_ms": 4.5535000000000005,
       "phase": "pull-delta",
       "result": {
         "batches": 1,
@@ -903,13 +903,13 @@
         }
       },
       "size": 1024,
-      "process_ms": 10.372,
-      "peak_rss_bytes": 8241152,
+      "process_ms": 8.275,
+      "peak_rss_bytes": 8355840,
       "repetition": 1
     },
     {
       "database_growth": 8822784,
-      "elapsed_ms": 323.341792,
+      "elapsed_ms": 287.71045899999996,
       "phase": "first",
       "result": {
         "head": "1:1:c43fab8a58eb53d3ef489731cee4cf76a52e7c2d6aec2e077ec96b48d72f521e",
@@ -925,13 +925,13 @@
         "payload_bytes": 139178
       },
       "size": 1024,
-      "process_ms": 338.473,
-      "peak_rss_bytes": 9256960,
+      "process_ms": 292.701,
+      "peak_rss_bytes": 9240576,
       "repetition": 2
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 604.656125,
+      "elapsed_ms": 524.847167,
       "phase": "pull-first",
       "result": {
         "batches": 16,
@@ -958,13 +958,13 @@
         }
       },
       "size": 1024,
-      "process_ms": 609.539,
-      "peak_rss_bytes": 11501568,
+      "process_ms": 529.146,
+      "peak_rss_bytes": 11550720,
       "repetition": 2
     },
     {
       "database_growth": 32768,
-      "elapsed_ms": 7.030041,
+      "elapsed_ms": 5.734999999999999,
       "phase": "delta",
       "result": {
         "admit": {
@@ -1002,13 +1002,13 @@
         }
       },
       "size": 1024,
-      "process_ms": 12.819,
-      "peak_rss_bytes": 7946240,
+      "process_ms": 10.307,
+      "peak_rss_bytes": 8208384,
       "repetition": 2
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 6.083875,
+      "elapsed_ms": 5.078625,
       "phase": "pull-delta",
       "result": {
         "batches": 1,
@@ -1035,13 +1035,13 @@
         }
       },
       "size": 1024,
-      "process_ms": 11.728,
-      "peak_rss_bytes": 8060928,
+      "process_ms": 9.678,
+      "peak_rss_bytes": 8355840,
       "repetition": 2
     },
     {
       "database_growth": 8822784,
-      "elapsed_ms": 403.470167,
+      "elapsed_ms": 313.070958,
       "phase": "first",
       "result": {
         "head": "1:1:c43fab8a58eb53d3ef489731cee4cf76a52e7c2d6aec2e077ec96b48d72f521e",
@@ -1057,13 +1057,13 @@
         "payload_bytes": 139178
       },
       "size": 1024,
-      "process_ms": 419.076,
-      "peak_rss_bytes": 9322496,
+      "process_ms": 318.282,
+      "peak_rss_bytes": 9289728,
       "repetition": 3
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 746.7609160000001,
+      "elapsed_ms": 514.5973339999999,
       "phase": "pull-first",
       "result": {
         "batches": 16,
@@ -1090,13 +1090,13 @@
         }
       },
       "size": 1024,
-      "process_ms": 754.036,
-      "peak_rss_bytes": 11239424,
+      "process_ms": 518.604,
+      "peak_rss_bytes": 11730944,
       "repetition": 3
     },
     {
       "database_growth": 32768,
-      "elapsed_ms": 7.875584,
+      "elapsed_ms": 4.852167,
       "phase": "delta",
       "result": {
         "admit": {
@@ -1134,13 +1134,13 @@
         }
       },
       "size": 1024,
-      "process_ms": 15.762,
-      "peak_rss_bytes": 8077312,
+      "process_ms": 9.201,
+      "peak_rss_bytes": 8110080,
       "repetition": 3
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 7.946541999999999,
+      "elapsed_ms": 4.586625000000001,
       "phase": "pull-delta",
       "result": {
         "batches": 1,
@@ -1167,13 +1167,13 @@
         }
       },
       "size": 1024,
-      "process_ms": 13.911,
+      "process_ms": 8.097,
       "peak_rss_bytes": 8323072,
       "repetition": 3
     },
     {
       "database_growth": 189878272,
-      "elapsed_ms": 14949.245832999999,
+      "elapsed_ms": 12183.230667,
       "phase": "first",
       "result": {
         "head": "1:1:034452deca130f2d19177bf80e389f861652182e98f996b2f4204fde56d66f2b",
@@ -1189,13 +1189,13 @@
         "payload_bytes": 1755290
       },
       "size": 12800,
-      "process_ms": 14970.132,
-      "peak_rss_bytes": 9633792,
+      "process_ms": 12188.519,
+      "peak_rss_bytes": 9404416,
       "repetition": 1
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 18368.648042,
+      "elapsed_ms": 16716.483791000002,
       "phase": "pull-first",
       "result": {
         "batches": 200,
@@ -1222,13 +1222,13 @@
         }
       },
       "size": 12800,
-      "process_ms": 18373.766,
-      "peak_rss_bytes": 12337152,
+      "process_ms": 16720.606,
+      "peak_rss_bytes": 12288000,
       "repetition": 1
     },
     {
       "database_growth": 53248,
-      "elapsed_ms": 10.986832999999999,
+      "elapsed_ms": 7.487459,
       "phase": "delta",
       "result": {
         "admit": {
@@ -1266,13 +1266,13 @@
         }
       },
       "size": 12800,
-      "process_ms": 18.437,
-      "peak_rss_bytes": 8323072,
+      "process_ms": 11.92,
+      "peak_rss_bytes": 8519680,
       "repetition": 1
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 7.991167000000001,
+      "elapsed_ms": 6.812208999999999,
       "phase": "pull-delta",
       "result": {
         "batches": 1,
@@ -1299,13 +1299,13 @@
         }
       },
       "size": 12800,
-      "process_ms": 13.647,
-      "peak_rss_bytes": 8798208,
+      "process_ms": 11.429,
+      "peak_rss_bytes": 9076736,
       "repetition": 1
     },
     {
       "database_growth": 189878272,
-      "elapsed_ms": 13481.015125,
+      "elapsed_ms": 12202.767375000001,
       "phase": "first",
       "result": {
         "head": "1:1:034452deca130f2d19177bf80e389f861652182e98f996b2f4204fde56d66f2b",
@@ -1321,13 +1321,13 @@
         "payload_bytes": 1755290
       },
       "size": 12800,
-      "process_ms": 13497.18,
-      "peak_rss_bytes": 9469952,
+      "process_ms": 12207.858,
+      "peak_rss_bytes": 9601024,
       "repetition": 2
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 16780.233583,
+      "elapsed_ms": 16962.774083,
       "phase": "pull-first",
       "result": {
         "batches": 200,
@@ -1354,13 +1354,13 @@
         }
       },
       "size": 12800,
-      "process_ms": 16785.326,
-      "peak_rss_bytes": 12189696,
+      "process_ms": 16967.266,
+      "peak_rss_bytes": 12222464,
       "repetition": 2
     },
     {
       "database_growth": 53248,
-      "elapsed_ms": 7.406542,
+      "elapsed_ms": 7.492,
       "phase": "delta",
       "result": {
         "admit": {
@@ -1398,13 +1398,13 @@
         }
       },
       "size": 12800,
-      "process_ms": 12.705,
-      "peak_rss_bytes": 8290304,
+      "process_ms": 11.922,
+      "peak_rss_bytes": 8404992,
       "repetition": 2
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 6.8292090000000005,
+      "elapsed_ms": 7.208709,
       "phase": "pull-delta",
       "result": {
         "batches": 1,
@@ -1431,13 +1431,13 @@
         }
       },
       "size": 12800,
-      "process_ms": 11.444,
-      "peak_rss_bytes": 8896512,
+      "process_ms": 11.412,
+      "peak_rss_bytes": 9093120,
       "repetition": 2
     },
     {
       "database_growth": 189878272,
-      "elapsed_ms": 15169.949666999999,
+      "elapsed_ms": 12338.063541,
       "phase": "first",
       "result": {
         "head": "1:1:034452deca130f2d19177bf80e389f861652182e98f996b2f4204fde56d66f2b",
@@ -1453,13 +1453,13 @@
         "payload_bytes": 1755290
       },
       "size": 12800,
-      "process_ms": 15183.084,
-      "peak_rss_bytes": 9469952,
+      "process_ms": 12343.297,
+      "peak_rss_bytes": 9715712,
       "repetition": 3
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 18020.776250000003,
+      "elapsed_ms": 16772.167416999997,
       "phase": "pull-first",
       "result": {
         "batches": 200,
@@ -1486,13 +1486,13 @@
         }
       },
       "size": 12800,
-      "process_ms": 18027.066,
-      "peak_rss_bytes": 12402688,
+      "process_ms": 16776.606,
+      "peak_rss_bytes": 12451840,
       "repetition": 3
     },
     {
       "database_growth": 53248,
-      "elapsed_ms": 7.412375,
+      "elapsed_ms": 7.352416,
       "phase": "delta",
       "result": {
         "admit": {
@@ -1530,13 +1530,13 @@
         }
       },
       "size": 12800,
-      "process_ms": 12.015,
-      "peak_rss_bytes": 8388608,
+      "process_ms": 11.598,
+      "peak_rss_bytes": 8454144,
       "repetition": 3
     },
     {
       "database_growth": 0,
-      "elapsed_ms": 7.310167,
+      "elapsed_ms": 6.444833,
       "phase": "pull-delta",
       "result": {
         "batches": 1,
@@ -1563,8 +1563,8 @@
         }
       },
       "size": 12800,
-      "process_ms": 12.015,
-      "peak_rss_bytes": 8896512,
+      "process_ms": 10.484,
+      "peak_rss_bytes": 9093120,
       "repetition": 3
     }
   ]

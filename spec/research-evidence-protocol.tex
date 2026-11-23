@@ -749,14 +749,14 @@ Real canonical measurement records exercised the shipping admission and portable
 \toprule
 Records & Pages read & Created & Backing reads & Frame bytes & RSS, MiB & Time, ms\\
 \midrule
-128 & 18 & 10 & 36 & 1,008 & 5.77 & 8.07\\
-1,024 & 28 & 15 & 97 & 1,223 & 7.67 & 12.82\\
-12,800 & 37 & 21 & 128 & 1,438 & 7.94 & 12.71\\
+128 & 18 & 10 & 36 & 1,008 & 5.86 & 6.89\\
+1,024 & 28 & 15 & 97 & 1,223 & 7.73 & 9.20\\
+12,800 & 37 & 21 & 128 & 1,438 & 8.06 & 11.92\\
 \bottomrule
 \end{tabularx}
 \normalsize
 
-The 12,800-record first admission verified 1,755,290 payload bytes across 200 batches. The origin database grew by 189.88 MB. Median first admission and first pull took 14.97 and 18.03 seconds. The first transfer carried 13.11 MB including authenticated descriptors and ancestry proofs. An initial or post-withdrawal full seal may read every available member. Scientific evaluation may materialize the selected inventory. The table measures bounded laboratory admission and lookup.
+The 12,800-record first admission verified 1,755,290 payload bytes across 200 batches. The origin database grew by 189.88 MB. Median first admission and first pull took 12.21 and 16.78 seconds. The first transfer carried 13.11 MB including authenticated descriptors and ancestry proofs. An initial or post-withdrawal full seal may read every available member. Scientific evaluation may materialize the selected inventory. The table measures bounded laboratory admission and lookup.
 
 \topic{Parallelism and limits}
 Two local laboratory writers produced 24 mixed batches. A receiver limited to one batch per service step reopened 24 times, drained its backlog and accepted eight repeated notifications without retransmitting members. Separate controls exercised fork retention, grant withdrawal, failed partial admission, historical receipts and incomplete correction coverage. In a link-only model, 3 TiB requires about 44 minutes of payload transmission at 10 decimal Gbit/s before framing, hashing, storage and contention. This arithmetic and the local measurements do not establish physical terabyte throughput or a production multi-laboratory service rate. The archive wire contract, raw samples, frozen criteria and executable reproduction procedure accompany this edition under \texttt{spec/scale/}.
