@@ -1026,6 +1026,48 @@ fn text_queries_and_large_captures_use_later_passages() -> Result<()> {
 }
 
 #[test]
+fn withdrawing_a_large_text_chunk_discards_its_prepared_passages() -> Result<()> {
+    use naome_protocol::search::SearchInput;
+
+    let archive = Archive::memory()?;
+    let marker = b"retiredreading";
+    let offset = 140_000;
+    let mut bytes = vec![b' '; 320 * 1024];
+    bytes[offset..offset + marker.len()].copy_from_slice(marker);
+    let descriptor = archive.capture(
+        bytes.as_slice(),
+        "text/plain",
+        bytes.len(),
+        Id::blob(PUBLIC),
+        Format::B,
+    )?;
+    let snapshot = archive.snapshot("long reading", BTreeSet::new())?;
+    let preparation = archive.prepare_search(&snapshot, 8, None)?;
+    assert!(!preparation.index_complete);
+
+    let query = SearchInput::Text("retiredreading");
+    let options = SearchOptions::default();
+    let report = archive.search_prepared(&snapshot, query, options, None)?;
+    assert_eq!(report.hits.len(), 1);
+    assert_eq!(report.hits[0].id, descriptor);
+    assert_eq!(
+        report.hits[0].location,
+        SearchLocation::Payload {
+            start: offset,
+            end: offset + marker.len(),
+        }
+    );
+    let chunk = archive.read(&snapshot, descriptor, "read")?.inputs[0].target;
+    archive.withdraw(chunk)?;
+
+    let preparation = archive.prepare_search(&snapshot, 8, None)?;
+    assert!(preparation.limited_coverage);
+    let report = archive.search_prepared(&snapshot, query, options, None)?;
+    assert!(report.limited_coverage && report.hits.is_empty());
+    Ok(())
+}
+
+#[test]
 fn limited_semantic_results_survive_different_cache_histories() -> Result<()> {
     struct ExactSubject(String);
     impl Embedder for ExactSubject {

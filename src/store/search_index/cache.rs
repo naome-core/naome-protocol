@@ -1,6 +1,7 @@
 use super::{
     Archive, IndexedRecord, Passage, Snapshot,
     extract::{normalize, terms},
+    text::VerifiedTextChunk,
 };
 use crate::{profile::Document, wire::Id};
 use anyhow::{Context, Result, ensure};
@@ -108,8 +109,15 @@ impl Archive {
     }
 
     fn refresh_text(&self, snapshot: &Snapshot, head: &str, budget: usize) -> Result<()> {
+        let mut chunk = VerifiedTextChunk::default();
+        let mut chunk_revision = None;
         for _ in 0..budget {
             let revision = revision(&self.db)?;
+            // A source can be withdrawn between windows or before the publish transaction.
+            if chunk_revision != Some(revision) {
+                chunk = VerifiedTextChunk::default();
+                chunk_revision = Some(revision);
+            }
             let Some((entry, object, cursor, length)) = self
                 .db
                 .query_row(
@@ -136,6 +144,7 @@ impl Archive {
                 object.parse()?,
                 usize::try_from(cursor)?,
                 usize::try_from(length)?,
+                &mut chunk,
             );
             let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
             if self::revision(&tx)? != revision {
