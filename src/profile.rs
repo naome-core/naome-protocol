@@ -106,6 +106,14 @@ pub struct Link {
     #[serde(default)]
     pub qualifier: String,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DependencyRole {
+    Outcome,
+    Evidence,
+    Audit,
+    ReceiptContext,
+}
+
 impl Document {
     pub fn new(
         kind: Kind,
@@ -217,6 +225,28 @@ impl Document {
         ensure!(encoded == *r, "noncanonical research record");
         Ok(d)
     }
+    pub(crate) fn dependency_role(&self, link: &Link) -> DependencyRole {
+        match link.role.as_str() {
+            "reading" | "outcome" | "outcome-input" => DependencyRole::Outcome,
+            "correction" | "previous-result" | "previous-version" => DependencyRole::Audit,
+            "dependency" | "visible-notice" | "required-notice" | "previous-receipt"
+            | "mapping"
+                if self.kind == Kind::Assessment
+                    && self.fields.contains_key("original_transcript") =>
+            {
+                DependencyRole::ReceiptContext
+            }
+            _ => DependencyRole::Evidence,
+        }
+    }
+
+    pub(crate) fn outcome_inputs(&self) -> impl Iterator<Item = Id> + '_ {
+        self.inputs
+            .iter()
+            .filter(|link| self.dependency_role(link) == DependencyRole::Outcome)
+            .map(|link| link.target)
+    }
+
     pub fn roles<'a>(&'a self, role: &'a str) -> impl Iterator<Item = Id> + 'a {
         self.inputs
             .iter()

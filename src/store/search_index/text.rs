@@ -1,6 +1,6 @@
 use super::{
     Archive, Passage, SearchLocation, Snapshot,
-    extract::{PASSAGE_BYTES, ranges},
+    extract::{PASSAGE_BYTES, has_oversized_word, ranges},
 };
 use crate::{profile::Document, wire::Id};
 use anyhow::{Context, Result, ensure};
@@ -79,7 +79,7 @@ impl Archive {
         cursor: usize,
         length: usize,
         chunk: &mut VerifiedTextChunk,
-    ) -> Result<(Vec<Passage>, usize)> {
+    ) -> Result<(Vec<Passage>, usize, bool)> {
         let document = self.read(snapshot, object, "read")?;
         let end = (cursor + TEXT_WINDOW).min(length);
         let bytes = chunk.read_span(self, snapshot, &document, cursor..end)?;
@@ -90,23 +90,29 @@ impl Archive {
             }
             Err(error) => return Err(error.into()),
         };
-        let mut passages: Vec<_> = payload_passages(text, cursor).collect();
-        // Retain the last passage for the next window so phrases at the
-        // window boundary can be tokenized with their continuation.
+        // Carry the final portion into the next window. A word starting
+        // here can need more bytes than this read contains.
+        let cutoff = cursor
+            + if end < length {
+                text.len()
+                    .saturating_sub(crate::search::MAX_TEXT_QUERY_BYTES + PASSAGE_BYTES)
+            } else {
+                text.len()
+            };
         let mut next = cursor + text.len();
-        if end < length
-            && let Some(Passage {
-                location: SearchLocation::Payload { start, end },
-                ..
-            }) = passages.last()
-            && *start > cursor
-            && next - *end < PASSAGE_BYTES
-        {
-            next = *start;
-            passages.pop();
+        let mut passages = Vec::new();
+        for passage in payload_passages(text, cursor) {
+            let SearchLocation::Payload { start, .. } = passage.location else {
+                unreachable!("payload passages have payload locations");
+            };
+            if start >= cutoff {
+                next = start;
+                break;
+            }
+            passages.push(passage);
         }
         ensure!(next > cursor, "text index did not advance");
-        Ok((passages, next))
+        Ok((passages, next, has_oversized_word(text)))
     }
 }
 

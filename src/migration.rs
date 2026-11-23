@@ -57,19 +57,40 @@ impl Archive {
             }
             pending.insert(id, r);
         }
-        while !pending.is_empty() {
-            let ready: Vec<_> = pending
-                .iter()
-                .filter(|(_, r)| r.edges.iter().all(|e| !pending.contains_key(&e.target)))
-                .map(|(id, _)| *id)
-                .collect();
-            ensure!(!ready.is_empty(), "cyclic native migration");
-            for id in ready {
-                let r = pending.remove(&id).context("missing pending record")?;
-                let native = self.record(&rewrite(r, &pairs)?, target)?;
-                pairs.insert(id, native);
+        let mut remaining = BTreeMap::new();
+        let mut dependents = BTreeMap::<Id, Vec<Id>>::new();
+        let mut ready = BTreeSet::new();
+        for (&id, record) in &pending {
+            let mut count = 0;
+            for edge in &record.edges {
+                if pending.contains_key(&edge.target) {
+                    dependents.entry(edge.target).or_default().push(id);
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                ready.insert(id);
+            } else {
+                remaining.insert(id, count);
             }
         }
+        while let Some(id) = ready.pop_first() {
+            let record = pending.remove(&id).context("missing pending record")?;
+            let native = self.record(&rewrite(record, &pairs)?, target)?;
+            pairs.insert(id, native);
+            if let Some(children) = dependents.remove(&id) {
+                for child in children {
+                    let count = remaining
+                        .get_mut(&child)
+                        .context("missing dependency count")?;
+                    *count -= 1;
+                    if *count == 0 {
+                        ready.insert(child);
+                    }
+                }
+            }
+        }
+        ensure!(pending.is_empty(), "cyclic native migration");
         let source_manifest = manifest(self, s)?;
         let native = Snapshot {
             version: 1,

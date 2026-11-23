@@ -137,6 +137,12 @@ pub enum ArchiveCommand {
     Explain {
         head: Id,
         id: Id,
+        /// Return the unscanned records as a resumable range.
+        #[arg(long)]
+        compact: bool,
+        /// Resume the compact record scan at the same snapshot.
+        #[arg(long, requires = "compact")]
+        after: Option<Id>,
         #[arg(long, default_value_t = 1000)]
         budget: usize,
         #[arg(long, default_value_t = 32)]
@@ -182,6 +188,9 @@ pub enum ArchiveCommand {
     Impact {
         head: Id,
         notice: Id,
+        /// Report the unscanned range separately from unresolved dependency IDs.
+        #[arg(long)]
+        compact: bool,
         #[arg(long)]
         mapping: Vec<Id>,
         /// Check cross-archive identity or input correction authority under a recipient policy.
@@ -474,7 +483,17 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             budget,
             depth,
             purpose,
-        } => print(db.argument_graph(&db.head(head)?, id, &purpose, budget, depth)?),
+            compact,
+            after,
+        } => {
+            let snapshot = db.head(head)?;
+            let report = if compact {
+                db.argument_graph_page(&snapshot, id, &purpose, budget, depth, after)?
+            } else {
+                db.argument_graph(&snapshot, id, &purpose, budget, depth)?
+            };
+            print(report)
+        }
         ArchiveCommand::Assess { head, query } => {
             let s = db.head(head)?;
             let q = input(&query)?;
@@ -540,7 +559,15 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             mapping,
             policy,
             budget,
-        } => print(db.impact_with_policy(&db.head(head)?, notice, &mapping, budget, policy)?),
+            compact,
+        } => {
+            let snapshot = db.head(head)?;
+            if compact {
+                print(db.impact_compact(&snapshot, notice, &mapping, budget, policy)?)
+            } else {
+                print(db.impact_with_policy(&snapshot, notice, &mapping, budget, policy)?)
+            }
+        }
         ArchiveCommand::Adopt {
             head,
             request,

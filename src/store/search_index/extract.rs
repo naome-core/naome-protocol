@@ -4,7 +4,10 @@ use super::{
 };
 use crate::{
     profile::{Document, Kind, allows},
-    search::{MAX_MEDIA_BYTES, MediaSpan, SearchLocation, media_type, native_media, text_media},
+    search::{
+        MAX_MEDIA_BYTES, MAX_TEXT_QUERY_BYTES, MediaSpan, SearchLocation, media_type, native_media,
+        text_media,
+    },
     store::{Archive, Snapshot},
     wire::Id,
 };
@@ -59,18 +62,24 @@ pub(super) fn ranges(text: &str) -> impl Iterator<Item = Range<usize>> {
             {
                 width = boundary;
             } else {
-                // Compact data may have no whitespace between words. Look
-                // past the cut to find a word boundary before splitting.
-                let mut lookahead = (width + PASSAGE_BYTES).min(remaining.len());
+                // Look past the preferred cut to keep a searchable word intact.
+                let mut lookahead = (MAX_TEXT_QUERY_BYTES + PASSAGE_BYTES).min(remaining.len());
                 while !remaining.is_char_boundary(lookahead) {
                     lookahead -= 1;
                 }
-                width = remaining[..lookahead]
+                let mut boundaries = remaining[..lookahead]
                     .split_word_bound_indices()
+                    .skip(1)
                     .map(|(offset, _)| offset)
-                    .take_while(|&offset| offset <= width)
-                    .last()
-                    .filter(|&offset| offset > 0)
+                    .peekable();
+                let mut preceding = None;
+                while let Some(offset) = boundaries.next_if(|&offset| offset <= width) {
+                    preceding = Some(offset);
+                }
+                width = preceding
+                    .or_else(|| boundaries.next())
+                    .or_else(|| (lookahead == remaining.len()).then_some(lookahead))
+                    .filter(|&offset| offset <= MAX_TEXT_QUERY_BYTES)
                     .unwrap_or(width);
             }
         }
@@ -79,6 +88,11 @@ pub(super) fn ranges(text: &str) -> impl Iterator<Item = Range<usize>> {
         start += width;
         Some(range)
     })
+}
+
+pub(super) fn has_oversized_word(text: &str) -> bool {
+    text.unicode_words()
+        .any(|word| word.len() > MAX_TEXT_QUERY_BYTES)
 }
 
 fn add_field(
@@ -231,7 +245,10 @@ impl Archive {
             let media = &document.subject;
             if text_media(media) {
                 match self.search_text(snapshot, &document, &mut dependencies) {
-                    Ok(section) => sections.push(section),
+                    Ok((section, incomplete)) => {
+                        sections.push(section);
+                        limited |= incomplete;
+                    }
                     Err(_) => {
                         limited = true;
                         cacheable = false;
@@ -276,27 +293,32 @@ impl Archive {
         snapshot: &Snapshot,
         document: &Document,
         dependencies: &mut Dependencies,
-    ) -> Result<IndexedSection> {
+    ) -> Result<(IndexedSection, bool)> {
         let length: u64 = document.field("length")?;
         let mut resolve = |id| self.search_source(snapshot, id, dependencies);
-        let (passages, pending_text) = if length <= MAX_PAYLOAD {
+        let (passages, pending_text, limited) = if length <= MAX_PAYLOAD {
             let mut bytes = Vec::new();
             document.materialize(MAX_PAYLOAD, &mut bytes, &mut resolve)?;
+            let text = std::str::from_utf8(&bytes)?;
             (
-                payload_passages(std::str::from_utf8(&bytes)?, 0).collect(),
+                payload_passages(text, 0).collect(),
                 None,
+                has_oversized_word(text),
             )
         } else {
             let mut utf8 = Utf8Check::default();
             document.materialize(MAX_TEXT_BYTES, &mut utf8, &mut resolve)?;
             utf8.finish()?;
-            (Vec::new(), Some(length))
+            (Vec::new(), Some(length), false)
         };
-        Ok(IndexedSection {
-            sources: dependencies.available.clone(),
-            passages,
-            pending_text,
-        })
+        Ok((
+            IndexedSection {
+                sources: dependencies.available.clone(),
+                passages,
+                pending_text,
+            },
+            limited,
+        ))
     }
 
     fn media_dependencies(

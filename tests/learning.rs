@@ -428,6 +428,101 @@ fn training_rejects_duplicate_targets_false_origins_and_superseded_labels() -> R
     Ok(())
 }
 
+fn check_outcome_cutoff(format: Format, early: bool, use_raw: bool) -> Result<()> {
+    let archive = Archive::memory()?;
+    let data = fixture::seed(&archive, format)?;
+    let old = archive.head(data.s0)?;
+    let mut q = data.queries[2].clone();
+    let mut argument = archive.read(&old, q.arguments[0], "read")?;
+    let plan = argument.one("plan")?;
+    let existing_outcome = argument.roles("reading").next().unwrap();
+    let mut outcome = archive.read(&old, existing_outcome, "read")?;
+    let exact_observation =
+        archive.blob(&serde_json::to_vec(&outcome.fields)?, Id::blob(PUBLIC))?;
+    let baseline = archive.blob(b"shared pre-outcome baseline", Id::blob(PUBLIC))?;
+    let mut before = archive.head(data.feature_cutoff)?;
+    before.objects.insert(baseline);
+    before.source = "synthetic prospective cutoff".into();
+    if early {
+        before.objects.insert(exact_observation);
+    }
+    let cutoff = archive.blob(&serde_json::to_vec(&before)?, Id::blob(PUBLIC))?;
+    outcome
+        .inputs
+        .push(link("outcome-input", exact_observation));
+    outcome.inputs.push(link("baseline", baseline));
+    let outcome_id = archive.document(&outcome, format, Id::blob(PUBLIC))?;
+    let mut release = archive.read(&old, argument.one("release")?, "read")?;
+    release.inputs.retain(|e| e.role != "feature-cutoff");
+    release.inputs.push(link("feature-cutoff", cutoff));
+    release
+        .fields
+        .insert("source".into(), json!("synthetic prospective review"));
+    let witness = archive.document(&release, format, Id::blob(PUBLIC))?;
+    fixture::sign(&archive, format, witness, &release.scope, "release", 6)?;
+    for edge in &mut argument.inputs {
+        if edge.role == "release" {
+            edge.target = witness;
+        }
+        if edge.role == "reading" && edge.target == existing_outcome {
+            edge.target = outcome_id;
+        }
+    }
+    let revised = archive.document(&argument, format, Id::blob(PUBLIC))?;
+    fixture::sign(&archive, format, revised, &release.scope, "data-origin", 7)?;
+    q.arguments = vec![revised];
+    let horizon = archive.snapshot("assessment", [data.s0].into())?;
+    let receipt = evaluation::assess(&archive, &horizon, &q)?;
+    assert_eq!(receipt.result, Some(Standing::Supported));
+    let receipt_id = evaluation::deposit_receipt(&archive, &horizon, &q, &receipt, format)?;
+    let receipts = archive.snapshot("receipts", [horizon.id()?].into())?;
+    let label = archive.label(&receipts, receipt_id, "synthetic", None, None, format)?;
+    let labeled = archive.snapshot("labeled", [receipts.id()?].into())?;
+    let result = archive.training_manifest(
+        &TrainingRequest {
+            feature_cutoff: cutoff,
+            label_head: labeled.id()?,
+            policy: data.policy,
+            standing: Default::default(),
+            forecast_plan: Some(plan),
+            mappings: vec![],
+            project: None,
+            independent_roles: Default::default(),
+            binary: true,
+            examples: vec![Example {
+                features: vec![if use_raw { exact_observation } else { baseline }],
+                label,
+                partition: "test".into(),
+            }],
+        },
+        format,
+    )?;
+    if use_raw {
+        assert!(result.included.is_empty());
+        assert_eq!(
+            result.withheld[&label],
+            if early {
+                "outcome evidence visible at the feature cutoff"
+            } else {
+                "unavailable, late, or prohibited training input"
+            }
+        );
+    } else {
+        assert_eq!(result.included, [label]);
+    }
+    Ok(())
+}
+
+#[test]
+fn forecasts_check_declared_outcome_lineage_and_accept_shared_baselines() -> Result<()> {
+    for format in [Format::A, Format::B] {
+        check_outcome_cutoff(format, false, false)?;
+        check_outcome_cutoff(format, false, true)?;
+        check_outcome_cutoff(format, true, true)?;
+    }
+    Ok(())
+}
+
 #[test]
 fn prospective_training_requires_an_admitted_witness_and_concealed_outcomes() -> Result<()> {
     let f = Format::A;

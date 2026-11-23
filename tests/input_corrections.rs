@@ -545,5 +545,22 @@ fn unrelated_payloads_do_not_spend_the_notice_and_impact_record_budget() -> Resu
     assert!(!limited.horizon_complete);
     assert_eq!(limited.frontier.len(), 1);
     assert!(limited.frontier.iter().all(|id| id.format().is_some()));
+    let next = *limited.frontier.first().unwrap();
+    let compact = archive.impact_compact(&larger, notice, &[], query.budget, Some(query.policy))?;
+    assert_eq!(compact["snapshot"], json!(larger.id()?));
+    assert_eq!(compact["unscanned"]["next"], json!(next));
+    assert!(compact.get("outside_scope").is_none());
+    assert!(compact.get("correction_authority").is_none());
+
+    let page =
+        archive.argument_graph_page(&larger, query.target, "read", query.budget, 48, None)?;
+    assert_eq!(page["unsearched"], json!([]));
+    assert_eq!(page["unscanned"]["next"], json!(next));
+    let after = serde_json::from_value(page["unscanned"]["after"].clone())?;
+    let rest = archive.argument_graph_page(&larger, query.target, "read", 1, 48, Some(after))?;
+    assert_eq!(rest["unsearched"], json!([]));
+    assert!(rest["unscanned"].is_null());
+    let graph = archive.argument_graph(&larger, query.target, "read", query.budget, 48)?;
+    assert_eq!(graph["unsearched"], json!([next]));
     Ok(())
 }

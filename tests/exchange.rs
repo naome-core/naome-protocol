@@ -351,3 +351,36 @@ fn streaming_exchange_preserves_identity_omissions_and_atomic_import() -> Result
     assert_eq!(recipient.import_stream(stream.as_slice())?, head);
     Ok(())
 }
+
+#[test]
+fn native_migration_rewrites_chains_with_repeated_dependencies() -> Result<()> {
+    for (format, target) in [(Format::A, Format::B), (Format::B, Format::A)] {
+        let archive = Archive::memory()?;
+        let mut chain = Vec::new();
+        for index in 0..64 {
+            let inputs = chain.last().map_or_else(Vec::new, |&parent| {
+                vec![link("source", parent), link("input", parent)]
+            });
+            let step = Document::new(
+                Kind::Derivation,
+                "trace",
+                "review",
+                json!({"step":index}),
+                inputs,
+            )?;
+            chain.push(archive.document(&step, format, Id::blob(PUBLIC))?);
+        }
+        let snapshot = archive.snapshot("chain", Default::default())?;
+        let migration = archive.migrate(&snapshot, target, "review")?;
+        assert_eq!(migration.pairs.len(), chain.len());
+        let exchange = archive.head(migration.exchange_head)?;
+        assert_eq!(
+            archive.verify_mapping(&exchange, migration.mapping)?,
+            migration.pairs
+        );
+        let newest = archive.read(&exchange, migration.pairs[&chain[63]], "read")?;
+        assert_eq!(newest.one("source")?, migration.pairs[&chain[62]]);
+        assert_eq!(newest.one("input")?, migration.pairs[&chain[62]]);
+    }
+    Ok(())
+}

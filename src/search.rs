@@ -51,6 +51,7 @@ pub enum EmbeddingInput {
 
 /// Maximum encoded media size per archive descriptor or query file.
 pub const MAX_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const MAX_TEXT_QUERY_BYTES: usize = 4096;
 
 #[derive(Clone, Copy)]
 pub enum SearchInput<'a> {
