@@ -9,6 +9,29 @@ use serde_json::json;
 use std::collections::BTreeSet;
 
 #[test]
+fn textual_identifiers_accept_only_the_canonical_representation() -> Result<()> {
+    let digest = "ab".repeat(32);
+    for prefix in ["1:0", "1:1", "2:0"] {
+        let canonical = format!("{prefix}:{digest}");
+        let id: Id = canonical.parse()?;
+        assert_eq!(id.to_string(), canonical);
+        assert_eq!(serde_json::to_value(id)?, json!(canonical));
+    }
+    for invalid in [
+        format!("01:0:{digest}"),
+        format!("+1:0:{digest}"),
+        format!("1:00:{digest}"),
+        format!("2:1:{digest}"),
+        format!("1:0:{}", digest.to_ascii_uppercase()),
+        format!("1:0:{digest}:"),
+        format!("1:0:{}", &digest[..62]),
+    ] {
+        assert!(invalid.parse::<Id>().is_err(), "{invalid}");
+    }
+    Ok(())
+}
+
+#[test]
 fn published_offline_exchange_matches_native_export_and_import() -> Result<()> {
     let example = Bundle::read(&include_bytes!("../spec/examples/exchange-v1.json")[..])?;
     let source = Archive::memory()?;
