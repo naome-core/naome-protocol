@@ -51,7 +51,12 @@ fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
     );
     let replay =
         serde_json::from_value::<BTreeSet<String>>(capabilities["replay_evaluators"].clone())?;
+    assert_eq!(
+        capabilities["input_correction_evaluator"],
+        "rep-rust-rules-3"
+    );
     let expected = [
+        "rep-rust-rules-3",
         "rep-rust-rules-2",
         "rep-rust-rules-1",
         "rep-rust-0.1.2",

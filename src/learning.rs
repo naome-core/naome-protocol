@@ -3,6 +3,10 @@ use crate::{
         Assessment, EvidenceView, ReadInventory, assess_with_inventory,
         calibration_identity::CalibrationIdentities,
         correction::{MeasurementUse, Notice, WithdrawalRules},
+        dependency_correction::{
+            CorrectionImpact, CorrectionKeys, DependencyCorrection, admitted_corrections,
+            correction_keys, correction_signature,
+        },
         query_evaluator,
     },
     migration::Equivalence,
@@ -141,6 +145,7 @@ struct ValidatedExample {
 
 struct TrainingTrust {
     keys: BTreeMap<String, BTreeSet<String>>,
+    correction_keys: CorrectionKeys,
     inventory: ReadInventory,
 }
 
@@ -153,6 +158,7 @@ impl TrainingTrust {
         );
         Ok(Self {
             keys: policy.field("keys")?,
+            correction_keys: correction_keys(&policy)?,
             inventory: ReadInventory::load(store, head, retain_for_replay)?,
         })
     }
@@ -447,9 +453,30 @@ impl TrainingReview<'_> {
                         == canonical_set(aliases, &replay.applicable_notices),
                 "label requires reassessment at the requested notice horizon"
             );
+            let evidence = EvidenceView {
+                store,
+                snapshot: after,
+                inventory: &trust.inventory,
+                aliases,
+            };
+            for admitted in admitted_corrections(&evidence, &trust.correction_keys)? {
+                ensure!(
+                    admitted
+                        .correction
+                        .exposure(&evidence, &ex.features, &features.visited)?
+                        == CorrectionImpact::Outside
+                        && admitted
+                            .correction
+                            .exposure(&evidence, &[ex.label], &label.visited)?
+                            == CorrectionImpact::Outside,
+                    "an admitted input correction requires reassessment of a training dependency"
+                );
+            }
             for &id in &trust.inventory.notices {
                 let notice = &trust.inventory.documents[&id];
-                if current.applicable_notices.contains(&id) {
+                if current.applicable_notices.contains(&id)
+                    || DependencyCorrection::is_correction(notice)
+                {
                     continue;
                 }
                 // A warrant's exclusion applies to the label's use. An
@@ -690,12 +717,17 @@ impl Archive {
             eq.add(self.verify_mapping(s, m)?);
         }
         let correction_notice = Notice(&n);
+        let input_correction = DependencyCorrection::is_correction(&n)
+            .then(|| DependencyCorrection::parse(&n, self, s, &eq))
+            .transpose()?;
         let calibration = n.roles("calibration").next().is_some();
         let (initial, correction) = if calibration {
             (
                 eq.endpoints(n.one("calibration")?),
                 Some(correction_notice.calibration_limits()?),
             )
+        } else if input_correction.is_some() {
+            (BTreeSet::new(), None)
         } else {
             let targets = correction_notice.target_endpoints(&eq);
             ensure!(!targets.is_empty(), "missing notice target");
@@ -712,6 +744,7 @@ impl Archive {
         }
         let docs = &inventory.documents;
         let mut foreign_uses = BTreeSet::new();
+        let mut correction_authority = None;
         if let Some(policy_id) = policy
             && frontier.is_empty()
         {
@@ -726,9 +759,34 @@ impl Archive {
                 inventory: &inventory,
                 aliases: &eq,
             };
-            let identities = CalibrationIdentities::admit(&evidence, &policy, budget)?;
-            foreign_uses =
-                identities.affected_uses(&evidence, notice, &n, budget, &mut frontier)?;
+            if input_correction.is_some() {
+                correction_authority =
+                    correction_signature(&evidence, &correction_keys(&policy)?, notice, &n);
+            } else {
+                let identities = CalibrationIdentities::admit(&evidence, &policy, budget)?;
+                foreign_uses =
+                    identities.affected_uses(&evidence, notice, &n, budget, &mut frontier)?;
+            }
+        }
+        if let Some(correction) = input_correction {
+            let impacts = correction.downstream(self, s, &inventory, &mut frontier);
+            let matching = |status| {
+                impacts
+                    .iter()
+                    .filter_map(move |(id, &impact)| (impact == status).then_some(id))
+            };
+            return Ok(Impact {
+                notice,
+                by_kind: group_impact(docs, matching(CorrectionImpact::Affected))?,
+                needs_reassessment: group_impact(docs, matching(CorrectionImpact::Open))?,
+                outside_scope: if frontier.is_empty() {
+                    group_impact(docs, matching(CorrectionImpact::Outside))?
+                } else {
+                    BTreeMap::new()
+                },
+                correction_authority,
+                frontier,
+            });
         }
         let argument_excluded = |argument: &Document| {
             argument.kind == Kind::Argument
@@ -833,30 +891,50 @@ impl Archive {
                 }
             }
         }
-        let mut by_kind: BTreeMap<String, BTreeSet<Id>> = BTreeMap::new();
-        for id in affected.difference(&initial).chain(&direct) {
-            if let Some(d) = docs.get(id) {
-                by_kind
-                    .entry(
-                        serde_json::to_value(d.kind)?
-                            .as_str()
-                            .context("kind")?
-                            .into(),
-                    )
-                    .or_default()
-                    .insert(*id);
-            }
-        }
         Ok(Impact {
             notice,
-            by_kind,
+            by_kind: group_impact(docs, affected.difference(&initial).chain(&direct))?,
+            needs_reassessment: BTreeMap::new(),
+            outside_scope: BTreeMap::new(),
+            correction_authority: None,
             frontier,
         })
     }
 }
+
+fn group_impact<'a>(
+    docs: &BTreeMap<Id, Document>,
+    records: impl Iterator<Item = &'a Id>,
+) -> Result<BTreeMap<String, BTreeSet<Id>>> {
+    let mut groups: BTreeMap<String, BTreeSet<Id>> = BTreeMap::new();
+    for id in records {
+        if let Some(d) = docs.get(id) {
+            groups
+                .entry(
+                    serde_json::to_value(d.kind)?
+                        .as_str()
+                        .context("kind")?
+                        .into(),
+                )
+                .or_default()
+                .insert(*id);
+        }
+    }
+    Ok(groups)
+}
+
 #[derive(Serialize)]
 pub struct Impact {
     pub notice: Id,
     pub by_kind: BTreeMap<String, BTreeSet<Id>>,
+    /// Possible uses whose declared input coverage cannot exclude the change.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub needs_reassessment: BTreeMap<String, BTreeSet<Id>>,
+    /// Recorded uses with disjoint selectors and a complete search frontier.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub outside_scope: BTreeMap<String, BTreeSet<Id>>,
+    /// Admitted signer for an input correction. Without it the impact trace is advisory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correction_authority: Option<Id>,
     pub frontier: BTreeSet<Id>,
 }

@@ -183,7 +183,7 @@ pub enum ArchiveCommand {
         notice: Id,
         #[arg(long)]
         mapping: Vec<Id>,
-        /// Admit direct cross-archive identity assertions under this recipient policy.
+        /// Check cross-archive identity or input correction authority under a recipient policy.
         #[arg(long)]
         policy: Option<Id>,
         #[arg(long, default_value_t = 10000)]
@@ -310,6 +310,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 "public": public,
                 "receipt_evaluator": evaluation::EVALUATOR_ID,
                 "calibration_identity_evaluator": evaluation::CALIBRATION_IDENTITY_EVALUATOR_ID,
+                "input_correction_evaluator": evaluation::INPUT_CORRECTION_EVALUATOR_ID,
                 "replay_evaluators": evaluation::replay_evaluator_ids().collect::<Vec<_>>(),
                 "evaluators": ["simultaneous-bounds","certified-hull","signed-tests","typed-outcome","delegated","recorded-difference","least-zero","domain-inclusion","source-independence","sample-description","survey-identification","unit-grid-map"],
             }));

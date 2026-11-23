@@ -80,6 +80,27 @@ A reverse-dependency search identifies possible downstream uses for review. Reas
 \topic{How far the guarantee reaches}
 The account of what survives is only as complete as the recorded dependencies and the search for applicable corrections. A hidden common calibration can make two apparently separate arguments depend on the same premise. If a required source or correction cannot be checked, the evaluator records the outstanding obligation. A recipient requiring a current judgement leaves it unresolved until the necessary evidence is available.
 
+\partpage{Correcting a versioned input}\label{sec:inputcorrections}
+An assessment binds the immutable version of each input it used. Its argument or a recorded premise identifies the portion used when known. The selector describes actual use in that version, including any normalisation convention needed to locate it. A whole-dataset citation without a selector records the source but leaves its use unresolved.
+
+An input correction binds the original source version, evidence for the correction and its declared coverage. The recipient checks that the signer has the correction role for that version and scope under its chosen policy. It traces an unadmitted notice as a candidate when asked and leaves the standing of existing uses unchanged by that notice.
+
+\topic{Applicability and downstream review}
+An applicable profile is a pinned, versioned rule for interpreting the input and correction selectors. The profile compares selectors only when their coordinates can be interpreted on the same basis. The common evaluator records one of three outcomes.
+
+\begin{itemize}
+\item \textbf{Affected.} The correction overlaps a recorded use.
+\item \textbf{Outside.} The recorded use and correction have demonstrably disjoint coverage.
+\item \textbf{Open.} The use is coarse, supporting evidence is unavailable, or the coverage rule cannot be evaluated.
+\end{itemize}
+
+Follow recorded dependencies to arguments, assessments and derived uses. An affected path requires review. An open path also requires review unless a separate analysis can resolve it. An incomplete dependency or notice search leaves a frontier. The current assessment evaluates surviving arguments and records its outstanding review obligations. A historical assessment replays at its original snapshot with its original evaluator and policy. Recompute the affected result with the appropriate domain tool. Deposit a new assessment binding the revised source version, its used portion, the correction and the method. References to earlier results and notices preserve the audit trail.
+
+\topic{Two reference profiles}
+The \texttt{table-rows-1} profile uses sorted, non-overlapping half-open ranges of zero-based data rows in the named version and, optionally, named columns. An omitted column list denotes all columns in those rows. A revision of one Medicare service-count cell is a tabular example. The control uses rows that exclude that cell. The \texttt{instrument-time-1} profile uses a half-open interval of signed integer ticks, a named clock basis and an instrument mode. A different mode or a disjoint interval on a common clock can establish exclusion. Incomparable clocks leave applicability open.
+
+The reference evaluator reads a \texttt{source-input} link whose target is the original version and whose qualifier encodes the named profile and selector. A notice with action \texttt{correct-input} links to the same version and its evidence, and encodes its selector in the coverage field. The policy pins authorised keys by scope and version. The evaluator uses these records for dependency review. The linked domain procedure supplies the revised calculation.
+
 \partpage{Documenting an investigation as it runs}\label{sec:attempt}
 The unit of documentation is an investigation attempt. Several agents may propose plans for the same question. The agent choosing a plan records its objective, selection criterion, rationale, cost ceiling, authorisation and stopping conditions. The planner, executor and evaluator each contribute the part of the record they can observe. Their references connect those contributions across the following stages.
 
@@ -248,7 +269,7 @@ Deposit / reconcile & Submit an immutable record, payload or signed notice. Repe
 \topic{Retrieval and change}
 Indexes may use identifiers, units, spatial or temporal bounds, graph patterns, formal subsumption and learned similarity. A retrieved candidate becomes evidence only through an explicit argument. An empty search establishes absence within a bounded collection only if its completeness and exhaustive application of the matching rule are warranted. Approximate search must report its method. Responses bind the exact record set or manifest, index configuration and known notice heads. A consumer requiring current status names its notice authorities and the maximum permitted age of their evidence. If it cannot check a required authority, freshness is unknown. It can still report the result for the available snapshot. A query that requires freshness for the entire result remains unresolved until that requirement is met.
 
-A correction or withdrawal names its target, scope and reason. Follow reverse dependencies to identify affected arguments, then reassess their claims using all arguments in the query, including surviving alternatives (Section~\ref{sec:guarantee}). A later investigator can replay the earlier judgement at its snapshot and use the revised assessment in a new decision. A conflict that survives reassessment can motivate a new observation (Appendix~\ref{app:planning}).
+A correction or withdrawal names its target, scope and reason. Follow reverse dependencies to identify affected or open uses, then reassess their claims using surviving and revised arguments (Sections~\ref{sec:guarantee} and~\ref{sec:inputcorrections}). A later investigator can replay the earlier judgement at its snapshot and use the revised assessment in a new decision. A conflict that survives reassessment can motivate a new observation (Appendix~\ref{app:planning}).
 
 \topic{Scale and fidelity}
 Index descriptors and retrieve payloads on demand. Summaries bind source manifests, omissions and supported queries. Replay criteria specify bit identity, numerical tolerance or a distributional test with predefined sampling and error criteria.
