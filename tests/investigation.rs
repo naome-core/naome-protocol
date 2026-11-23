@@ -363,3 +363,56 @@ fn planner_keeps_infeasible_and_uninformative_alternatives() -> Result<()> {
     assert_eq!(d.roles("proposal").count(), 3);
     Ok(())
 }
+
+#[test]
+fn planner_compares_large_gains_under_the_same_prior() -> Result<()> {
+    use naome_protocol::investigation::Selection;
+
+    let archive = Archive::memory()?;
+    let format = Format::A;
+    let mass = 1_000_000_000_000u64;
+    let loss = 10_000_000_000_000_000i64;
+    let losses = [[0, loss], [loss, 0]];
+    let question = put(
+        &archive,
+        format,
+        Kind::Question,
+        "choice",
+        "test",
+        json!({"losses":losses,"prior_masses":[mass,mass]}),
+        vec![],
+    )?;
+    let plan = |cost| {
+        put(
+            &archive,
+            format,
+            Kind::Plan,
+            "choice",
+            "test",
+            json!({"action_type":"observation","objective":"loss","costs":{"samples":1},
+               "observation_model":{"losses":losses,"joint_masses":[[mass,0],[0,mass]],
+               "loss_unit":"points","acquisition_cost":cost}}),
+            vec![link("question", question)],
+        )
+    };
+    let lower = plan(1)?;
+    let higher = plan(0)?;
+    let snapshot = archive.snapshot("options", Default::default())?;
+    let result = archive.select(
+        &snapshot,
+        &Selection {
+            question,
+            proposals: [lower, higher].into(),
+            ceilings: [("samples".into(), 1)].into(),
+            objective: "loss".into(),
+            loss_unit: "points".into(),
+        },
+        format,
+    )?;
+    let after = archive.snapshot("choice", [snapshot.id()?].into())?;
+    assert_eq!(
+        archive.read(&after, result, "read")?.one("selected")?,
+        higher
+    );
+    Ok(())
+}

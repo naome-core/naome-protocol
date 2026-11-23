@@ -68,22 +68,11 @@ impl DependencyCorrection {
     }
 
     fn dependency_edge(document: &Document, edge: &Link) -> bool {
-        // These roles preserve audit history. They do not supply a premise for the revision.
-        let audit_link = matches!(
-            edge.role.as_str(),
-            "correction" | "previous-result" | "previous-version"
-        );
-        let receipt_metadata = document.kind == Kind::Assessment
-            && document.fields.contains_key("original_transcript")
+        document.kind != Kind::Notice
             && matches!(
-                edge.role.as_str(),
-                "dependency"
-                    | "visible-notice"
-                    | "required-notice"
-                    | "previous-receipt"
-                    | "mapping"
-            );
-        document.kind != Kind::Notice && !audit_link && !receipt_metadata
+                document.dependency_role(edge),
+                crate::profile::DependencyRole::Evidence | crate::profile::DependencyRole::Outcome
+            )
     }
 
     fn edge_impact(&self, edge: &Link) -> Option<CorrectionImpact> {

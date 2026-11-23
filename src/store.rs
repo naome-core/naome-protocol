@@ -36,10 +36,26 @@ impl Snapshot {
     }
 
     pub(crate) fn records(&self) -> impl Iterator<Item = Id> + '_ {
-        self.objects
-            .iter()
+        self.records_after(None)
+    }
+
+    pub(crate) fn records_after(&self, after: Option<Id>) -> impl Iterator<Item = Id> + '_ {
+        // The blob range sits between the two record formats in identifier order.
+        let first_blob = Id::from_blob_digest([0; 32]);
+        let last_blob = Id::from_blob_digest([u8::MAX; 32]);
+        let before_blobs = after.is_none_or(|id| id < first_blob).then(|| {
+            self.objects
+                .range((after.map_or(Unbounded, Excluded), Excluded(first_blob)))
+        });
+        let after_blobs = self.objects.range((
+            Excluded(after.map_or(last_blob, |id| id.max(last_blob))),
+            Unbounded,
+        ));
+        before_blobs
+            .into_iter()
+            .flatten()
+            .chain(after_blobs)
             .copied()
-            .filter(|id| id.format().is_some())
     }
 }
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -232,9 +248,9 @@ impl Archive {
         );
         Ok(())
     }
-    pub(crate) fn may_be_notice(&self, s: &Snapshot, id: Id) -> bool {
+    pub(crate) fn may_be_notice(&self, s: &Snapshot, id: Id, purpose: &str) -> bool {
         id.format().is_some_and(|format| {
-            self.resolve(s, id, "read")
+            self.resolve(s, id, purpose)
                 .ok()
                 .and_then(|bytes| Record::decode(&bytes, format).ok())
                 .is_none_or(|record| {
@@ -459,53 +475,6 @@ impl Archive {
             }
         }
         result
-    }
-    /// Include arguments citing the target and candidate defeaters in the declared inventory.
-    pub fn argument_graph(
-        &self,
-        s: &Snapshot,
-        id: Id,
-        purpose: &str,
-        budget: usize,
-        depth: usize,
-    ) -> Result<serde_json::Value> {
-        let mut arguments = vec![];
-        let mut notices = BTreeMap::new();
-        let mut unsearched = BTreeSet::new();
-        for (n, object) in s.records().enumerate() {
-            if n >= budget {
-                unsearched.insert(object);
-                continue;
-            }
-            let Ok(d) = self.read(s, object, purpose) else {
-                unsearched.insert(object);
-                continue;
-            };
-            if d.kind == Kind::Argument && d.roles("claim").any(|c| c == id) {
-                arguments.push(object);
-            }
-            if d.kind == Kind::Notice {
-                notices.insert(object, d.inputs);
-            }
-        }
-        let mut roots = arguments.clone();
-        roots.push(id);
-        let graph = self.explain(s, &roots, purpose, budget, depth);
-        let contrary: Vec<_> = notices
-            .iter()
-            .filter(|(_, edges)| edges.iter().any(|e| graph.visited.contains(&e.target)))
-            .map(|(notice, _)| notice)
-            .collect();
-        Ok(serde_json::json!({
-            "snapshot": s.id()?,
-            "source": s.source,
-            "target": id,
-            "arguments": arguments,
-            "dependencies": graph,
-            "candidate_notices": contrary,
-            "unsearched": unsearched,
-            "budget_per_phase": budget,
-        }))
     }
     #[allow(clippy::too_many_arguments)]
     pub fn discover(

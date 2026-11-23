@@ -213,7 +213,7 @@ impl Archive {
             SearchInput::Text(query) => {
                 let query = query.trim();
                 ensure!(
-                    !query.is_empty() && query.len() <= 4096,
+                    !query.is_empty() && query.len() <= crate::search::MAX_TEXT_QUERY_BYTES,
                     "expected a search query of 1 to 4096 bytes"
                 );
                 (vec![query], None, false)

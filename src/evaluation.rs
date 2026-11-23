@@ -1,6 +1,7 @@
 pub(crate) mod calibration_identity;
 pub(crate) mod correction;
 pub(crate) mod dependency_correction;
+mod impact;
 mod inventory;
 mod measurement;
 mod science;
@@ -11,6 +12,7 @@ use correction::{
 use dependency_correction::{
     CorrectionImpact, DependencyCorrection, admitted_corrections, correction_keys,
 };
+pub use impact::Impact;
 pub(crate) use inventory::{EvidenceView, ReadInventory};
 use measurement::Predicate;
 

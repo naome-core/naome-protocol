@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::ops::Bound::{Excluded, Unbounded};
 
-pub(super) const INDEX_VERSION: u32 = 4;
+pub(super) const INDEX_VERSION: u32 = 5;
 const BATCH: usize = 16;
 const TEXT_BATCH: usize = 4;
 const ADD_MEDIA_PASSAGE_INDEX: &str = "CREATE INDEX IF NOT EXISTS rep_search_media_passages
@@ -44,8 +44,8 @@ impl Archive {
                 tx.execute_batch(include_str!("replace_v1.sql"))?;
                 tx.execute_batch(include_str!("schema.sql"))?;
             }
-            Some(2 | 3) => {
-                tx.execute_batch(include_str!("replace_v2_v3.sql"))?;
+            Some(2..=4) => {
+                tx.execute_batch(include_str!("replace_v2_to_v4.sql"))?;
                 tx.execute_batch(include_str!("schema.sql"))?;
             }
             None => tx.execute_batch(include_str!("schema.sql"))?,
@@ -160,7 +160,7 @@ impl Archive {
             if self::revision(&tx)? != revision {
                 break;
             }
-            let (passages, next) = indexed?;
+            let (passages, next, limited) = indexed?;
             let changed = tx.execute(
                 "UPDATE rep_search_text SET cursor=?2 WHERE entry=?1 AND cursor=?3
                    AND EXISTS(SELECT 1 FROM rep_search_visibility WHERE head=?4 AND entry=?1)",
@@ -168,6 +168,18 @@ impl Archive {
             )?;
             if changed != 0 {
                 write_passages(&tx, entry, &passages)?;
+                if limited {
+                    tx.execute(
+                        "UPDATE rep_search_entries SET coverage=1
+                         WHERE object=? AND section=0 AND coverage IS NOT NULL",
+                        [&object],
+                    )?;
+                    tx.execute(
+                        "INSERT OR IGNORE INTO rep_search_gaps(head,object)
+                         SELECT head,object FROM rep_search_visibility WHERE entry=?",
+                        [entry],
+                    )?;
+                }
             }
             tx.commit()?;
         }
@@ -178,7 +190,7 @@ impl Archive {
 pub(super) fn prepared_cache_available(db: &Connection) -> Result<bool> {
     match installed_version(db)? {
         Some(INDEX_VERSION) => Ok(true),
-        None | Some(1..=3) => Ok(false),
+        None | Some(1..=4) => Ok(false),
         Some(_) => anyhow::bail!("unsupported local search index version"),
     }
 }

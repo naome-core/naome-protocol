@@ -917,7 +917,7 @@ fn previous_caches_are_rebuilt_without_changing_the_archive() -> Result<()> {
             .map(serde_json::from_str)
             .collect::<serde_json::Result<_>>()?;
         assert_eq!(lines[0]["ok"]["index_complete"], true);
-        assert_eq!(lines[1]["ok"]["index_version"], 4);
+        assert_eq!(lines[1]["ok"]["index_version"], 5);
         assert_eq!(lines[1]["ok"]["hits"][0]["id"], V012_CLAIM);
 
         let archive = Archive::open(database)?;
@@ -1018,6 +1018,59 @@ fn fresh_index_finds_whole_words_across_passage_boundaries() -> Result<()> {
     };
     assert!(start <= marker && end >= marker + "spectralmarker".len());
     assert_eq!(hit.snippet.as_deref(), Some(&text[start..end]));
+    Ok(())
+}
+
+#[test]
+fn lexical_search_keeps_long_words_across_capture_and_index_windows() -> Result<()> {
+    let archive = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let token = format!("{}123", "longword".repeat(112));
+    let limit = "x".repeat(4096);
+
+    for start in [2047, 65_500] {
+        let text = format!(
+            "{}{token} {limit} {}",
+            " ".repeat(start),
+            " ".repeat(start * 4)
+        );
+        let expected = archive.capture(text.as_bytes(), "text/plain", 4096, public, Format::B)?;
+        let snapshot =
+            archive.selected_snapshot("long tokens", BTreeSet::new(), [expected].into())?;
+        for _ in 0..3 {
+            archive.prepare_search(&snapshot, 64, None)?;
+        }
+        for word in [&token, &limit] {
+            let report = archive.find(&snapshot, word, SearchOptions::default(), None)?;
+            assert!(report.index_complete && !report.limited_coverage);
+            let hit = &report.hits[0];
+            assert_eq!(hit.id, expected);
+            let SearchLocation::Payload { start, end } = hit.location else {
+                panic!("expected a payload locator");
+            };
+            assert!(text[start..end].contains(word));
+        }
+    }
+
+    for start in [0, 65_500] {
+        let text = format!(
+            "{}{} indexedcontrol {}",
+            " ".repeat(start),
+            "z".repeat(4097),
+            " ".repeat(start * 4)
+        );
+        let expected = archive.capture(text.as_bytes(), "text/plain", 4096, public, Format::B)?;
+        for name in ["oversized", "cached oversized"] {
+            let snapshot = archive.selected_snapshot(name, BTreeSet::new(), [expected].into())?;
+            for _ in 0..3 {
+                archive.prepare_search(&snapshot, 64, None)?;
+            }
+            let report =
+                archive.find(&snapshot, "indexedcontrol", SearchOptions::default(), None)?;
+            assert!(report.index_complete && report.limited_coverage);
+            assert_eq!(report.hits[0].id, expected);
+        }
+    }
     Ok(())
 }
 

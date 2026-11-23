@@ -61,11 +61,13 @@ nao find reading --prepare --model model --python python
 
 Once set up, inference runs offline. Use `--input FILE` for a query from a supported media or text file.
 
-After a search index upgrade, the first keyword search or `nao prepare-search` starts rebuilding the index from the archive. Repeat preparation if the report shows incomplete coverage. For an exact object ID, use `nao find ID` and prepare the index separately.
+After a search index upgrade, the first keyword search or `nao prepare-search` starts rebuilding the derived index from the archive. Repeat preparation if the report shows incomplete coverage. For an exact object ID, use `nao find ID` and prepare the index separately.
 
 ## Protocol reference
 
 `nao capabilities` reports the supported formats and bootstrap digests. The notice and impact scan budgets count records. Checks that follow a dependency still account for the objects they need, including payload blocks.
+
+Use `nao explain HEAD CLAIM --compact` and `nao impact HEAD NOTICE --compact` to report an unscanned record range separately from individual unavailable dependencies. In these reports, `unscanned: null` means the record scan reached the end of the snapshot. To resume a compact explanation, use its `unscanned.after` with `--after` at the same head. To complete an impact calculation, repeat it with a larger budget at that head so the dependency walk can see the complete inventory. The default reports and stored assessment receipts retain their existing frontier format.
 
 - [Whitepaper](spec/research-evidence-protocol.pdf)
 - [Bootstrap kit A](spec/kits/A.json) and [bootstrap kit B](spec/kits/B.json)
