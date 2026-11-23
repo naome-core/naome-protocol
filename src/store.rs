@@ -168,11 +168,8 @@ impl Archive {
     pub(crate) fn size(&self, id: Id) -> Result<usize> {
         Ok(usize::try_from(
             self.db
-                .query_row(
-                    "SELECT coalesce(length(data),0) FROM objects WHERE id=?",
-                    [id.to_string()],
-                    |r| r.get::<_, i64>(0),
-                )
+                .prepare_cached("SELECT coalesce(length(data),0) FROM objects WHERE id=?")?
+                .query_row([id.to_string()], |r| r.get::<_, i64>(0))
                 .optional()?
                 .unwrap_or(0),
         )?)
@@ -180,11 +177,8 @@ impl Archive {
     pub(crate) fn raw(&self, id: Id) -> Result<Option<(Vec<u8>, Id)>> {
         let item: Option<(Vec<u8>, String)> = self
             .db
-            .query_row(
-                "SELECT data,access FROM objects WHERE id=? AND data IS NOT NULL",
-                [id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .prepare_cached("SELECT data,access FROM objects WHERE id=? AND data IS NOT NULL")?
+            .query_row([id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?;
         item.map(|(b, a)| {
             id.verify(&b)?;
