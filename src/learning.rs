@@ -1,13 +1,12 @@
 use crate::{
     evaluation::{
-        Assessment, EvidenceView, ReadInventory, assess_with_inventory,
+        Assessment, EVALUATOR_ID, EvidenceView, ReadInventory, assess_with_inventory,
         calibration_identity::CalibrationIdentities,
         correction::{MeasurementUse, Notice, WithdrawalRules},
         dependency_correction::{
             CorrectionImpact, CorrectionKeys, DependencyCorrection, admitted_corrections,
             correction_keys, correction_signature,
         },
-        query_evaluator,
     },
     migration::Equivalence,
     profile::{CALIBRATION_EVENT_IDENTITY, Document, Kind, PUBLIC, link, verify_attestation},
@@ -438,13 +437,7 @@ impl TrainingReview<'_> {
             let Assessment {
                 receipt: current,
                 withdrawals,
-            } = assess_with_inventory(
-                store,
-                after,
-                &original,
-                query_evaluator(store, after, &original),
-                &mut trust.inventory,
-            )?;
+            } = assess_with_inventory(store, after, &original, EVALUATOR_ID, &mut trust.inventory)?;
             ensure!(
                 current.horizon_complete
                     && current.frontier.is_empty()
@@ -737,8 +730,8 @@ impl Archive {
             !calibration && n.fields.get("action").and_then(Value::as_str) == Some("withdraw");
         let mut inventory = ReadInventory::default();
         let mut frontier = BTreeSet::new();
-        for (i, &id) in s.objects.iter().enumerate() {
-            if i >= budget || (id.format().is_some() && !inventory.read(self, s, id, true)) {
+        for (i, id) in s.records().enumerate() {
+            if i >= budget || !inventory.read(self, s, id, true) {
                 frontier.insert(id);
             }
         }

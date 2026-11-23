@@ -83,6 +83,7 @@ jobs:
     uses: ./.github/workflows/full-cargo.yml
     with:
       model_search: true
+      reuse_platform_debug: true
 
   linux:
     name: Rust platform (Linux x86_64)

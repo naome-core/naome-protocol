@@ -45,20 +45,23 @@ fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
     let archive = Archive::memory()?;
     let case = fixture::seed(&archive, Format::A)?;
     let receipt = archive.read(&archive.head(case.published)?, case.receipts[2], "read")?;
-    assert_eq!(
-        capabilities["receipt_evaluator"],
-        receipt.fields["evaluator"]
-    );
+    assert_eq!(receipt.fields["evaluator"], "rep-rust-rules-1");
     let replay =
         serde_json::from_value::<BTreeSet<String>>(capabilities["replay_evaluators"].clone())?;
     for (field, capability) in [
-        ("foreign_calibration_keys", "calibration_identity_evaluator"),
-        ("input_correction_keys", "input_correction_evaluator"),
+        (None, "receipt_evaluator"),
+        (
+            Some("foreign_calibration_keys"),
+            "calibration_identity_evaluator",
+        ),
+        (Some("input_correction_keys"), "input_correction_evaluator"),
     ] {
         let mut query = case.queries[2].clone();
         let seed = archive.head(case.published)?;
         let mut policy = archive.read(&seed, query.policy, "read")?;
-        policy.fields.insert(field.into(), json!({}));
+        if let Some(field) = field {
+            policy.fields.insert(field.into(), json!({}));
+        }
         query.policy = archive.document(&policy, Format::A, Id::blob(PUBLIC))?;
         let head = archive.snapshot("correction policy", [case.published].into())?;
         let result = evaluation::assess(&archive, &head, &query)?;
@@ -66,9 +69,10 @@ fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
         let after = archive.snapshot("correction receipt", [head.id()?].into())?;
         let stored = archive.read(&after, id, "read")?;
         assert_eq!(capabilities[capability], stored.fields["evaluator"]);
-        assert_eq!(capabilities[capability], "rep-rust-rules-4");
+        assert_eq!(capabilities[capability], "rep-rust-rules-5");
     }
     let expected = [
+        "rep-rust-rules-5",
         "rep-rust-rules-4",
         "rep-rust-rules-3",
         "rep-rust-rules-2",

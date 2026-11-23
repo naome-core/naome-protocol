@@ -30,11 +30,11 @@ const FIRST_SCOPED_EVALUATOR_ID: &str = "rep-rust-0.1.2-dev";
 const WITHDRAWAL_APPLICABILITY: &str = "withdrawal applicability";
 const CALIBRATION_IDENTITY_CHECK: &str = "calibration event identity";
 // This identifier versions the receipt semantics. Package releases can reuse it.
-const RULES_V1: &str = "rep-rust-rules-1";
+pub(crate) const FIXTURE_EVALUATOR_ID: &str = "rep-rust-rules-1";
 const CALIBRATION_IDENTITY_EVALUATOR_ID: &str = "rep-rust-rules-2";
 const INPUT_CORRECTION_EVALUATOR_ID: &str = "rep-rust-rules-3";
-pub(crate) const CORRECTION_REASSESSMENT_EVALUATOR_ID: &str = "rep-rust-rules-4";
-pub(crate) const EVALUATOR_ID: &str = RULES_V1;
+const CORRECTION_REASSESSMENT_EVALUATOR_ID: &str = "rep-rust-rules-4";
+pub(crate) const EVALUATOR_ID: &str = "rep-rust-rules-5";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,7 +146,7 @@ struct EvaluatorRules {
 
 const REPLAY_RULES: &[EvaluatorRules] = &[
     EvaluatorRules {
-        ids: &[CORRECTION_REASSESSMENT_EVALUATOR_ID],
+        ids: &[EVALUATOR_ID, CORRECTION_REASSESSMENT_EVALUATOR_ID],
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
         physical_identity: true,
@@ -170,7 +170,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         scoped_corrections: false,
     },
     EvaluatorRules {
-        ids: &[RULES_V1],
+        ids: &[FIXTURE_EVALUATOR_ID],
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
         physical_identity: false,
@@ -613,19 +613,8 @@ impl Evaluation<'_> {
         Ok(pending)
     }
 }
-pub(crate) fn query_evaluator(store: &Archive, s: &Snapshot, q: &Query) -> &'static str {
-    if let Ok(policy) = store.read(s, q.policy, "read")
-        && policy.kind == Kind::Policy
-        && (policy.fields.contains_key("input_correction_keys")
-            || policy.fields.contains_key("foreign_calibration_keys"))
-    {
-        return CORRECTION_REASSESSMENT_EVALUATOR_ID;
-    }
-    EVALUATOR_ID
-}
-
 pub fn assess(store: &Archive, s: &Snapshot, q: &Query) -> Result<Receipt> {
-    assess_for_evaluator(store, s, q, query_evaluator(store, s, q))
+    assess_for_evaluator(store, s, q, EVALUATOR_ID)
 }
 
 pub(crate) fn assess_for_evaluator(
@@ -678,7 +667,8 @@ pub(crate) fn assess_with_inventory(
             "unsupported query policy"
         );
         out.dependencies.extend([q.target, q.policy]);
-        inventory.search(store, s, q, out)?;
+        // Historical receipts retain their original inventory-counting semantics.
+        inventory.search(store, s, q, out, evaluator == EVALUATOR_ID)?;
         let mut aliases = Equivalence::default();
         for &mapping in &q.mappings {
             aliases.add(store.verify_mapping(s, mapping)?);
@@ -706,8 +696,11 @@ pub(crate) fn assess_with_inventory(
         } else {
             CalibrationIdentities::default()
         };
-        let input_corrections = rules.input_corrections
-            && (!rules.scoped_corrections || policy.fields.contains_key("input_correction_keys"));
+        let has_input_keys = policy.fields.contains_key("input_correction_keys");
+        let scoped_corrections = rules.scoped_corrections
+            && (has_input_keys || policy.fields.contains_key("foreign_calibration_keys"));
+        let input_corrections =
+            rules.input_corrections && (!rules.scoped_corrections || has_input_keys);
         let view = Evaluation {
             store,
             s,
@@ -717,7 +710,7 @@ pub(crate) fn assess_with_inventory(
             withdrawal_rules,
             calibration_identities,
             input_corrections,
-            scoped_corrections: rules.scoped_corrections,
+            scoped_corrections,
         };
         let input_corrections = if input_corrections {
             admitted_corrections(
@@ -915,7 +908,7 @@ pub fn deposit_receipt(
     r: &Receipt,
     f: Format,
 ) -> Result<Id> {
-    deposit_receipt_for_evaluator(store, s, q, r, f, query_evaluator(store, s, q))
+    deposit_receipt_for_evaluator(store, s, q, r, f, EVALUATOR_ID)
 }
 pub(crate) fn deposit_receipt_for_evaluator(
     store: &Archive,

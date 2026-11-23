@@ -1,7 +1,7 @@
 use crate::{
     evaluation::{
-        EVALUATOR_ID, Query, Receipt, Standing, V0_1_0_EVALUATOR_ID, assess, deposit_receipt,
-        deposit_receipt_for_evaluator,
+        FIXTURE_EVALUATOR_ID, Query, Receipt, Standing, V0_1_0_EVALUATOR_ID, assess,
+        assess_for_evaluator, deposit_receipt, deposit_receipt_for_evaluator,
     },
     learning::{Example, TrainingRequest},
     profile::{Document, Kind, Link, PUBLIC, attest, link},
@@ -222,12 +222,12 @@ fn seed_measurements(store: &Archive, f: Format, legacy: bool) -> Result<Investi
     let evaluator = if legacy {
         V0_1_0_EVALUATOR_ID
     } else {
-        EVALUATOR_ID
+        FIXTURE_EVALUATOR_ID
     };
     let mut receipts = vec![];
     let mut labels = vec![];
     for q in &queries {
-        let receipt = assess(store, &s, q)?;
+        let receipt = assess_for_evaluator(store, &s, q, FIXTURE_EVALUATOR_ID)?;
         let id = deposit_receipt_for_evaluator(store, &s, q, &receipt, f, evaluator)?;
         sign(store, f, id, SCOPE, "assessor", 4)?;
         receipts.push(id);
@@ -249,7 +249,7 @@ fn seed_measurements(store: &Archive, f: Format, legacy: bool) -> Result<Investi
         arguments: vec![control_arg],
         ..queries[0].clone()
     };
-    let result = assess(store, &s, &control_query)?;
+    let result = assess_for_evaluator(store, &s, &control_query, FIXTURE_EVALUATOR_ID)?;
     ensure!(
         result.result == Some(Standing::Supported),
         "control readback mismatch"

@@ -1,5 +1,5 @@
 //! Complete inventories explicitly released to a configured replication group.
-use super::{Archive, Snapshot, insert};
+use super::{Archive, Snapshot, insert, save_imported_head};
 use crate::{
     profile::{Document, Kind, PROFILE, verify_attestation},
     wire::{Id, Record},
@@ -111,6 +111,7 @@ impl Replica {
         for (id, (access, bytes)) in self.members {
             insert(&tx, id, &bytes, access)?;
         }
+        save_imported_head(&tx, self.head, &self.snapshot)?;
         archive.register_release(self.head, &self.snapshot)?;
         tx.commit()?;
         Ok(self.head)
@@ -239,7 +240,9 @@ impl Archive {
 
     pub fn release(&self, head: Id) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-        self.register_release(head, &self.head(head)?)?;
+        let snapshot = self.head(head)?;
+        self.save(&snapshot)?;
+        self.register_release(head, &snapshot)?;
         tx.commit()?;
         Ok(())
     }
@@ -279,7 +282,6 @@ impl Archive {
                 }
             }
         }
-        self.save(s)?;
         self.db.execute(
             "INSERT OR IGNORE INTO releases(head) VALUES(?)",
             [head.to_string()],

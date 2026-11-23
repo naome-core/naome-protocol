@@ -488,3 +488,62 @@ fn missing_provenance_record_keeps_possible_correction_exposure_open() -> Result
     }));
     Ok(())
 }
+
+#[test]
+fn unrelated_payloads_do_not_spend_the_notice_and_impact_record_budget() -> Result<()> {
+    let (archive, mut query, source, _, evidence, coverage) = unrelated_raw_reading_setup()?;
+    let study = Study {
+        archive: &archive,
+        format: Format::B,
+    };
+    let used = json!({"profile":"table-rows-1","selector":{"ranges":[[4,5]]}});
+    query = study.query(
+        query.target,
+        query.policy,
+        study.use_source(source, &used),
+        220,
+        vec![],
+    )?;
+    let (notice, signature) = study.notice(source, &coverage, evidence, ISSUER)?;
+    query.required_notices.push(notice);
+    let original = archive.snapshot("assessment inputs", Default::default())?;
+    query.budget = original
+        .objects
+        .iter()
+        .filter(|id| id.format().is_some())
+        .count();
+
+    let verify = |snapshot, query: &Query| -> Result<()> {
+        let receipt = assess(&archive, snapshot, query)?;
+        assert_eq!(receipt.result, Some(Standing::Supported));
+        assert!(receipt.horizon_complete && receipt.frontier.is_empty());
+        let impact =
+            archive.impact_with_policy(snapshot, notice, &[], query.budget, Some(query.policy))?;
+        assert_eq!(impact.correction_authority, Some(signature));
+        assert!(impact.frontier.is_empty());
+        assert!(impact.outside_scope["argument"].contains(&query.arguments[0]));
+        let graph = archive.argument_graph(snapshot, query.target, "read", query.budget, 48)?;
+        assert_eq!(graph["unsearched"], json!([]));
+        Ok(())
+    };
+    verify(&original, &query)?;
+    let payload: Vec<_> = (0u16..256).flat_map(u16::to_be_bytes).collect();
+    archive.capture(
+        payload.as_slice(),
+        "application/octet-stream",
+        2,
+        Id::blob(PUBLIC),
+        Format::B,
+    )?;
+    let larger = archive.snapshot("with separate dataset", [original.id()?].into())?;
+    query.budget += 1; // The payload descriptor is itself a record.
+    verify(&larger, &query)?;
+
+    query.budget -= 1;
+    let limited = assess(&archive, &larger, &query)?;
+    assert_eq!(limited.result, Some(Standing::Unresolved));
+    assert!(!limited.horizon_complete);
+    assert_eq!(limited.frontier.len(), 1);
+    assert!(limited.frontier.iter().all(|id| id.format().is_some()));
+    Ok(())
+}
