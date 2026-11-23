@@ -122,9 +122,10 @@ pub enum ArchiveCommand {
     },
     /// Search authorized archive records and text passages by word or meaning.
     Find(FindArguments),
-    /// Show or pin the active search snapshot. Clear the pin to use the latest registered snapshot.
+    /// Show or pin the active search snapshot.
     SearchHead {
         head: Option<Id>,
+        /// Use the newest local snapshot, or the first import if there is no local snapshot.
         #[arg(long, conflicts_with = "head")]
         clear: bool,
     },

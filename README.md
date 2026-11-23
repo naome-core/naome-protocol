@@ -27,7 +27,7 @@ nao --db receiver.sqlite import exchange.json
 
 Add `--stream` to both commands for streaming exchange. Use `nao --help` and `nao COMMAND --help` for command options. Keep archive files and signing keys in a private directory.
 
-Import keeps the current search context. Use `nao find QUERY --head SNAPSHOT_ID` for a one-off search in a received snapshot, or `nao search-head SNAPSHOT_ID` to pin it. Without a pin, the newest local snapshot is the default. An archive containing only received snapshots starts with the first one it received.
+Import keeps the current search context. Use `nao find QUERY --head SNAPSHOT_ID` for a one-off search in a received snapshot, or `nao search-head SNAPSHOT_ID` to pin it. Without a pin, the newest local snapshot is the default. An archive containing only received snapshots starts with the first one it received. On upgrade, existing snapshots keep their prior ordering because older archives did not record how each snapshot arrived.
 
 ## Search with a local model
 
