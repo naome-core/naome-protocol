@@ -17,6 +17,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    ops::Bound::{Excluded, Unbounded},
     path::Path,
     time::Duration,
 };
@@ -168,11 +169,8 @@ impl Archive {
     pub(crate) fn size(&self, id: Id) -> Result<usize> {
         Ok(usize::try_from(
             self.db
-                .query_row(
-                    "SELECT coalesce(length(data),0) FROM objects WHERE id=?",
-                    [id.to_string()],
-                    |r| r.get::<_, i64>(0),
-                )
+                .prepare_cached("SELECT coalesce(length(data),0) FROM objects WHERE id=?")?
+                .query_row([id.to_string()], |r| r.get::<_, i64>(0))
                 .optional()?
                 .unwrap_or(0),
         )?)
@@ -180,11 +178,8 @@ impl Archive {
     pub(crate) fn raw(&self, id: Id) -> Result<Option<(Vec<u8>, Id)>> {
         let item: Option<(Vec<u8>, String)> = self
             .db
-            .query_row(
-                "SELECT data,access FROM objects WHERE id=? AND data IS NOT NULL",
-                [id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .prepare_cached("SELECT data,access FROM objects WHERE id=? AND data IS NOT NULL")?
+            .query_row([id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?;
         item.map(|(b, a)| {
             id.verify(&b)?;
@@ -529,7 +524,8 @@ impl Archive {
         let mut excluded = 0;
         let mut last = None;
         let mut more = false;
-        for &id in s.objects.iter().filter(|id| after.is_none_or(|x| **id > x)) {
+        let bound = after.map_or(Unbounded, Excluded);
+        for &id in s.objects.range((bound, Unbounded)) {
             if examined == budget {
                 more = true;
                 break;

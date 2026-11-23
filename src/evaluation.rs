@@ -921,9 +921,9 @@ pub(crate) fn deposit_receipt_for_evaluator(
     f: Format,
     evaluator: &str,
 ) -> Result<Id> {
-    store.blob(&serde_json::to_vec(s)?, Id::blob(PUBLIC))?;
+    let snapshot_id = store.blob(&serde_json::to_vec(s)?, Id::blob(PUBLIC))?;
     store.document(
-        &receipt_document(store, s, q, r, evaluator)?,
+        &receipt_document(store, s, snapshot_id, q, r, evaluator)?,
         f,
         Id::blob(PUBLIC),
     )
@@ -931,15 +931,15 @@ pub(crate) fn deposit_receipt_for_evaluator(
 pub(crate) fn receipt_document(
     store: &Archive,
     s: &Snapshot,
+    snapshot_id: Id,
     q: &Query,
     r: &Receipt,
     evaluator: &str,
 ) -> Result<Document> {
-    let head = s.id()?;
     let mut edges = vec![
         link("claim", q.target),
         link("policy", q.policy),
-        link("snapshot", head),
+        link("snapshot", snapshot_id),
     ];
     edges.extend(
         q.arguments

@@ -77,41 +77,52 @@ impl Id {
         let [Term::Uint(s), Term::Uint(c), Term::Bytes(d)] = t.array()? else {
             bail!("invalid reference")
         };
+        Self::checked_reference(*s, *c, d)
+    }
+    fn checked_reference(suite: u64, class: u64, digest: &[u8]) -> Result<Self> {
         ensure!(
-            matches!((s, c), (1, 0) | (2, 0) | (1, 1)),
+            matches!((suite, class), (1, 0) | (2, 0) | (1, 1)),
             "unknown reference suite or class"
         );
         Ok(Self {
-            suite: *s as u8,
-            class: *c as u8,
-            digest: d.as_slice().try_into().context("invalid digest length")?,
+            suite: suite as u8,
+            class: class as u8,
+            digest: digest.try_into().context("invalid digest length")?,
         })
     }
 }
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}:{}:{}",
-            self.suite,
-            self.class,
-            hex::encode(self.digest)
-        )
+        let mut encoded = [0; 64];
+        hex::encode_to_slice(self.digest, &mut encoded).map_err(|_| fmt::Error)?;
+        let digest = std::str::from_utf8(&encoded).map_err(|_| fmt::Error)?;
+        write!(f, "{}:{}:{digest}", self.suite, self.class)
     }
 }
 impl FromStr for Id {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self> {
         let mut parts = s.split(':');
-        let suite = parts.next().context("missing suite")?.parse()?;
-        let class = parts.next().context("missing class")?.parse()?;
-        let d = hex::decode(parts.next().context("missing digest")?)?;
-        let id = Self::read(&Term::Array(vec![
-            Term::Uint(suite),
-            Term::Uint(class),
-            Term::Bytes(d),
-        ]))?;
-        ensure!(id.to_string() == s, "noncanonical identifier");
+        let suite_text = parts.next().context("missing suite")?;
+        let suite = suite_text.parse()?;
+        let class_text = parts.next().context("missing class")?;
+        let class = class_text.parse()?;
+        let encoded = parts.next().context("missing digest")?;
+        let mut digest = [0; 32];
+        let id = if encoded.len() == 2 * digest.len() {
+            hex::decode_to_slice(encoded, &mut digest)?;
+            Self::checked_reference(suite, class, &digest)?
+        } else {
+            // Preserve the hex and reference diagnostics for malformed lengths.
+            Self::checked_reference(suite, class, &hex::decode(encoded)?)?
+        };
+        ensure!(
+            suite_text.len() == 1
+                && class_text.len() == 1
+                && parts.next().is_none()
+                && !encoded.bytes().any(|byte| byte.is_ascii_uppercase()),
+            "noncanonical identifier"
+        );
         Ok(id)
     }
 }

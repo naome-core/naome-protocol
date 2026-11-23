@@ -829,6 +829,60 @@ fn projected_search_finds_late_candidates_under_an_actual_comparison_budget() ->
 
 #[cfg(feature = "cli")]
 #[test]
+fn preparation_adds_the_media_passage_index_to_an_existing_cache() -> Result<()> {
+    use naome_protocol::search::SearchInput;
+    use rusqlite::Connection;
+
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("archive.sqlite");
+    let archive = Archive::open(&database)?;
+    let public = Id::blob(PUBLIC);
+    let wanted = claim(
+        &archive,
+        "interferometer",
+        "alignment verification",
+        public,
+        Format::A,
+    )?;
+    archive.capture(&b"audio bytes"[..], "audio/wav", 128, public, Format::B)?;
+    let snapshot = archive.snapshot("prepared archive", BTreeSet::new())?;
+    assert!(archive.prepare_search(&snapshot, 100, None)?.index_complete);
+    drop(archive);
+
+    let db = Connection::open(&database)?;
+    db.execute_batch("DROP INDEX rep_search_media_passages")?;
+    let index_exists = || -> rusqlite::Result<bool> {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='rep_search_media_passages')",
+            [],
+            |row| row.get(0),
+        )
+    };
+    let passage_ids = || -> rusqlite::Result<Vec<i64>> {
+        db.prepare("SELECT id FROM rep_search_passages ORDER BY id")?
+            .query_map([], |row| row.get(0))?
+            .collect()
+    };
+    let before = passage_ids()?;
+    assert!(!before.is_empty());
+
+    let archive = Archive::open(&database)?;
+    let query = "interferometer";
+    let options = SearchOptions::default();
+    let old = archive.search_prepared(&snapshot, SearchInput::Text(query), options, None)?;
+    assert!(old.index_complete && old.limited_coverage);
+    assert_eq!(old.hits[0].id, wanted);
+    assert!(!index_exists()?);
+
+    let current = archive.find(&snapshot, query, options, None)?;
+    assert!(index_exists()?);
+    assert_eq!(passage_ids()?, before);
+    assert_eq!(serde_json::to_value(current)?, serde_json::to_value(old)?);
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
+#[test]
 fn previous_caches_are_rebuilt_without_changing_the_archive() -> Result<()> {
     use sha2::{Digest, Sha256};
     use std::{
@@ -1022,6 +1076,48 @@ fn text_queries_and_large_captures_use_later_passages() -> Result<()> {
             .id,
         street
     );
+    Ok(())
+}
+
+#[test]
+fn withdrawing_a_large_text_chunk_discards_its_prepared_passages() -> Result<()> {
+    use naome_protocol::search::SearchInput;
+
+    let archive = Archive::memory()?;
+    let marker = b"retiredreading";
+    let offset = 140_000;
+    let mut bytes = vec![b' '; 320 * 1024];
+    bytes[offset..offset + marker.len()].copy_from_slice(marker);
+    let descriptor = archive.capture(
+        bytes.as_slice(),
+        "text/plain",
+        bytes.len(),
+        Id::blob(PUBLIC),
+        Format::B,
+    )?;
+    let snapshot = archive.snapshot("long reading", BTreeSet::new())?;
+    let preparation = archive.prepare_search(&snapshot, 8, None)?;
+    assert!(!preparation.index_complete);
+
+    let query = SearchInput::Text("retiredreading");
+    let options = SearchOptions::default();
+    let report = archive.search_prepared(&snapshot, query, options, None)?;
+    assert_eq!(report.hits.len(), 1);
+    assert_eq!(report.hits[0].id, descriptor);
+    assert_eq!(
+        report.hits[0].location,
+        SearchLocation::Payload {
+            start: offset,
+            end: offset + marker.len(),
+        }
+    );
+    let chunk = archive.read(&snapshot, descriptor, "read")?.inputs[0].target;
+    archive.withdraw(chunk)?;
+
+    let preparation = archive.prepare_search(&snapshot, 8, None)?;
+    assert!(preparation.limited_coverage);
+    let report = archive.search_prepared(&snapshot, query, options, None)?;
+    assert!(report.limited_coverage && report.hits.is_empty());
     Ok(())
 }
 

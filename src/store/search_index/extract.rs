@@ -1,6 +1,6 @@
 use super::{
     Dependencies, IndexedRecord, IndexedSection, Passage,
-    text::{MAX_TEXT_BYTES, Utf8Check, payload_passages},
+    text::{MAX_TEXT_BYTES, Utf8Check, VerifiedTextChunk, payload_passages},
 };
 use crate::{
     profile::{Document, Kind, allows},
@@ -410,7 +410,12 @@ impl Archive {
                     .and_then(|text| text.get(*start..*end).map(str::to_owned))
             }
             SearchLocation::Payload { start, end } => {
-                let bytes = self.read_verified_text_span(snapshot, document, *start..*end)?;
+                let bytes = VerifiedTextChunk::default().read_span(
+                    self,
+                    snapshot,
+                    document,
+                    *start..*end,
+                )?;
                 Some(String::from_utf8(bytes)?)
             }
         })
