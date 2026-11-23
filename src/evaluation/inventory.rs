@@ -368,7 +368,7 @@ impl EvidenceView<'_> {
         role: &str,
         trusted: &BTreeSet<String>,
     ) -> Option<Id> {
-        for endpoint in self.aliases.endpoints(id) {
+        for endpoint in self.aliases.members(id) {
             if self.store.resolve(self.snapshot, endpoint, "read").is_err() {
                 continue;
             }

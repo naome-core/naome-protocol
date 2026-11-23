@@ -1,5 +1,5 @@
 //! Offline inventory packets and atomic import into a custody archive.
-use super::{Archive, Snapshot, insert, save_imported_head, validate};
+use super::{Archive, Snapshot, insert, snapshot::save_imported_head, validate};
 use crate::{
     profile::allows,
     wire::{Id, MAX_BYTES},
@@ -36,7 +36,9 @@ pub struct Bundle {
 }
 impl Bundle {
     fn verify_inventory(&self) -> Result<()> {
-        verify_head(self.head, &self.snapshot)?;
+        self.snapshot
+            .verify_head(self.head)
+            .context("invalid bundle head")?;
         let objects = &self.snapshot.objects;
         ensure!(
             objects.len().checked_sub(self.omitted.len()) == Some(self.packets.len()),
@@ -140,7 +142,7 @@ impl Archive {
     ) -> Result<Bundle> {
         ensure!(limit > 0, "positive export page limit required");
         let (head, mut used) = {
-            let manifest = serde_json::to_vec(s)?;
+            let manifest = s.bytes()?;
             let used = manifest
                 .len()
                 .checked_mul(3)
@@ -207,14 +209,6 @@ impl Archive {
         tx.commit()?;
         Ok(b.head)
     }
-}
-
-fn verify_head(head: Id, snapshot: &Snapshot) -> Result<()> {
-    ensure!(
-        snapshot.version == 1 && !snapshot.source.is_empty() && snapshot.id()? == head,
-        "invalid bundle head"
-    );
-    Ok(())
 }
 
 fn add_packet(db: &Connection, packet: &Packet, bytes: &mut Vec<u8>) -> Result<()> {

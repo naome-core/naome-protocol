@@ -42,7 +42,7 @@ pub(super) fn witnesses(
             witness.kind == Kind::Occurrence
                 && witness.subject == receipt.subject
                 && witness.scope == receipt.scope
-                && aliases.endpoints(witness.one("plan")?).contains(&plan)
+                && aliases.equivalent(witness.one("plan")?, plan)
                 && witness.one("feature-cutoff")? == request.feature_cutoff
                 && witness.field::<bool>("concealed")?
                 && witness.field::<u64>("sealed")? < witness.field::<u64>("released")?,
@@ -63,7 +63,7 @@ pub(super) fn witnesses(
                 continue;
             }
             ensure!(
-                aliases.endpoints(outcome).is_disjoint(&before.objects),
+                !aliases.intersects(outcome, &before.objects),
                 "outcome evidence visible at the feature cutoff"
             );
             ensure!(

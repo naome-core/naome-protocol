@@ -9,7 +9,7 @@ use super::{
 use crate::{
     migration::Equivalence,
     profile::{CALIBRATION_EVENT_IDENTITY, Document, Kind},
-    store::Snapshot,
+    store::ManifestEncoding,
     wire::Id,
 };
 use anyhow::{Context, Result, ensure};
@@ -33,14 +33,11 @@ impl EvidenceView<'_> {
     }
 
     fn check_inventory(&self, head: Id, calibration: Id, original: Id) -> Result<String> {
-        let bytes = self.store.resolve(self.snapshot, head, "read")?;
-        let manifest: Snapshot = serde_json::from_slice(&bytes)?;
+        let manifest =
+            self.store
+                .linked_snapshot(self.snapshot, head, ManifestEncoding::Canonical)?;
         ensure!(
-            manifest.version == 1
-                && !manifest.source.is_empty()
-                && manifest.id()? == head
-                && manifest.objects.contains(&calibration)
-                && manifest.objects.contains(&original),
+            manifest.objects.contains(&calibration) && manifest.objects.contains(&original),
             "calibration or original outside its asserted inventory"
         );
         self.store.resolve(self.snapshot, original, "read")?;
@@ -108,18 +105,18 @@ impl CalibrationIdentities {
             }
             let to = evidence.calibration(recipient);
             if to.as_ref().is_ok_and(|to| to.scope != assertion.scope)
-                || representative(evidence.aliases, source)
-                    == representative(evidence.aliases, recipient)
+                || evidence.aliases.representative(source)
+                    == evidence.aliases.representative(recipient)
             {
                 continue;
             }
             let slot = result
                 .by_source
-                .entry(representative(evidence.aliases, source))
+                .entry(evidence.aliases.representative(source))
                 .or_default()
                 .entry(assertion.scope.clone())
                 .or_default()
-                .entry(representative(evidence.aliases, recipient))
+                .entry(evidence.aliases.representative(recipient))
                 .or_default();
             let scope = [&from.scope, &assertion.scope];
             let endpoints = [source, recipient];
@@ -154,7 +151,7 @@ impl CalibrationIdentities {
         source: Id,
     ) -> impl Iterator<Item = (Id, &AdmittedIdentity)> {
         self.by_source
-            .get(&representative(aliases, source))
+            .get(&aliases.representative(source))
             .into_iter()
             .flat_map(BTreeMap::values)
             .filter_map(|targets| {
@@ -196,8 +193,7 @@ impl CalibrationIdentities {
             .flat_map(|(recipient, proof)| {
                 evidence
                     .aliases
-                    .endpoints(recipient)
-                    .into_iter()
+                    .members(recipient)
                     .map(move |id| (id, proof))
             })
             .collect();
@@ -280,10 +276,6 @@ impl CalibrationIdentities {
         let keys = self.foreign_keys.get(scope)?;
         evidence.signature(notice, scope, role, keys)
     }
-}
-
-fn representative(aliases: &Equivalence, id: Id) -> Id {
-    aliases.endpoints(id).first().copied().unwrap_or(id)
 }
 
 fn endpoints<'a>(

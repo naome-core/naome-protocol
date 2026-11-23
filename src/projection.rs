@@ -101,8 +101,8 @@ impl Archive {
             });
         }
         let projected = archive.snapshot("certified hull", BTreeSet::new())?;
-        let source_head = self.blob(&serde_json::to_vec(s)?, public)?;
-        let target_head = self.blob(&serde_json::to_vec(&projected)?, public)?;
+        let source_head = self.deposit_manifest(s)?;
+        let target_head = self.deposit_manifest(&projected)?;
         let private = self.blob(br#"{"purposes":["custody"],"version":1}"#, public)?;
         let mapping = self.document(
             &Document::new(

@@ -1,6 +1,6 @@
 mod semantic;
 
-use super::extract::{normalize, terms};
+use super::lexical::{normalize, terms};
 use crate::{
     search::{SearchMode, SearchOptions},
     wire::Id,

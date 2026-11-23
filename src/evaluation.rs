@@ -3,6 +3,8 @@ pub(crate) mod correction;
 pub(crate) mod dependency_correction;
 mod impact;
 mod inventory;
+#[cfg(all(test, feature = "cli"))]
+mod manifest_tests;
 mod measurement;
 mod rules;
 mod science;
@@ -16,9 +18,9 @@ use dependency_correction::{
 pub use impact::Impact;
 pub(crate) use inventory::{EvidenceView, ReadInventory};
 use measurement::Predicate;
-pub(crate) use rules::EVALUATOR_ID;
 #[cfg(feature = "cli")]
 pub(crate) use rules::replay_evaluator_ids;
+pub(crate) use rules::{EVALUATOR_ID, manifest_encoding};
 use rules::{EvaluatorRules, NoticeBudget};
 #[cfg(feature = "cli")]
 pub(crate) use rules::{FIXTURE_EVALUATOR_ID, V0_1_0_EVALUATOR_ID};
@@ -26,7 +28,7 @@ pub(crate) use rules::{FIXTURE_EVALUATOR_ID, V0_1_0_EVALUATOR_ID};
 use crate::{
     migration::Equivalence,
     profile::{Document, Kind, PUBLIC, link},
-    store::{Archive, Snapshot},
+    store::{Archive, ManifestEncoding, Snapshot},
     wire::{Format, Id},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -142,6 +144,7 @@ pub struct Evaluation<'a> {
     inventory: &'a ReadInventory,
     aliases: Equivalence,
     policy: Document,
+    manifest_encoding: ManifestEncoding,
     withdrawal_rules: WithdrawalRules,
     calibration_identities: CalibrationIdentities,
     input_corrections: bool,
@@ -421,8 +424,9 @@ impl Evaluation<'_> {
                     &[id, original, sig],
                 );
                 let horizon = r.one("snapshot")?;
-                let original_view: Snapshot =
-                    serde_json::from_slice(&self.store.resolve(self.s, horizon, "read")?)?;
+                let original_view =
+                    self.store
+                        .linked_snapshot(self.s, horizon, self.manifest_encoding)?;
                 ensure!(
                     original_view.objects.is_subset(&self.s.objects),
                     "delegated inventory is unavailable"
@@ -519,7 +523,7 @@ impl Evaluation<'_> {
                 self.s.objects.len(),
                 &mut frontier,
             )?;
-            let previously_applied = !self.aliases.endpoints(id).is_disjoint(&applied);
+            let previously_applied = self.aliases.intersects(id, &applied);
             let applies = !uses.is_empty();
             if applies {
                 out.applicable_notices.insert(id);
@@ -601,14 +605,13 @@ pub(crate) fn assess_with_inventory(
         )?;
         let mut aliases = Equivalence::default();
         for &mapping in &q.mappings {
-            aliases.add(store.verify_mapping(s, mapping)?);
+            aliases.add(store.verify_mapping_with(s, mapping, rules.manifests)?);
             out.dependencies.insert(mapping);
         }
         for &id in &q.previous_receipts {
             let prior = store.read(s, id, "read")?;
             ensure!(
-                prior.kind == Kind::Assessment
-                    && aliases.endpoints(prior.one("claim")?).contains(&q.target),
+                prior.kind == Kind::Assessment && aliases.equivalent(prior.one("claim")?, q.target),
                 "previous receipt covers another target"
             );
         }
@@ -633,6 +636,7 @@ pub(crate) fn assess_with_inventory(
             inventory,
             aliases,
             policy,
+            manifest_encoding: rules.manifests,
             withdrawal_rules,
             calibration_identities,
             input_corrections: corrections.input_versions,
@@ -716,7 +720,7 @@ pub(crate) fn assess_with_inventory(
                                 *correction_exclusions.entry(entry.id).or_default() += 1;
                                 if q.required_notices
                                     .iter()
-                                    .any(|id| view.aliases.endpoints(*id).contains(&entry.id))
+                                    .any(|id| view.aliases.equivalent(*id, entry.id))
                                 {
                                     out.check(
                                         "input correction applicability",
@@ -786,8 +790,7 @@ pub(crate) fn assess_with_inventory(
                         && time <= now
                         && now - time <= max_age
                         && let Ok(h) = d.one("inventory")
-                        && let Ok(b) = store.resolve(s, h, "read")
-                        && let Ok(inventory) = serde_json::from_slice::<Snapshot>(&b)
+                        && let Ok(inventory) = store.linked_snapshot(s, h, rules.manifests)
                         && inventory.source == source
                         && inventory.objects.is_subset(&s.objects)
                         && let Ok(sig) = view.signed(id, "notice-horizon", "horizon")
@@ -844,7 +847,7 @@ pub(crate) fn deposit_receipt_for_evaluator(
     f: Format,
     evaluator: &str,
 ) -> Result<Id> {
-    let snapshot_id = store.blob(&serde_json::to_vec(s)?, Id::blob(PUBLIC))?;
+    let snapshot_id = store.deposit_manifest(s)?;
     store.document(
         &receipt_document(store, s, snapshot_id, q, r, evaluator)?,
         f,

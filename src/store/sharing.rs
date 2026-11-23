@@ -1,10 +1,10 @@
 //! Complete inventories explicitly released to a configured replication group.
-use super::{Archive, Snapshot, insert, save_imported_head};
+use super::{Archive, Snapshot, insert, snapshot::save_imported_head};
 use crate::{
     profile::{Document, Kind, PROFILE, verify_attestation},
     wire::{Id, Record},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{Transaction, TransactionBehavior};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,15 +16,14 @@ pub const MAX_RELEASE_BYTES: usize = 16 * 1024 * 1024;
 
 fn check_manifest(head: Id, snapshot: &Snapshot) -> Result<()> {
     ensure!(
-        snapshot.version == 1
-            && !snapshot.source.is_empty()
-            && snapshot.source.len() <= 256
+        snapshot.source.len() <= 256
             && snapshot.parents.len() <= MAX_MANIFEST_PARENTS
-            && (1..=MAX_MEMBERS).contains(&snapshot.objects.len())
-            && snapshot.id()? == head,
+            && (1..=MAX_MEMBERS).contains(&snapshot.objects.len()),
         "invalid or oversized release manifest"
     );
-    Ok(())
+    snapshot
+        .verify_head(head)
+        .context("invalid or oversized release manifest")
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

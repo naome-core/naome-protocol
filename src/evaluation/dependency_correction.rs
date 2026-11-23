@@ -51,9 +51,8 @@ impl DependencyCorrection {
             .any(|&id| store.readable(snapshot, id).is_ok());
         let evidence_readable = notice.one("evidence").is_ok_and(|id| {
             aliases
-                .endpoints(id)
-                .iter()
-                .any(|&id| store.readable(snapshot, id).is_ok())
+                .members(id)
+                .any(|id| store.readable(snapshot, id).is_ok())
         });
         let scope = if !mixed_notice && source_readable && evidence_readable {
             notice.field("coverage").ok()
@@ -218,15 +217,16 @@ pub(crate) fn correction_signature(
     notice: &Document,
 ) -> Option<Id> {
     let versions = keys.get(&notice.scope)?;
-    let source = view.aliases.endpoints(notice.one("source-version").ok()?);
-    source.iter().find_map(|version| {
-        view.signature(
-            id,
-            &notice.scope,
-            "input-correction",
-            versions.get(version)?,
-        )
-    })
+    view.aliases
+        .members(notice.one("source-version").ok()?)
+        .find_map(|version| {
+            view.signature(
+                id,
+                &notice.scope,
+                "input-correction",
+                versions.get(&version)?,
+            )
+        })
 }
 
 pub(crate) struct AdmittedCorrection {

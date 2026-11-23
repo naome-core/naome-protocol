@@ -12,7 +12,7 @@ use crate::{
     },
     migration::Equivalence,
     profile::{Document, Kind, PUBLIC, link, verify_attestation},
-    store::{Archive, Snapshot},
+    store::{Archive, ManifestEncoding, Snapshot},
     wire::{Format, Id},
 };
 use anyhow::{Context, Result, ensure};
@@ -175,8 +175,7 @@ impl TrainingTrust {
             return BTreeSet::new();
         };
         aliases
-            .endpoints(target)
-            .into_iter()
+            .members(target)
             .flat_map(|id| {
                 self.inventory
                     .attestations(id)
@@ -216,8 +215,7 @@ impl TrainingTrust {
             let signature = candidates
                 .into_iter()
                 .find(|candidate| {
-                    bound_signatures
-                        .is_none_or(|bound| !aliases.endpoints(*candidate).is_disjoint(bound))
+                    bound_signatures.is_none_or(|bound| aliases.intersects(*candidate, bound))
                 })
                 .context("missing bound, admitted data-origin attestation")?;
             signatures.insert(signature);
@@ -227,12 +225,8 @@ impl TrainingTrust {
     }
 }
 
-fn canonical(aliases: &Equivalence, id: Id) -> Id {
-    aliases.endpoints(id).first().copied().unwrap_or(id)
-}
-
 fn canonical_set(aliases: &Equivalence, ids: &BTreeSet<Id>) -> BTreeSet<Id> {
-    ids.iter().map(|id| canonical(aliases, *id)).collect()
+    ids.iter().map(|id| aliases.representative(*id)).collect()
 }
 
 fn optional_link(doc: &Document, role: &str) -> Result<Option<Id>> {
@@ -249,6 +243,7 @@ struct TrainingReview<'a> {
     request: &'a TrainingRequest,
     aliases: &'a Equivalence,
     trust: TrainingTrust,
+    requires_legacy_mapping: bool,
     // A bounded working set for the most recently replayed historical inventory.
     historical: Option<(Id, Snapshot, ReadInventory)>,
     access: &'a crate::profile::TrainingAccess<'a>,
@@ -303,7 +298,7 @@ impl TrainingReview<'_> {
         );
         let original: crate::evaluation::Query = receipt.field("original_query")?;
         ensure!(
-            aliases.endpoints(original.policy).contains(&request.policy),
+            aliases.equivalent(original.policy, request.policy),
             "receipt policy differs from admitted training policy"
         );
         let receipt_head = receipt.one("snapshot")?;
@@ -313,6 +308,15 @@ impl TrainingReview<'_> {
             "label replay exceeds local extraction budget"
         );
         let evaluator: String = receipt.field("evaluator")?;
+        if self.requires_legacy_mapping {
+            ensure!(
+                matches!(
+                    crate::evaluation::manifest_encoding(&evaluator)?,
+                    ManifestEncoding::LegacyJson
+                ),
+                "current receipt requires canonical mapping inventories"
+            );
+        }
         if self
             .historical
             .as_ref()
@@ -336,11 +340,10 @@ impl TrainingReview<'_> {
             &evaluator,
         )?
         .encode(Id::blob(PUBLIC))?;
-        let endpoints = aliases.endpoints(receipt_id);
         ensure!(
             [Format::A, Format::B]
                 .iter()
-                .any(|f| endpoints.contains(&Id::record(*f, &expected.encode(*f)))),
+                .any(|f| aliases.equivalent(receipt_id, Id::record(*f, &expected.encode(*f)))),
             "receipt fields or dependencies do not replay"
         );
         ensure!(
@@ -361,7 +364,7 @@ impl TrainingReview<'_> {
             "ambiguous origin attestations"
         );
         let witnesses = prospective::witnesses(self, &receipt, &original.arguments)?;
-        let mut axes = BTreeSet::from([("claim".to_owned(), canonical(aliases, claim))]);
+        let mut axes = BTreeSet::from([("claim".to_owned(), aliases.representative(claim))]);
         let features = store.explain_for_training(before, &ex.features, access);
         let label = store.explain_for_training(after, &[ex.label], access);
         ensure!(
@@ -382,7 +385,7 @@ impl TrainingReview<'_> {
             let doc = store.read_for_training(horizon, id, access)?;
             for edge in doc.inputs {
                 if request.independent_roles.contains(&edge.role) {
-                    axes.insert((edge.role, canonical(aliases, edge.target)));
+                    axes.insert((edge.role, aliases.representative(edge.target)));
                 }
             }
         }
@@ -480,7 +483,12 @@ impl Archive {
         ensure!(d.kind == Kind::Assessment, "expected assessment");
         let mut aliases = Equivalence::default();
         for mapping in d.roles("mapping") {
-            aliases.add(self.verify_mapping(s, mapping)?);
+            let evaluator: String = d.field("evaluator")?;
+            aliases.add(self.verify_mapping_with(
+                s,
+                mapping,
+                crate::evaluation::manifest_encoding(&evaluator)?,
+            )?);
         }
         let trust = TrainingTrust::load(self, s, d.one("policy")?, false)?;
         let origins = trust.origin(self, s, &d, &aliases, origin, None)?;
@@ -524,8 +532,19 @@ impl Archive {
             "feature cutoff outside outcome history"
         );
         let mut aliases = Equivalence::default();
+        let mut requires_legacy_mapping = false;
         for &id in &request.mappings {
-            aliases.add(self.verify_mapping(&after, id)?);
+            let pairs = match self.verify_mapping(&after, id) {
+                Ok(pairs) => pairs,
+                Err(_) if request.standing == LabelStanding::Historical => {
+                    let pairs =
+                        self.verify_mapping_with(&after, id, ManifestEncoding::LegacyJson)?;
+                    requires_legacy_mapping = true;
+                    pairs
+                }
+                Err(error) => return Err(error),
+            };
+            aliases.add(pairs);
         }
         let trust = TrainingTrust::load(
             self,
@@ -541,6 +560,7 @@ impl Archive {
             request,
             aliases: &aliases,
             trust,
+            requires_legacy_mapping,
             historical: None,
             access: &access,
         };
@@ -561,10 +581,10 @@ impl Archive {
                     "shared ancestor crosses declared partitions"
                 );
                 let row_key = (
-                    canonical(&aliases, ex.label),
+                    aliases.representative(ex.label),
                     ex.features
                         .iter()
-                        .map(|id| canonical(&aliases, *id))
+                        .map(|id| aliases.representative(*id))
                         .collect::<Vec<_>>(),
                 );
                 ensure!(exact_rows.insert(row_key), "duplicate training example");
@@ -602,7 +622,7 @@ impl Archive {
             });
         }
         for (role, s) in [("feature-cutoff", &before), ("label-horizon", &after)] {
-            let id = self.blob(&serde_json::to_vec(s)?, Id::blob(PUBLIC))?;
+            let id = self.deposit_manifest(s)?;
             links.push(link(role, id));
         }
         if let Some(plan) = request.forecast_plan {

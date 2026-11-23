@@ -434,10 +434,10 @@ fn scoped_withdrawal_reaches_delegated_use_of_an_unaffected_receipt() -> Result<
             ..radial.clone()
         };
         let mixed_recheck = assess(&archive, &after, &mixed)?;
-        // Pin the mixed-use receipt under the current evaluator.
+        // Canonical-input control from the rules-5 implementation with only its writer ID set to rules-6.
         let expected = match format {
-            Format::A => "1:0:21dc32846d318726fdf3b50db52a5debf3aaedfb80ab67299de3ba51ed4844ac",
-            Format::B => "2:0:ae2fd59e4fa2cc0a3df4e417d5e5208e6c8d33e1cb1470b6daed39159814f22c",
+            Format::A => "1:0:f8b76e855b967111d40b06844e83938fcf818229c8c9ed2cb36f95fe4539c759",
+            Format::B => "2:0:10483bcfa07a8e4208011a3964a57679e6f1ea4a28d29158a6e0fd8d57e1cc79",
         };
         assert_eq!(
             deposit_receipt(&archive, &after, &mixed, &mixed_recheck, format)?,

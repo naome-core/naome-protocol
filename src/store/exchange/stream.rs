@@ -1,12 +1,12 @@
 //! The streaming exchange carries the exact inventory once, followed by
 //! ordered packets and a mandatory null terminator. Missing packets are
 //! withheld objects, as in the original exchange format.
-use super::{Archive, Packet, Snapshot, add_packet, verify_head};
+use super::{Archive, Packet, Snapshot, add_packet};
 use crate::{
-    store::save_imported_head,
+    store::snapshot::save_imported_head,
     wire::{Id, MAX_BYTES},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Read, Write};
 
@@ -66,7 +66,10 @@ impl Archive {
             header.format == FORMAT,
             "unsupported exchange stream format"
         );
-        verify_head(header.head, &header.snapshot)?;
+        header
+            .snapshot
+            .verify_head(header.head)
+            .context("invalid bundle head")?;
         // Retain the allocation for the most recent packet, never the stream.
         let mut bytes = Vec::new();
         let mut previous = None;

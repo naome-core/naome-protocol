@@ -69,6 +69,8 @@ After a search index upgrade, the first keyword search or `nao prepare-search` s
 
 Use `nao explain HEAD CLAIM --compact` and `nao impact HEAD NOTICE --compact` to report an unscanned record range separately from individual unavailable dependencies. In these reports, `unscanned: null` means the record scan reached the end of the snapshot. To resume a compact explanation, use its `unscanned.after` with `--after` at the same head. To complete an impact calculation, repeat it with a larger budget at that head so the dependency walk can see the complete inventory. The default reports and stored assessment receipts retain their existing frontier format.
 
+New assessment receipts use `rep-rust-rules-6`. It verifies canonical snapshot manifests for delegated assessments, notice freshness and format mappings. Historical receipts replay with their recorded evaluator. `nao capabilities` lists the supported versions.
+
 - [Whitepaper](spec/research-evidence-protocol.pdf)
 - [Bootstrap kit A](spec/kits/A.json) and [bootstrap kit B](spec/kits/B.json)
 - [Example exchange file](spec/examples/exchange-v1.json)

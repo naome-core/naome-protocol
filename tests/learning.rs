@@ -852,3 +852,65 @@ fn signed_disciplinary_targets_survive_exchange_and_enforce_use_scope() -> Resul
 
     Ok(())
 }
+
+#[test]
+fn historical_extraction_reads_mapping_manifests_under_the_receipts_rules() -> Result<()> {
+    use naome_protocol::learning::LabelStanding;
+    let archive = Archive::memory()?;
+    let format = Format::A;
+    let case = fixture::seed(&archive, format)?;
+    let head = archive.head(case.s0)?;
+    let query = &case.queries[2];
+    let plan = archive
+        .read(&head, query.arguments[0], "read")?
+        .one("plan")?;
+    let receipt = evaluation::assess(&archive, &head, query)?;
+    let receipt_id = evaluation::deposit_receipt(&archive, &head, query, &receipt, format)?;
+    let signed = archive.snapshot("current receipt", Default::default())?;
+    let current = archive.label(&signed, receipt_id, "synthetic", None, None, format)?;
+
+    // Both encodings identify the same historical inventory contents.
+    let migration = archive.migrate(&head, Format::B, "lab")?;
+    let exchange = archive.head(migration.exchange_head)?;
+    let mut mapping = archive.read(&exchange, migration.mapping, "read")?;
+    let pretty = archive.blob(&serde_json::to_vec_pretty(&head)?, Id::blob(PUBLIC))?;
+    mapping
+        .inputs
+        .iter_mut()
+        .find(|edge| edge.role == "source-inventory")
+        .unwrap()
+        .target = pretty;
+    let previous_mapping = archive.document(&mapping, format, Id::blob(PUBLIC))?;
+    let horizon = archive.snapshot("two receipt versions", Default::default())?;
+    let mut request = TrainingRequest {
+        feature_cutoff: case.feature_cutoff,
+        forecast_plan: None,
+        mappings: vec![migration.mapping],
+        label_head: horizon.id()?,
+        policy: case.policy,
+        standing: LabelStanding::Historical,
+        project: None,
+        examples: [case.labels[2], current]
+            .into_iter()
+            .map(|label| Example {
+                features: vec![plan],
+                label,
+                partition: "train".into(),
+            })
+            .collect(),
+        independent_roles: Default::default(),
+        binary: true,
+    };
+    let control = archive.training_manifest(&request, format)?;
+    assert_eq!(control.included, [case.labels[2], current]);
+    request.mappings = vec![previous_mapping];
+    let historical = archive.training_manifest(&request, format)?;
+    assert_eq!(historical.included, [case.labels[2]]);
+    assert_eq!(
+        historical.withheld[&current],
+        "current receipt requires canonical mapping inventories"
+    );
+    request.standing = LabelStanding::Current;
+    assert!(archive.training_manifest(&request, format).is_err());
+    Ok(())
+}

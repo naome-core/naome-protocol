@@ -1,5 +1,5 @@
 use super::correction::WithdrawalRules;
-use crate::profile::Document;
+use crate::{profile::Document, store::ManifestEncoding};
 use anyhow::{Context, Result};
 
 pub(crate) const V0_1_0_EVALUATOR_ID: &str = "rep-rust-0.1.0";
@@ -7,7 +7,7 @@ pub(crate) const FIXTURE_EVALUATOR_ID: &str = "rep-rust-rules-1";
 const RECORD_BUDGET_EVALUATOR_ID: &str = "rep-rust-rules-5";
 
 // The current writer selects one immutable replay policy by ID.
-pub(crate) const EVALUATOR_ID: &str = RECORD_BUDGET_EVALUATOR_ID;
+pub(crate) const EVALUATOR_ID: &str = "rep-rust-rules-6";
 
 #[derive(PartialEq, Eq)]
 pub(super) enum NoticeBudget {
@@ -49,6 +49,7 @@ impl CorrectionRules {
 
 pub(super) struct EvaluatorRules {
     ids: &'static [&'static str],
+    pub(crate) manifests: ManifestEncoding,
     pub(super) notice_budget: NoticeBudget,
     pub(super) withdrawal: WithdrawalRules,
     pub(super) resolve_required_withdrawals: bool,
@@ -58,7 +59,17 @@ pub(super) struct EvaluatorRules {
 
 const REPLAY_RULES: &[EvaluatorRules] = &[
     EvaluatorRules {
+        ids: &[EVALUATOR_ID],
+        manifests: ManifestEncoding::Canonical,
+        notice_budget: NoticeBudget::Records,
+        withdrawal: WithdrawalRules::Scoped,
+        resolve_required_withdrawals: true,
+        physical_identity: true,
+        corrections: CorrectionRules::ScopedWhenConfigured,
+    },
+    EvaluatorRules {
         ids: &[RECORD_BUDGET_EVALUATOR_ID],
+        manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Records,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
@@ -67,6 +78,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
     },
     EvaluatorRules {
         ids: &["rep-rust-rules-4"],
+        manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
@@ -75,6 +87,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
     },
     EvaluatorRules {
         ids: &["rep-rust-rules-3"],
+        manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
@@ -83,6 +96,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
     },
     EvaluatorRules {
         ids: &["rep-rust-rules-2"],
+        manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
@@ -91,6 +105,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
     },
     EvaluatorRules {
         ids: &[FIXTURE_EVALUATOR_ID],
+        manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
@@ -99,6 +114,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
     },
     EvaluatorRules {
         ids: &["rep-rust-0.1.2", "rep-rust-0.1.2-dev.1"],
+        manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: false,
@@ -107,6 +123,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
     },
     EvaluatorRules {
         ids: &["rep-rust-0.1.2-dev"],
+        manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
         withdrawal: WithdrawalRules::FirstScoped,
         resolve_required_withdrawals: false,
@@ -115,6 +132,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
     },
     EvaluatorRules {
         ids: &[V0_1_0_EVALUATOR_ID, "rep-rust-0.1.1"],
+        manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
         withdrawal: WithdrawalRules::ScopeOnly,
         resolve_required_withdrawals: false,
@@ -130,6 +148,10 @@ impl EvaluatorRules {
             .find(|rules| rules.ids.contains(&evaluator))
             .context("unsupported receipt evaluator")
     }
+}
+
+pub(crate) fn manifest_encoding(evaluator: &str) -> Result<ManifestEncoding> {
+    Ok(EvaluatorRules::for_id(evaluator)?.manifests)
 }
 
 #[cfg(feature = "cli")]

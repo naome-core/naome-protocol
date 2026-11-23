@@ -1,5 +1,6 @@
 mod cache;
 mod extract;
+mod lexical;
 mod rank;
 mod text;
 mod vectors;
@@ -219,7 +220,7 @@ impl Archive {
                 (vec![query], None, false)
             }
             SearchInput::TextFile(text) => {
-                let mut passages: Vec<_> = extract::ranges(text)
+                let mut passages: Vec<_> = lexical::ranges(text)
                     .take(MAX_QUERY_PASSAGES + 1)
                     .map(|range| &text[range])
                     .collect();

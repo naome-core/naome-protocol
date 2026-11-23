@@ -316,7 +316,7 @@ impl Archive {
         if let Some((id, _)) = best {
             links.push(link("selected", id));
         }
-        let head = self.blob(&serde_json::to_vec(s)?, Id::blob(PUBLIC))?;
+        let head = self.deposit_manifest(s)?;
         links.push(link("snapshot", head));
         self.document(
             &Document::new(

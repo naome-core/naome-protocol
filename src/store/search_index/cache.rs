@@ -1,6 +1,6 @@
 use super::{
     Archive, IndexedRecord, Passage, Snapshot,
-    extract::{normalize, terms},
+    lexical::{normalize, terms},
     text::VerifiedTextChunk,
 };
 use crate::{profile::Document, wire::Id};
