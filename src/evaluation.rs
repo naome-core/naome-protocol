@@ -644,6 +644,7 @@ pub(crate) fn assess_with_inventory(
         .find(|rules| rules.ids.contains(&evaluator))
         .context("unsupported receipt evaluator")?;
     let withdrawal_rules = rules.withdrawal;
+    let records_only = evaluator == EVALUATOR_ID;
     let mut assessment = Assessment::default();
     let out = &mut assessment.receipt;
     let withdrawals = &mut assessment.withdrawals;
@@ -668,7 +669,7 @@ pub(crate) fn assess_with_inventory(
         );
         out.dependencies.extend([q.target, q.policy]);
         // Historical receipts retain their original inventory-counting semantics.
-        inventory.search(store, s, q, out, evaluator == EVALUATOR_ID)?;
+        inventory.search(store, s, q, out, records_only)?;
         let mut aliases = Equivalence::default();
         for &mapping in &q.mappings {
             aliases.add(store.verify_mapping(s, mapping)?);
@@ -698,7 +699,9 @@ pub(crate) fn assess_with_inventory(
         };
         let has_input_keys = policy.fields.contains_key("input_correction_keys");
         let scoped_corrections = rules.scoped_corrections
-            && (has_input_keys || policy.fields.contains_key("foreign_calibration_keys"));
+            && (evaluator == CORRECTION_REASSESSMENT_EVALUATOR_ID
+                || has_input_keys
+                || policy.fields.contains_key("foreign_calibration_keys"));
         let input_corrections =
             rules.input_corrections && (!rules.scoped_corrections || has_input_keys);
         let view = Evaluation {
