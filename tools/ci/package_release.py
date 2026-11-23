@@ -58,6 +58,28 @@ def verify(nao, directory, version):
         if (directory / resolved).read_bytes() != reading:
             raise ValueError(f"{mode} exchange changed the payload")
 
+    (directory / "stream.txt").write_bytes(b"instrument capture stream")
+    stream = run("blob", "stream.txt")
+    manifest = [{"id": stream, "access": capabilities["public"], "file": "stream.txt"}]
+    (directory / "members.json").write_text(json.dumps(manifest), encoding="utf-8")
+    origin = ["--db", "paged origin.sqlite", "paged"]
+    receiver = ["--db", "paged receiver.sqlite", "paged"]
+    first = run(*origin, "append", "lab", "members.json")["head"]
+    captured = run(*origin, "capture", "lab", stream, "Messung µ.txt", "--parent", first)
+    tip = captured["head"]
+    subprocess.run([nao, *origin, "share", tip], cwd=directory, check=True, timeout=60)
+    run(*origin, "export-step", tip, "first.frame")
+    assert run(*receiver, "import-step", tip, "first.frame")["head"] == first
+    transfer = run(*receiver, "pull", "paged origin.sqlite", tip)
+    assert transfer["complete"] and transfer["batches"] == 1
+    subprocess.run([nao, *receiver, "range", tip, stream, "0", str(len(reading)), "range.bin"],
+                   cwd=directory, check=True, timeout=60)
+    assert (directory / "range.bin").read_bytes() == reading
+    (directory / "sources.json").write_text(json.dumps([{"head": tip, "db": "paged receiver.sqlite"}]))
+    result = run(*receiver, "review", "sources.json", object_id, "--corrections", "--receipt")
+    assert result["report"]["standing"] == "outside"
+    assert run(*receiver, "receipt", result["receipt"])["heads"] == [tip]
+
     run("keygen", "signing seed")
     if (directory / "signing seed").stat().st_size != 32:
         raise ValueError("key generation did not write a 32-byte seed")

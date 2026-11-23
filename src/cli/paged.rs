@@ -20,7 +20,7 @@ pub enum Command {
         stream: Id,
         file: PathBuf,
         #[arg(long)]
-        parent: Option<Id>,
+        parent: Id,
         #[arg(long)]
         access: Option<Id>,
     },
@@ -104,7 +104,7 @@ struct Locator {
 fn capture(
     db: &Archive,
     source: &str,
-    mut parent: Option<Id>,
+    initial: Id,
     stream: Id,
     file: &Path,
     access: Id,
@@ -113,7 +113,7 @@ fn capture(
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
     let mut length = 0_u64;
-    let initial = parent.context("capture requires a parent containing the stream descriptor")?;
+    let mut parent = Some(initial);
     db.paged_resolve(initial, stream, "read")?;
     let mut block = 0_u64;
     let mut items = Vec::new();
@@ -182,8 +182,19 @@ pub(super) fn run(db_path: &Path, command: Command) -> Result<()> {
         }
         return print(report);
     }
-    let db = Archive::open(db_path)?;
-    db.init_paged()?;
+    let db = match &command {
+        Command::Head { .. }
+        | Command::Receipt { .. }
+        | Command::Tips { .. }
+        | Command::Resolve { .. }
+        | Command::Range { .. }
+        | Command::ExportStep { .. } => Archive::paged_reader(db_path)?,
+        _ => {
+            let a = Archive::open(db_path)?;
+            a.init_paged()?;
+            a
+        }
+    };
     match command {
         Command::Review { .. } => unreachable!(),
         Command::Append {

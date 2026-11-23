@@ -271,7 +271,7 @@ Indexes may use identifiers, units, spatial or temporal bounds, graph patterns, 
 
 A correction or withdrawal names its target, scope and reason. Follow reverse dependencies to identify affected or open uses, then reassess their claims using surviving and revised arguments (Sections~\ref{sec:guarantee} and~\ref{sec:inputcorrections}). A later investigator can replay the earlier judgement at its snapshot and use the revised assessment in a new decision. A conflict that survives reassessment can motivate a new observation (Appendix~\ref{app:planning}).
 
-\topic{Scale and fidelity}
+\topic{Scale and fidelity (paged custody, p.~\pageref{sec:pagedcustody})}
 Index descriptors and retrieve payloads on demand. Summaries bind source manifests, omissions and supported queries. Replay criteria specify bit identity, numerical tolerance or a distributional test with predefined sampling and error criteria.
 
 \topic{Long horizons}
@@ -719,6 +719,47 @@ Action and adoption & A restarted executor recognises its earlier reservation. A
 
 \topic{Limits of the evaluation}
 The implementation supplies a particular research profile, typed training targets and additional signed tests under recipient-selected rules. Its two codec paths share one scientific evaluator. Agreement across those paths tests transport, local interpretation and the stated fixtures. The independent development, blinded baseline comparisons and prospective instrument trial specified in Section~\ref{sec:trial} and the preceding pages remain external validation tasks. The cases provide no estimate of population error rates, physical calibration accuracy or model improvement.
+
+\clearpage
+\pdfbookmark[2]{Large archives and independent laboratory heads}{pagedcustody}
+\subsection*{Large archives and independent laboratory heads}\label{sec:pagedcustody}
+A laboratory may accumulate multiple terabytes of raw payloads and many small, individually identifiable measurements. A flat list of ten million native identifiers takes about 710 MB in compact JSON before any evidence travels. Version~1 carries that list in the offline exchange header and stores a manifest with its receipt. Its bounded replica can buffer an entire release. Version~2 defines a separate paged custody head for independent laboratory writers. Existing version~1 identifiers, evidence bytes and scientific replay rules retain their meaning.
+
+\topic{What a head commits to}
+Each source commits its parent, sequence, authenticated ancestry jumps, bounded delta, persistent tree root and coverage counters. The tree orders membership, forward and reverse dependencies, correction targets and raw block positions. Canonical, content-addressed pages hold up to 32 entries and 16 KiB. An admission derives its keys from verified member bytes, copies the changed paths and reuses unaffected children. Each commit holds at most 64 submitted members and 4 MiB including bootstrap data. Small records share bounded segments indexed by their original IDs and offsets. A reader can fetch an individual record or a bounded range of 256 KiB raw blocks. Each read checks current local access.
+
+\topic{Parallel writing and transfer}
+Each laboratory can ingest into its own shard. Concurrent children of one parent remain separate addressable tips. A combined view commits to a sorted vector of up to 64 pinned heads. It needs no common payload transaction. A local grant names an exact tip. A portable frame carries one verified delta and a bounded ancestry proof from the independently trusted target pin. A receiver reconstructs the root and coverage, commits atomically, and can resume at its last admitted head. Repeated delivery preserves the head. A revoked grant or local withdrawal blocks subsequent transfer under that source's custody. An independent receiver controls its delivered copy. Production identity enrollment and transport scheduling belong to the deployment.
+
+\topic{How coverage is established}
+A root authenticates index contents. Coverage follows from deriving all declared entries at genesis and at every admitted child. An arbitrary pinned index with a missing notice fails this admission check. For a declared-dependency query the evaluator routes a correction to transitive dependents, or finds linked notices on a target and its premises. It checks the named sources, coverage counters, readable custody and query budget. A complete empty result excludes this declared path. Candidate notices require authority and scope review. Missing coverage, opaque records, unsupported mappings and exhausted work budgets leave the result open. A compact routing receipt binds the source pins, rule, target, budget, result count and digest. Earlier scientific receipts continue to replay against their version~1 snapshots. Version~2 scientific recomputation remains a separate evaluator capability.
+
+\clearpage
+\pdfbookmark[2]{Paged custody qualification}{pagedqualification}
+\subsection*{Paged custody qualification}\label{sec:pagedqualification}
+For height $H$, inserting one new key reads at most $H$ logical pages and creates at most $2H+1$, including splits. A batch with $k$ derived keys costs $O(kH)$ logical page work. Each physical page can use at most four stored differences from a full page. A logical read therefore needs at most five backing-row reads. A lineage of $S$ commits adds $O(\log S)$ jump references per commit. The last incremental frame contains its bounded delta and descriptor. First admission verifies and indexes the entire selected ancestry. Old roots retain their changed paths.
+
+\topic{Local experiments}
+Three optimized local runs per configuration used fresh SQLite files and separate processes on arm64 macOS. A generated inventory with virtual payload IDs used the actual tree, hashes and SQLite writes. For 100, 10,000 and one million keys the same inserted key read 2, 3 and 5 logical pages and created 2, 3 and 6. No virtual payload bytes were read or transferred.
+
+Real canonical measurement records exercised the shipping admission and portable replication paths. The same 203-byte linked claim was added to each inventory. File growth includes retained history and SQLite overhead. RSS and elapsed time are process medians for the delta phase, which also resolves the old and new views and traces the dependent. Frame bytes include metadata.
+
+\small
+\begin{tabularx}{\textwidth}{@{}X r r r r r r@{}}
+\toprule
+Records & Pages read & Created & Backing reads & Frame bytes & RSS, MiB & Time, ms\\
+\midrule
+128 & 16 & 8 & 32 & 824 & 5.39 & 6.43\\
+1,024 & 25 & 12 & 86 & 1,038 & 6.84 & 8.47\\
+12,800 & 34 & 18 & 121 & 1,252 & 7.69 & 10.74\\
+\bottomrule
+\end{tabularx}
+\normalsize
+
+At 12,800 records, the first 200 commits carried 1.76 MB of payload. Their origin grew by 156.00 MB. Retaining complete physical pages took 358.77 MB on the same workload. The bounded differences reduced file growth by 56.5\% and raised median origin time from 8.74 to 10.25 s. The first pull took 14.29 s and carried 12.94 MB including descriptors and ancestry proofs. The incremental receiver took 9.59 ms. Metadata and retained versions remain material for very small records.
+
+\topic{Parallelism and limits}
+Two local laboratory writers produced 24 mixed batches. A receiver limited to one batch per service step reopened 24 times, drained its backlog and accepted eight repeated notifications without retransmitting members. Separate controls exercised fork retention, grant withdrawal, failed partial admission, historical receipts and incomplete correction coverage. In a link-only model, 3 TiB requires about 44 minutes of payload transmission at 10 decimal Gbit/s before framing, hashing, storage and contention. This arithmetic and the local measurements do not establish physical terabyte throughput or a production multi-laboratory service rate. The versioned wire contract, raw samples, frozen criteria and executable reproduction procedure accompany this edition under \texttt{spec/scale/}.
 
 \partpage{Sources and design lineage}
 \small

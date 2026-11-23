@@ -41,12 +41,35 @@ def sample(binary, directory, size, phase):
     return row
 
 
+def verify(report):
+    reference = json.loads((ROOT / "spec/scale/full-page-samples.json").read_text())
+    baseline = {(r["phase"], r["size"]): r for r in reference["samples"]}
+    def check(original, measured):
+        for name, value in original.items():
+            if isinstance(value, dict):
+                check(value, measured[name])
+            elif name not in {"elapsed_ms", "queue_full_events", "writer_finish_us", "receiver_growth"}:
+                assert measured[name] == value, (name, measured[name], value)
+        if "reads" in original:
+            assert measured["reads"] <= measured["backing_reads"] <= 5 * measured["reads"]
+    for row in report["samples"]:
+        other = baseline[row["phase"], row["size"]]
+        check(other["result"], row["result"])
+        if row["phase"] == "first" and row["size"] == 12800 and report["platform"] == reference["platform"]:
+            assert row["database_growth"] < other["database_growth"]
+    print(f"Verified logical identities, work and transfer fields for {len(report['samples'])} observations.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--verify-saved", action="store_true")
     args = parser.parse_args()
+    if args.verify_saved:
+        verify(json.loads(args.output.read_text()))
+        return
     if args.repetitions < 1:
         parser.error("expected positive repetition count")
     binary = build()
@@ -67,6 +90,7 @@ def main():
     report = {"platform": platform.platform(), "build": "cargo test --lib --release --locked",
               "rustc": subprocess.check_output(["rustc", "-V"], text=True).strip(),
               "samples": rows}
+    verify(report)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
 
 

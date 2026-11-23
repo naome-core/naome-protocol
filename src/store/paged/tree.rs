@@ -21,6 +21,48 @@ pub struct PageIo {
     pub read_bytes: u64,
     pub writes: u64,
     pub written_bytes: u64,
+    pub backing_reads: u64,
+    pub backing_read_bytes: u64,
+    pub backing_written_bytes: u64,
+}
+
+const PATCH: u8 = 2;
+const MAX_DEPTH: u8 = 4;
+struct Backing {
+    id: Id,
+    depth: u8,
+    bytes: Vec<u8>,
+}
+
+impl Backing {
+    // Preserve exact logical page bytes and identifiers across storage layouts.
+    fn patch(&self, bytes: &[u8]) -> Option<Vec<u8>> {
+        if self.depth >= MAX_DEPTH {
+            return None;
+        }
+        let prefix = self
+            .bytes
+            .iter()
+            .zip(bytes)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let suffix = self.bytes[prefix..]
+            .iter()
+            .rev()
+            .zip(bytes[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if prefix + suffix <= 37 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(37 + bytes.len() - prefix - suffix);
+        out.push(PATCH);
+        out.extend_from_slice(&self.id.blob_digest()?);
+        out.extend_from_slice(&(prefix as u16).to_be_bytes());
+        out.extend_from_slice(&(suffix as u16).to_be_bytes());
+        out.extend_from_slice(&bytes[prefix..bytes.len() - suffix]);
+        Some(out)
+    }
 }
 
 pub(super) struct Tree<'a> {
@@ -35,19 +77,55 @@ impl<'a> Tree<'a> {
             io: PageIo::default(),
         }
     }
-    fn read(&mut self, id: Id) -> Result<Page> {
-        let bytes: Vec<u8> = self
+    fn backing(&mut self, id: Id, hops: u8) -> Result<Backing> {
+        let stored: Vec<u8> = self
             .db
             .prepare_cached("SELECT data FROM rep2_pages WHERE id=?")?
             .query_row([id.to_string()], |row| row.get(0))
             .context("missing inventory page")?;
-        self.io.reads += 1;
-        self.io.read_bytes += bytes.len() as u64;
-        ensure!(bytes.len() <= MAX_PAGE, "oversized inventory page");
+        ensure!(stored.len() <= MAX_PAGE, "oversized backing page");
+        self.io.backing_reads += 1;
+        self.io.backing_read_bytes += stored.len() as u64;
+        let (bytes, depth) = if stored.first() == Some(&PATCH) {
+            ensure!(
+                hops < MAX_DEPTH && stored.len() >= 37,
+                "invalid backing chain"
+            );
+            let base_id = Id::from_blob_digest(stored[1..33].try_into()?);
+            let base = self.backing(base_id, hops + 1)?;
+            let prefix = u16::from_be_bytes(stored[33..35].try_into()?) as usize;
+            let suffix = u16::from_be_bytes(stored[35..37].try_into()?) as usize;
+            ensure!(
+                prefix + suffix <= base.bytes.len()
+                    && prefix + suffix + stored.len() - 37 <= MAX_PAGE,
+                "invalid backing splice"
+            );
+            let mut bytes = Vec::with_capacity(prefix + suffix + stored.len() - 37);
+            bytes.extend_from_slice(&base.bytes[..prefix]);
+            bytes.extend_from_slice(&stored[37..]);
+            bytes.extend_from_slice(&base.bytes[base.bytes.len() - suffix..]);
+            (bytes, base.depth + 1)
+        } else {
+            (stored, 0)
+        };
         id.verify(&bytes)?;
-        Ok(serde_json::from_slice(&bytes)?)
+        Ok(Backing { id, depth, bytes })
     }
-    fn save(&mut self, rows: Vec<Entry>, branch: bool) -> Result<Vec<Entry>> {
+    fn read_version(&mut self, id: Id) -> Result<(Page, Backing)> {
+        let backing = self.backing(id, 0)?;
+        self.io.reads += 1;
+        self.io.read_bytes += backing.bytes.len() as u64;
+        Ok((serde_json::from_slice(&backing.bytes)?, backing))
+    }
+    fn read(&mut self, id: Id) -> Result<Page> {
+        Ok(self.read_version(id)?.0)
+    }
+    fn save(
+        &mut self,
+        rows: Vec<Entry>,
+        branch: bool,
+        base: Option<&Backing>,
+    ) -> Result<Vec<Entry>> {
         let groups = rows.len().div_ceil(FANOUT);
         let mut result = Vec::with_capacity(groups);
         let mut rows = rows.into_iter();
@@ -63,13 +141,16 @@ impl<'a> Tree<'a> {
             let bytes = serde_json::to_vec(&page)?;
             ensure!(bytes.len() <= MAX_PAGE, "oversized inventory page");
             let id = Id::blob(&bytes);
+            let patch = base.and_then(|old| old.patch(&bytes));
+            let stored = patch.as_deref().unwrap_or(&bytes);
             if self
                 .db
                 .prepare_cached("INSERT OR IGNORE INTO rep2_pages VALUES(?,?)")?
-                .execute(params![id.to_string(), bytes])?
+                .execute(params![id.to_string(), stored])?
                 != 0
             {
                 self.io.writes += 1;
+                self.io.backing_written_bytes += stored.len() as u64;
                 self.io.written_bytes += bytes.len() as u64;
             }
             result.push((first, id));
@@ -81,15 +162,16 @@ impl<'a> Tree<'a> {
         let keys: Vec<_> = changes.into_iter().collect();
         let mut row = match root {
             Some(id) => self.update(id, &keys)?,
-            None => self.save(keys, false)?,
+            None => self.save(keys, false, None)?,
         };
         while row.len() > 1 {
-            row = self.save(row, true)?;
+            row = self.save(row, true, None)?;
         }
         Ok(row[0].1)
     }
     fn update(&mut self, id: Id, changes: &[Entry]) -> Result<Vec<Entry>> {
-        match self.read(id)? {
+        let (page, base) = self.read_version(id)?;
+        match page {
             Page::Leaf(rows) => {
                 let mut entries: BTreeMap<_, _> = rows.into_iter().collect();
                 let old_len = entries.len();
@@ -101,7 +183,7 @@ impl<'a> Tree<'a> {
                 if old_len == entries.len() {
                     return Ok(vec![(entries.first_key_value().unwrap().0.clone(), id)]);
                 }
-                self.save(entries.into_iter().collect(), false)
+                self.save(entries.into_iter().collect(), false, Some(&base))
             }
             Page::Branch(children) => {
                 let mut cursor = 0;
@@ -120,7 +202,7 @@ impl<'a> Tree<'a> {
                 if children == next {
                     return Ok(vec![(children[0].0.clone(), id)]);
                 }
-                self.save(next, true)
+                self.save(next, true, Some(&base))
             }
         }
     }
@@ -181,5 +263,8 @@ impl std::ops::AddAssign for PageIo {
         self.read_bytes += other.read_bytes;
         self.writes += other.writes;
         self.written_bytes += other.written_bytes;
+        self.backing_reads += other.backing_reads;
+        self.backing_read_bytes += other.backing_read_bytes;
+        self.backing_written_bytes += other.backing_written_bytes;
     }
 }

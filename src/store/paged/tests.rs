@@ -489,3 +489,72 @@ fn portable_frames_verify_pinned_ancestry_and_rollback_partial_input() -> Result
     }
     Ok(())
 }
+
+#[test]
+fn a_pinned_but_incomplete_index_cannot_exclude_a_notice() -> Result<()> {
+    let a = store()?;
+    let b = store()?;
+    let original = Item::blob(b"source version".to_vec(), public());
+    let target = original.member.id;
+    let base = a.paged_append("lab", None, &[original])?.head;
+    a.paged_share(base, true)?;
+    b.paged_pull(&a, base, 1)?;
+    let notice = specimen(7, Kind::Notice, Some((target, "source-version")));
+    let bytes = notice.bytes.clone();
+    let notice_id = notice.member.id;
+    let tip = a.paged_append("lab", Some(base), &[notice])?.head;
+    let mut claimed = a.paged_head(tip)?;
+    claimed.tree = a.paged_head(base)?.tree;
+    let metadata = serde_json::to_vec(&claimed)?;
+    let pin = Id::blob(&metadata);
+    let mut frame = b"NPG2".to_vec();
+    for field in [&metadata, &bytes] {
+        frame.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        frame.extend_from_slice(field);
+    }
+    assert!(b.paged_import_step(pin, frame.as_slice()).is_err());
+    assert!(b.paged_head(pin).is_err());
+    assert!(b.paged_raw(notice_id).is_err());
+    assert_eq!(b.paged_tips("lab", None, 10)?, vec![base]);
+    let unscoped = a
+        .paged_append("lab", Some(base), &[specimen(8, Kind::Notice, None)])?
+        .head;
+    assert_eq!(
+        view(&[unscoped])
+            .corrections(&[(&a, unscoped)], target, 100)?
+            .standing,
+        "open"
+    );
+    Ok(())
+}
+
+#[test]
+fn physical_page_splices_preserve_roots_and_bound_backing_reads() -> Result<()> {
+    let a = store()?;
+    let mut tree = Tree::new(&a.db);
+    let keys: Vec<_> = (0_u64..100)
+        .map(|i| {
+            let mut digest = [0; 32];
+            digest[24..].copy_from_slice(&i.to_be_bytes());
+            let id = Id::from_blob_digest(digest);
+            (object(id), id)
+        })
+        .collect();
+    let base = tree.apply(None, keys.into_iter().collect())?;
+    let key = Id::from_blob_digest([255; 32]);
+    let next = tree.apply(Some(base), BTreeMap::from([(object(key), key)]))?;
+    assert_eq!(
+        next.to_string(),
+        "1:1:099a070fe4dbf60cec1a0cce433c011d4a8455bd11bfd605c1f2d282f6eeaa50"
+    );
+    let mut head = next;
+    for i in 0..20 {
+        let id = Id::blob(&[i]);
+        head = tree.apply(Some(head), BTreeMap::from([(object(id), id)]))?;
+        assert_eq!(tree.get(head, &object(id))?, Some(id));
+        assert!(tree.get(base, &object(id))?.is_none());
+    }
+    assert!(tree.io.backing_reads > tree.io.reads && tree.io.backing_reads <= 5 * tree.io.reads);
+    assert!(tree.io.backing_written_bytes < tree.io.written_bytes);
+    Ok(())
+}
