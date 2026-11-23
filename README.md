@@ -72,3 +72,5 @@ Use `nao explain HEAD CLAIM --compact` and `nao impact HEAD NOTICE --compact` to
 - [Whitepaper](spec/research-evidence-protocol.pdf)
 - [Bootstrap kit A](spec/kits/A.json) and [bootstrap kit B](spec/kits/B.json)
 - [Example exchange file](spec/examples/exchange-v1.json)
+
+From a source checkout on Linux x86_64 or Apple silicon, run `python3 tools/ci/whitepaper.py` to rebuild the whitepaper and verify the PDF. The first build downloads the pinned TeX engine and its resources.

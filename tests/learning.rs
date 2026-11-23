@@ -209,6 +209,44 @@ fn released_v012_receipt_replays_with_its_original_withdrawal_semantics() -> Res
 }
 
 #[test]
+fn rules_5_receipt_replays_with_its_original_record_budget() -> Result<()> {
+    // Deposited by the evaluator at release PR #22 commit 2add0aae.
+    #[derive(serde::Deserialize)]
+    struct Vector {
+        bundle: naome_protocol::store::Bundle,
+        receipt: Id,
+        request: TrainingRequest,
+        expected_manifest: Id,
+    }
+
+    let vector: Vector = serde_json::from_str(include_str!("fixtures/rules-5-record-budget.json"))?;
+    let mut archive = Archive::memory()?;
+    let head = archive.import(&vector.bundle)?;
+    assert_eq!(head, vector.request.label_head);
+    let snapshot = archive.head(head)?;
+    let receipt = archive.read(&snapshot, vector.receipt, "read")?;
+    assert_eq!(receipt.fields["evaluator"], "rep-rust-rules-5");
+    let original: evaluation::Receipt = receipt.field("original_transcript")?;
+    assert!(original.horizon_complete);
+    assert_eq!(original.result, Some(Standing::Supported));
+
+    let horizon = archive.head(receipt.one("snapshot")?)?;
+    let query: Query = receipt.field("original_query")?;
+    let records = horizon
+        .objects
+        .iter()
+        .filter(|id| id.format().is_some())
+        .count();
+    assert!(records <= query.budget && query.budget < horizon.objects.len());
+
+    let replay = archive.training_manifest(&vector.request, Format::A)?;
+    assert_eq!(replay.included, [vector.request.examples[0].label]);
+    assert!(replay.withheld.is_empty(), "{:?}", replay.withheld);
+    assert_eq!(replay.manifest, vector.expected_manifest);
+    Ok(())
+}
+
+#[test]
 fn training_reuses_inventories_without_widening_query_budgets() -> Result<()> {
     let archive = Archive::memory()?;
     let format = Format::A;

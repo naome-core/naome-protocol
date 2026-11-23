@@ -32,6 +32,46 @@ fn help_uses_nao_with_an_exe_filename() -> Result<()> {
 }
 
 #[test]
+fn standalone_commands_leave_the_default_archive_absent() -> Result<()> {
+    let directory = tempdir()?;
+    let root = directory.path();
+    std::fs::write(root.join("kit.json"), include_bytes!("../spec/kits/A.json"))?;
+    std::fs::write(
+        root.join("model.json"),
+        br#"{"losses":[[1]],"joint_masses":[[1]],"loss_unit":"tick","acquisition_cost":0}"#,
+    )?;
+    let run = |args: &[&str]| -> Result<Vec<u8>> {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
+            .current_dir(root)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!root.join("evidence.sqlite").exists(), "{args:?}");
+        Ok(output.stdout)
+    };
+    run(&["capabilities"])?;
+    run(&["kit", "kit.json", &naome_protocol::kit::pin(Format::A)])?;
+    run(&["keygen", "seed"])?;
+    run(&["value", "model.json"])?;
+    run(&["trial", "trial"])?;
+    let submission = run(&["suite", "trial/conformance"])?;
+    std::fs::write(root.join("submission.json"), submission)?;
+    run(&["grade", "trial/conformance/answers.json", "submission.json"])?;
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
+        .current_dir(root)
+        .arg("init")
+        .output()?;
+    assert!(output.status.success());
+    assert!(root.join("evidence.sqlite").is_file());
+    Ok(())
+}
+
+#[test]
 fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
         .arg("capabilities")

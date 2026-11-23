@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,6 +20,13 @@ PUBLISHED_PROFILES = {
 
 
 def verify(nao, directory, version):
+    readme = (directory / "README.md").read_text(encoding="utf-8")
+    for link in re.findall(r"\]\((spec/[^)]+)\)", readme):
+        expected = ROOT / link
+        packaged = directory / link
+        if not packaged.is_file() or packaged.read_bytes() != expected.read_bytes():
+            raise ValueError(f"missing or altered README target in release download: {link}")
+
     version_line = subprocess.check_output([nao, "--version"], cwd=directory, text=True, timeout=60)
     help_text = subprocess.check_output([nao, "--help"], cwd=directory, text=True, timeout=60)
     usage = next((line for line in help_text.splitlines() if line.startswith("Usage: ")), "")
@@ -77,6 +85,7 @@ def package(target, model):
         shutil.copy2(build_directory / "release" / name, staging)
         for path in [ROOT / "LICENSE", ROOT / "README.md", *ROOT.glob("requirements-search*.txt")]:
             shutil.copy2(path, staging)
+        shutil.copytree(ROOT / "spec", staging / "spec")
 
         package_path = Path(shutil.make_archive(
             str(root / f"nao-v{version}-{target}"), archive_format, root_dir=staging

@@ -4,6 +4,7 @@ pub(crate) mod dependency_correction;
 mod impact;
 mod inventory;
 mod measurement;
+mod rules;
 mod science;
 use calibration_identity::CalibrationIdentities;
 use correction::{
@@ -15,6 +16,10 @@ use dependency_correction::{
 pub use impact::Impact;
 pub(crate) use inventory::{EvidenceView, ReadInventory};
 use measurement::Predicate;
+#[cfg(feature = "cli")]
+pub(crate) use rules::replay_evaluator_ids;
+pub(crate) use rules::{EVALUATOR_ID, FIXTURE_EVALUATOR_ID, V0_1_0_EVALUATOR_ID};
+use rules::{EvaluatorRules, NoticeBudget};
 
 use crate::{
     migration::Equivalence,
@@ -27,16 +32,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) const V0_1_0_EVALUATOR_ID: &str = "rep-rust-0.1.0";
-const FIRST_SCOPED_EVALUATOR_ID: &str = "rep-rust-0.1.2-dev";
 const WITHDRAWAL_APPLICABILITY: &str = "withdrawal applicability";
 const CALIBRATION_IDENTITY_CHECK: &str = "calibration event identity";
-// This identifier versions the receipt semantics. Package releases can reuse it.
-pub(crate) const FIXTURE_EVALUATOR_ID: &str = "rep-rust-rules-1";
-const CALIBRATION_IDENTITY_EVALUATOR_ID: &str = "rep-rust-rules-2";
-const INPUT_CORRECTION_EVALUATOR_ID: &str = "rep-rust-rules-3";
-const CORRECTION_REASSESSMENT_EVALUATOR_ID: &str = "rep-rust-rules-4";
-pub(crate) const EVALUATOR_ID: &str = "rep-rust-rules-5";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,81 +134,6 @@ impl Receipt {
         self.obligations.insert(reason.into());
     }
 }
-struct EvaluatorRules {
-    ids: &'static [&'static str],
-    withdrawal: WithdrawalRules,
-    resolve_required_withdrawals: bool,
-    physical_identity: bool,
-    input_corrections: bool,
-    scoped_corrections: bool,
-}
-
-const REPLAY_RULES: &[EvaluatorRules] = &[
-    EvaluatorRules {
-        ids: &[EVALUATOR_ID, CORRECTION_REASSESSMENT_EVALUATOR_ID],
-        withdrawal: WithdrawalRules::Scoped,
-        resolve_required_withdrawals: true,
-        physical_identity: true,
-        input_corrections: true,
-        scoped_corrections: true,
-    },
-    EvaluatorRules {
-        ids: &[INPUT_CORRECTION_EVALUATOR_ID],
-        withdrawal: WithdrawalRules::Scoped,
-        resolve_required_withdrawals: true,
-        physical_identity: true,
-        input_corrections: true,
-        scoped_corrections: false,
-    },
-    EvaluatorRules {
-        ids: &[CALIBRATION_IDENTITY_EVALUATOR_ID],
-        withdrawal: WithdrawalRules::Scoped,
-        resolve_required_withdrawals: true,
-        physical_identity: true,
-        input_corrections: false,
-        scoped_corrections: false,
-    },
-    EvaluatorRules {
-        ids: &[FIXTURE_EVALUATOR_ID],
-        withdrawal: WithdrawalRules::Scoped,
-        resolve_required_withdrawals: true,
-        physical_identity: false,
-        input_corrections: false,
-        scoped_corrections: false,
-    },
-    EvaluatorRules {
-        ids: &["rep-rust-0.1.2", "rep-rust-0.1.2-dev.1"],
-        withdrawal: WithdrawalRules::Scoped,
-        resolve_required_withdrawals: false,
-        physical_identity: false,
-        input_corrections: false,
-        scoped_corrections: false,
-    },
-    EvaluatorRules {
-        ids: &[FIRST_SCOPED_EVALUATOR_ID],
-        withdrawal: WithdrawalRules::FirstScoped,
-        resolve_required_withdrawals: false,
-        physical_identity: false,
-        input_corrections: false,
-        scoped_corrections: false,
-    },
-    EvaluatorRules {
-        ids: &[V0_1_0_EVALUATOR_ID, "rep-rust-0.1.1"],
-        withdrawal: WithdrawalRules::ScopeOnly,
-        resolve_required_withdrawals: false,
-        physical_identity: false,
-        input_corrections: false,
-        scoped_corrections: false,
-    },
-];
-
-#[cfg(feature = "cli")]
-pub(crate) fn replay_evaluator_ids() -> impl Iterator<Item = &'static str> {
-    REPLAY_RULES
-        .iter()
-        .flat_map(|rules| rules.ids.iter().copied())
-}
-
 pub struct Evaluation<'a> {
     store: &'a Archive,
     s: &'a Snapshot,
@@ -641,12 +563,8 @@ pub(crate) fn assess_with_inventory(
     evaluator: &str,
     inventory: &mut ReadInventory,
 ) -> Result<Assessment> {
-    let rules = REPLAY_RULES
-        .iter()
-        .find(|rules| rules.ids.contains(&evaluator))
-        .context("unsupported receipt evaluator")?;
+    let rules = EvaluatorRules::for_id(evaluator)?;
     let withdrawal_rules = rules.withdrawal;
-    let records_only = evaluator == EVALUATOR_ID;
     let mut assessment = Assessment::default();
     let out = &mut assessment.receipt;
     let withdrawals = &mut assessment.withdrawals;
@@ -670,8 +588,13 @@ pub(crate) fn assess_with_inventory(
             "unsupported query policy"
         );
         out.dependencies.extend([q.target, q.policy]);
-        // Historical receipts retain their original inventory-counting semantics.
-        inventory.search(store, s, q, out, records_only)?;
+        inventory.search(
+            store,
+            s,
+            q,
+            out,
+            rules.notice_budget == NoticeBudget::Records,
+        )?;
         let mut aliases = Equivalence::default();
         for &mapping in &q.mappings {
             aliases.add(store.verify_mapping(s, mapping)?);
@@ -699,13 +622,7 @@ pub(crate) fn assess_with_inventory(
         } else {
             CalibrationIdentities::default()
         };
-        let has_input_keys = policy.fields.contains_key("input_correction_keys");
-        let scoped_corrections = rules.scoped_corrections
-            && (evaluator == CORRECTION_REASSESSMENT_EVALUATOR_ID
-                || has_input_keys
-                || policy.fields.contains_key("foreign_calibration_keys"));
-        let input_corrections =
-            rules.input_corrections && (!rules.scoped_corrections || has_input_keys);
+        let corrections = rules.corrections.for_policy(&policy);
         let view = Evaluation {
             store,
             s,
@@ -714,14 +631,14 @@ pub(crate) fn assess_with_inventory(
             policy,
             withdrawal_rules,
             calibration_identities,
-            input_corrections,
-            scoped_corrections,
+            input_corrections: corrections.input_versions,
+            scoped_corrections: corrections.scoped,
         };
-        let input_corrections = if input_corrections {
+        let input_corrections = if corrections.input_versions {
             admitted_corrections(
                 &view.evidence_view(),
                 &correction_keys(&view.policy)?,
-                rules.scoped_corrections,
+                corrections.scoped,
             )?
         } else {
             Vec::new()
@@ -757,7 +674,7 @@ pub(crate) fn assess_with_inventory(
                 );
                 if !input_corrections.is_empty() {
                     // Keep the full-provenance requirement when replaying rules-3 receipts.
-                    if !rules.scoped_corrections {
+                    if !corrections.scoped {
                         out.frontier.extend(evidence.frontier.keys());
                         ensure!(
                             evidence.frontier.is_empty(),

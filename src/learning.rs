@@ -1,3 +1,5 @@
+mod prospective;
+
 pub use crate::evaluation::Impact;
 use crate::{
     evaluation::{
@@ -260,10 +262,9 @@ impl TrainingReview<'_> {
             after,
             request,
             aliases,
-            trust,
-            historical,
             access,
-        } = self;
+            ..
+        } = *self;
         let l = store.read_for_training(after, ex.label, access)?;
         ensure!(l.kind == Kind::Label, "expected label");
         let value = l.fields.get("value").context("missing label value")?;
@@ -312,7 +313,8 @@ impl TrainingReview<'_> {
             "label replay exceeds local extraction budget"
         );
         let evaluator: String = receipt.field("evaluator")?;
-        if historical
+        if self
+            .historical
             .as_ref()
             .is_none_or(|(head, _, _)| *head != receipt_head)
         {
@@ -321,10 +323,12 @@ impl TrainingReview<'_> {
                 snapshot.objects.is_subset(&after.objects),
                 "receipt inventory outside label horizon"
             );
-            *historical = Some((receipt_head, snapshot, ReadInventory::for_replay()));
+            self.historical = Some((receipt_head, snapshot, ReadInventory::for_replay()));
         }
-        let (historical_head, historical, inventory) =
-            historical.as_mut().context("missing receipt inventory")?;
+        let (historical_head, historical, inventory) = self
+            .historical
+            .as_mut()
+            .context("missing receipt inventory")?;
         let replay =
             assess_with_inventory(store, historical, &original, &evaluator, inventory)?.receipt;
         let expected = crate::evaluation::receipt_document(
@@ -348,7 +352,7 @@ impl TrainingReview<'_> {
             "label disagrees with the assessed predicate"
         );
         let bound_signatures = l.roles("origin-attestation").collect::<BTreeSet<_>>();
-        let origins = trust.origin(
+        let origins = self.trust.origin(
             store,
             after,
             &receipt,
@@ -360,59 +364,7 @@ impl TrainingReview<'_> {
             bound_signatures.len() == origins.len(),
             "ambiguous origin attestations"
         );
-        let mut witnesses = BTreeSet::new();
-        if let Some(plan) = request.forecast_plan {
-            ensure!(
-                store
-                    .read_for_training(before, plan, access)
-                    .is_ok_and(|d| d.kind == Kind::Plan),
-                "registered forecast plan unavailable at feature cutoff"
-            );
-            let mut checked_outcomes = BTreeSet::new();
-            for &id in &original.arguments {
-                let argument = store.read_for_training(historical, id, access)?;
-                let witness_id = argument.one("release")?;
-                let witness = store.read_for_training(historical, witness_id, access)?;
-                ensure!(
-                    witness.kind == Kind::Occurrence
-                        && witness.subject == receipt.subject
-                        && witness.scope == receipt.scope
-                        && aliases.endpoints(witness.one("plan")?).contains(&plan)
-                        && witness.one("feature-cutoff")? == request.feature_cutoff
-                        && witness.field::<bool>("concealed")?
-                        && witness.field::<u64>("sealed")? < witness.field::<u64>("released")?,
-                    "missing controlled pre-outcome cutoff"
-                );
-                let signature = trust
-                    .signatures(aliases, witness_id, &witness.scope, "release")
-                    .into_iter()
-                    .find(|id| store.resolve_for_training(historical, *id, access).is_ok())
-                    .context("no admitted release signature at the receipt horizon")?;
-                let mut outcomes: Vec<_> = argument.outcome_inputs().collect();
-                ensure!(
-                    !outcomes.is_empty(),
-                    "argument has no declared outcome evidence"
-                );
-                while let Some(outcome) = outcomes.pop() {
-                    if !checked_outcomes.insert(outcome) {
-                        continue;
-                    }
-                    ensure!(
-                        aliases.endpoints(outcome).is_disjoint(&before.objects),
-                        "outcome evidence visible at the feature cutoff"
-                    );
-                    ensure!(
-                        historical.objects.contains(&outcome),
-                        "declared outcome evidence unavailable at the receipt horizon"
-                    );
-                    if outcome.format().is_some() {
-                        let evidence = store.read_for_training(historical, outcome, access)?;
-                        outcomes.extend(evidence.outcome_inputs());
-                    }
-                }
-                witnesses.insert(signature);
-            }
-        }
+        let witnesses = prospective::witnesses(self, &receipt, &original.arguments)?;
         let mut axes = BTreeSet::from([("claim".to_owned(), canonical(aliases, claim))]);
         let features = store.explain_for_training(before, &ex.features, access);
         let label = store.explain_for_training(after, &[ex.label], access);
@@ -427,9 +379,9 @@ impl TrainingReview<'_> {
             .filter(|id| id.format().is_some())
         {
             let horizon = if features.visited.contains(&id) {
-                *before
+                before
             } else {
-                *after
+                after
             };
             let doc = store.read_for_training(horizon, id, access)?;
             for edge in doc.inputs {
@@ -439,6 +391,7 @@ impl TrainingReview<'_> {
             }
         }
         if request.standing == LabelStanding::Current {
+            let trust = &mut self.trust;
             ensure!(
                 trust.inventory.notice_search_complete(),
                 "requested notice horizon has unreadable notices or records of unknown kind"
