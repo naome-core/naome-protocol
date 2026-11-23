@@ -51,14 +51,23 @@ fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
     );
     let replay =
         serde_json::from_value::<BTreeSet<String>>(capabilities["replay_evaluators"].clone())?;
-    assert_eq!(
-        capabilities["input_correction_evaluator"],
-        "rep-rust-rules-3"
-    );
-    assert_eq!(
-        capabilities["correction_reassessment_evaluator"],
-        "rep-rust-rules-4"
-    );
+    for (field, capability) in [
+        ("foreign_calibration_keys", "calibration_identity_evaluator"),
+        ("input_correction_keys", "input_correction_evaluator"),
+    ] {
+        let mut query = case.queries[2].clone();
+        let seed = archive.head(case.published)?;
+        let mut policy = archive.read(&seed, query.policy, "read")?;
+        policy.fields.insert(field.into(), json!({}));
+        query.policy = archive.document(&policy, Format::A, Id::blob(PUBLIC))?;
+        let head = archive.snapshot("correction policy", [case.published].into())?;
+        let result = evaluation::assess(&archive, &head, &query)?;
+        let id = evaluation::deposit_receipt(&archive, &head, &query, &result, Format::A)?;
+        let after = archive.snapshot("correction receipt", [head.id()?].into())?;
+        let stored = archive.read(&after, id, "read")?;
+        assert_eq!(capabilities[capability], stored.fields["evaluator"]);
+        assert_eq!(capabilities[capability], "rep-rust-rules-4");
+    }
     let expected = [
         "rep-rust-rules-4",
         "rep-rust-rules-3",

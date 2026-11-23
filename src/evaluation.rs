@@ -31,8 +31,8 @@ const WITHDRAWAL_APPLICABILITY: &str = "withdrawal applicability";
 const CALIBRATION_IDENTITY_CHECK: &str = "calibration event identity";
 // This identifier versions the receipt semantics. Package releases can reuse it.
 const RULES_V1: &str = "rep-rust-rules-1";
-pub(crate) const CALIBRATION_IDENTITY_EVALUATOR_ID: &str = "rep-rust-rules-2";
-pub(crate) const INPUT_CORRECTION_EVALUATOR_ID: &str = "rep-rust-rules-3";
+const CALIBRATION_IDENTITY_EVALUATOR_ID: &str = "rep-rust-rules-2";
+const INPUT_CORRECTION_EVALUATOR_ID: &str = "rep-rust-rules-3";
 pub(crate) const CORRECTION_REASSESSMENT_EVALUATOR_ID: &str = "rep-rust-rules-4";
 pub(crate) const EVALUATOR_ID: &str = RULES_V1;
 
