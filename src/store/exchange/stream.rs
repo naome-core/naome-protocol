@@ -30,31 +30,31 @@ impl Archive {
         purpose: &str,
         mut output: impl Write,
     ) -> Result<usize> {
-        let tx = self.db.unchecked_transaction()?;
-        let head = snapshot.id()?;
-        let header = Header {
-            format: FORMAT.to_owned(),
-            head,
-            snapshot,
-        };
-        let header = serde_json::to_vec(&header)?;
-        ensure!(
-            header.len() < MAX_HEADER,
-            "exchange stream header exceeds byte limit"
-        );
-        output.write_all(&header)?;
-        output.write_all(b"\n")?;
-        let mut count = 0;
-        for &id in &snapshot.objects {
-            if let Some(packet) = self.exchange_packet(snapshot, id, purpose) {
-                serde_json::to_writer(&mut output, &packet)?;
-                output.write_all(b"\n")?;
-                count += 1;
+        self.with_read_view(|| {
+            let head = snapshot.id()?;
+            let header = Header {
+                format: FORMAT.to_owned(),
+                head,
+                snapshot,
+            };
+            let header = serde_json::to_vec(&header)?;
+            ensure!(
+                header.len() < MAX_HEADER,
+                "exchange stream header exceeds byte limit"
+            );
+            output.write_all(&header)?;
+            output.write_all(b"\n")?;
+            let mut count = 0;
+            for &id in &snapshot.objects {
+                if let Some(packet) = self.exchange_packet(snapshot, id, purpose) {
+                    serde_json::to_writer(&mut output, &packet)?;
+                    output.write_all(b"\n")?;
+                    count += 1;
+                }
             }
-        }
-        output.write_all(b"null\n")?;
-        tx.commit()?;
-        Ok(count)
+            output.write_all(b"null\n")?;
+            Ok(count)
+        })
     }
 
     /// Verify a stream incrementally and commit the entire inventory atomically.

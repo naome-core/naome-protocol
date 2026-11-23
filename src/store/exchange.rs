@@ -35,6 +35,24 @@ pub struct Bundle {
     pub continuation: Option<Id>,
 }
 impl Bundle {
+    fn verify_inventory(&self) -> Result<()> {
+        verify_head(self.head, &self.snapshot)?;
+        let objects = &self.snapshot.objects;
+        ensure!(
+            objects.len().checked_sub(self.omitted.len()) == Some(self.packets.len()),
+            "inventory mismatch"
+        );
+        let expected = objects.difference(&self.omitted).copied();
+        let packet_ids = self.packets.iter().map(|packet| packet.id);
+        if !expected.clone().eq(packet_ids.clone()) {
+            // Legacy bundles may present packets in any order.
+            let mut ordered: Vec<_> = packet_ids.collect();
+            ordered.sort_unstable();
+            ensure!(expected.eq(ordered), "inventory mismatch");
+        }
+        Ok(())
+    }
+
     /// Decode one offline exchange packet within the import byte budget.
     pub fn read(reader: impl Read) -> Result<Self> {
         Self::read_bounded(reader, 256 * 1024 * 1024)
@@ -110,6 +128,16 @@ impl Archive {
         after: Option<Id>,
         limit: usize,
     ) -> Result<Bundle> {
+        self.with_read_view(|| self.collect_page(s, purpose, after, limit))
+    }
+
+    fn collect_page(
+        &self,
+        s: &Snapshot,
+        purpose: &str,
+        after: Option<Id>,
+        limit: usize,
+    ) -> Result<Bundle> {
         ensure!(limit > 0, "positive export page limit required");
         let (head, mut used) = {
             let manifest = serde_json::to_vec(s)?;
@@ -169,15 +197,12 @@ impl Archive {
     }
 
     pub fn import(&mut self, b: &Bundle) -> Result<Id> {
-        verify_head(b.head, &b.snapshot)?;
+        b.verify_inventory()?;
         let tx = self.db.transaction()?;
-        let mut ids = b.omitted.clone();
         let mut bytes = Vec::new();
         for p in &b.packets {
-            ensure!(ids.insert(p.id), "duplicate packet");
             add_packet(&tx, p, &mut bytes)?;
         }
-        ensure!(ids == b.snapshot.objects, "inventory mismatch");
         save_imported_head(&tx, b.head, &b.snapshot)?;
         tx.commit()?;
         Ok(b.head)

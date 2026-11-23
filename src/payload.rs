@@ -87,6 +87,10 @@ impl Archive {
 }
 
 impl Document {
+    pub(crate) fn is_chunk_descriptor(&self) -> bool {
+        self.kind == Kind::Descriptor && self.scope == "ordered-chunks-1"
+    }
+
     pub(crate) fn materialize(
         &self,
         budget: u64,
@@ -94,8 +98,7 @@ impl Document {
         mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
     ) -> Result<u64> {
         ensure!(
-            self.kind == Kind::Descriptor
-                && self.scope == "ordered-chunks-1"
+            self.is_chunk_descriptor()
                 && self.field::<String>("algorithm")? == "SHA-256"
                 && self.field::<String>("media")? == self.subject,
             "unknown descriptor"

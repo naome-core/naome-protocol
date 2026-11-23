@@ -318,11 +318,7 @@ impl TrainingReview<'_> {
             .as_ref()
             .is_none_or(|(head, _, _)| *head != receipt_head)
         {
-            let snapshot = store.head(receipt_head)?;
-            ensure!(
-                snapshot.objects.is_subset(&after.objects),
-                "receipt inventory outside label horizon"
-            );
+            let snapshot = store.receipt_horizon(after, receipt_head)?;
             self.historical = Some((receipt_head, snapshot, ReadInventory::for_replay()));
         }
         let (historical_head, historical, inventory) = self

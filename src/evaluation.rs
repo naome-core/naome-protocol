@@ -16,10 +16,12 @@ use dependency_correction::{
 pub use impact::Impact;
 pub(crate) use inventory::{EvidenceView, ReadInventory};
 use measurement::Predicate;
+pub(crate) use rules::EVALUATOR_ID;
 #[cfg(feature = "cli")]
 pub(crate) use rules::replay_evaluator_ids;
-pub(crate) use rules::{EVALUATOR_ID, FIXTURE_EVALUATOR_ID, V0_1_0_EVALUATOR_ID};
 use rules::{EvaluatorRules, NoticeBudget};
+#[cfg(feature = "cli")]
+pub(crate) use rules::{FIXTURE_EVALUATOR_ID, V0_1_0_EVALUATOR_ID};
 
 use crate::{
     migration::Equivalence,
@@ -547,7 +549,9 @@ pub(crate) fn assess_for_evaluator(
     q: &Query,
     evaluator: &str,
 ) -> Result<Receipt> {
-    Ok(assess_with_inventory(store, s, q, evaluator, &mut ReadInventory::default())?.receipt)
+    store.with_read_view(|| {
+        Ok(assess_with_inventory(store, s, q, evaluator, &mut ReadInventory::default())?.receipt)
+    })
 }
 
 #[derive(Default)]

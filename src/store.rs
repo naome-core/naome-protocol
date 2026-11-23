@@ -35,6 +35,16 @@ impl Snapshot {
         Ok(Id::blob(&serde_json::to_vec(self)?))
     }
 
+    fn from_manifest(id: Id, bytes: &[u8]) -> Result<Self> {
+        id.verify(bytes)?;
+        let snapshot: Self = serde_json::from_slice(bytes)?;
+        ensure!(
+            snapshot.version == 1 && !snapshot.source.is_empty() && snapshot.id()? == id,
+            "invalid snapshot manifest"
+        );
+        Ok(snapshot)
+    }
+
     pub(crate) fn records(&self) -> impl Iterator<Item = Id> + '_ {
         self.records_after(None)
     }
@@ -130,6 +140,17 @@ impl Archive {
         }
         Ok(archive)
     }
+    /// All reads observe one custody state, including when called inside an existing transaction.
+    pub(crate) fn with_read_view<T>(&self, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        if !self.db.is_autocommit() {
+            return read();
+        }
+        let transaction = self.db.unchecked_transaction()?;
+        let result = read()?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
     pub fn blob(&self, bytes: &[u8], access: Id) -> Result<Id> {
         self.store_blob(bytes, access).map(|(id, _)| id)
     }
@@ -389,14 +410,20 @@ impl Archive {
                     .0
             }
         };
-        id.verify(&b)?;
-        let s: Snapshot = serde_json::from_slice(&b)?;
-        ensure!(
-            s.version == 1 && !s.source.is_empty() && s.id()? == id,
-            "invalid snapshot manifest"
-        );
-        Ok(s)
+        Snapshot::from_manifest(id, &b)
     }
+
+    /// Resolve a linked receipt inventory using only evidence in the caller's view.
+    pub(crate) fn receipt_horizon(&self, view: &Snapshot, id: Id) -> Result<Snapshot> {
+        let bytes = self.resolve(view, id, "read")?;
+        let snapshot = Snapshot::from_manifest(id, &bytes)?;
+        ensure!(
+            snapshot.objects.is_subset(&view.objects),
+            "receipt inventory outside the selected horizon"
+        );
+        Ok(snapshot)
+    }
+
     pub fn explain(
         &self,
         s: &Snapshot,

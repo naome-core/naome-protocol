@@ -130,6 +130,31 @@ fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
 }
 
 #[test]
+fn projection_uses_only_the_selected_receipt_horizon() -> Result<()> {
+    for format in [Format::A, Format::B] {
+        let archive = Archive::memory()?;
+        let case = fixture::seed(&archive, format)?;
+        let full = archive.head(case.published)?;
+        let receipt = case.receipts[0];
+        let original = archive.read(&full, receipt, "read")?;
+        let snapshot_id = original.one("snapshot")?;
+        let historical = archive.head(snapshot_id)?;
+        let project = |view: &naome_protocol::store::Snapshot| {
+            archive.project_hull(view, receipt, &fixture::fixture_key(3), format)
+        };
+        project(&full)?;
+        let mut without_manifest = full.clone();
+        without_manifest.objects.remove(&snapshot_id);
+        assert!(project(&without_manifest).is_err());
+        let mut without_policy = full;
+        assert!(historical.objects.contains(&case.policy));
+        without_policy.objects.remove(&case.policy);
+        assert!(project(&without_policy).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn full_exchange_is_reproducible_from_reopened_databases() -> Result<()> {
     let dir = tempdir()?;
     let results = fixture::trial(dir.path())?;

@@ -25,10 +25,11 @@ impl Archive {
         key: &ed25519_dalek::SigningKey,
         f: Format,
     ) -> Result<Projection> {
+        let transaction = self.db.unchecked_transaction()?;
         let r = self.read(s, receipt, "read")?;
         ensure!(r.kind == Kind::Assessment, "expected assessment");
         let original: Query = r.field("original_query")?;
-        let horizon = self.head(r.one("snapshot")?)?;
+        let horizon = self.receipt_horizon(s, r.one("snapshot")?)?;
         let evaluator: String = r.field("evaluator")?;
         let verified: Receipt = assess_for_evaluator(self, &horizon, &original, &evaluator)?;
         ensure!(
@@ -124,8 +125,10 @@ impl Archive {
             f,
             private,
         )?;
+        let packet = archive.export(&projected, "read")?;
+        transaction.commit()?;
         Ok(Projection {
-            packet: archive.export(&projected, "read")?,
+            packet,
             queries,
             private_mapping: mapping,
         })

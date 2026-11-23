@@ -466,7 +466,7 @@ fn training_rejects_duplicate_targets_false_origins_and_superseded_labels() -> R
     Ok(())
 }
 
-fn check_outcome_cutoff(format: Format, early: bool, use_raw: bool) -> Result<()> {
+fn check_outcome_cutoff(format: Format, early: bool, use_raw: bool, chunked: bool) -> Result<()> {
     let archive = Archive::memory()?;
     let data = fixture::seed(&archive, format)?;
     let old = archive.head(data.s0)?;
@@ -475,8 +475,20 @@ fn check_outcome_cutoff(format: Format, early: bool, use_raw: bool) -> Result<()
     let plan = argument.one("plan")?;
     let existing_outcome = argument.roles("reading").next().unwrap();
     let mut outcome = archive.read(&old, existing_outcome, "read")?;
-    let exact_observation =
-        archive.blob(&serde_json::to_vec(&outcome.fields)?, Id::blob(PUBLIC))?;
+    let raw = serde_json::to_vec(&outcome.fields)?;
+    let exact_observation = archive.blob(&raw, Id::blob(PUBLIC))?;
+    let recorded_payload = if chunked {
+        let bytes = [raw.as_slice(), b"\n"].concat();
+        archive.capture(
+            bytes.as_slice(),
+            "application/json",
+            raw.len(),
+            Id::blob(PUBLIC),
+            format,
+        )?
+    } else {
+        exact_observation
+    };
     let baseline = archive.blob(b"shared pre-outcome baseline", Id::blob(PUBLIC))?;
     let mut before = archive.head(data.feature_cutoff)?;
     before.objects.insert(baseline);
@@ -485,9 +497,7 @@ fn check_outcome_cutoff(format: Format, early: bool, use_raw: bool) -> Result<()
         before.objects.insert(exact_observation);
     }
     let cutoff = archive.blob(&serde_json::to_vec(&before)?, Id::blob(PUBLIC))?;
-    outcome
-        .inputs
-        .push(link("outcome-input", exact_observation));
+    outcome.inputs.push(link("outcome-input", recorded_payload));
     outcome.inputs.push(link("baseline", baseline));
     let outcome_id = archive.document(&outcome, format, Id::blob(PUBLIC))?;
     let mut release = archive.read(&old, argument.one("release")?, "read")?;
@@ -535,7 +545,7 @@ fn check_outcome_cutoff(format: Format, early: bool, use_raw: bool) -> Result<()
         },
         format,
     )?;
-    if use_raw {
+    if early || use_raw {
         assert!(result.included.is_empty());
         assert_eq!(
             result.withheld[&label],
@@ -554,9 +564,12 @@ fn check_outcome_cutoff(format: Format, early: bool, use_raw: bool) -> Result<()
 #[test]
 fn forecasts_check_declared_outcome_lineage_and_accept_shared_baselines() -> Result<()> {
     for format in [Format::A, Format::B] {
-        check_outcome_cutoff(format, false, false)?;
-        check_outcome_cutoff(format, false, true)?;
-        check_outcome_cutoff(format, true, true)?;
+        for chunked in [false, true] {
+            check_outcome_cutoff(format, false, false, chunked)?;
+            check_outcome_cutoff(format, false, true, chunked)?;
+            check_outcome_cutoff(format, true, true, chunked)?;
+            check_outcome_cutoff(format, true, false, chunked)?;
+        }
     }
     Ok(())
 }
