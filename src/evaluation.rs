@@ -554,6 +554,7 @@ pub(crate) fn assess_for_evaluator(
     evaluator: &str,
 ) -> Result<Receipt> {
     store.with_read_view(|| {
+        s.ensure_hydrated()?;
         Ok(assess_with_inventory(store, s, q, evaluator, &mut ReadInventory::default())?.receipt)
     })
 }

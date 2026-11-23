@@ -467,17 +467,21 @@ fn missing_provenance_record_keeps_possible_correction_exposure_open() -> Result
         220,
         vec![],
     )?;
-    let mut before = archive.snapshot(
+    let before = archive.snapshot(
         "raw value without its provenance record",
         Default::default(),
     )?;
-    assert!(before.objects.remove(&derivation));
+    let mut members = before.objects.clone();
+    assert!(members.remove(&derivation));
+    let before = archive.seal_members(&before.source, before.parents.clone(), members)?;
     let original = assess(&archive, &before, &query)?;
     assert_eq!(original.result, Some(Standing::Supported));
 
     let (notice, _) = study.notice(old, &coverage, evidence, ISSUER)?;
-    let mut after = archive.snapshot("after input correction", [archive.save(&before)?].into())?;
-    assert!(after.objects.remove(&derivation));
+    let after = archive.snapshot("after input correction", [archive.save(&before)?].into())?;
+    let mut members = after.objects.clone();
+    assert!(members.remove(&derivation));
+    let after = archive.seal_members(&after.source, after.parents.clone(), members)?;
     let current = assess(&archive, &after, &query)?;
     assert_eq!(current.result, Some(Standing::Unresolved));
     assert!(current.frontier.contains(&derivation));

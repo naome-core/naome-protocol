@@ -41,7 +41,7 @@ impl EvidenceView<'_> {
             "calibration or original outside its asserted inventory"
         );
         self.store.resolve(self.snapshot, original, "read")?;
-        Ok(manifest.source)
+        Ok(manifest.source.clone())
     }
 }
 

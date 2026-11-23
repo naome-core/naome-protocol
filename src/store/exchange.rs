@@ -1,5 +1,10 @@
 //! Offline inventory packets and atomic import into a custody archive.
-use super::{Archive, Snapshot, insert, snapshot::save_imported_head, validate};
+use super::{
+    Archive, Manifest, Snapshot, insert,
+    inventory::{self, Pages},
+    snapshot::save_imported_head,
+    validate,
+};
 use crate::{
     profile::allows,
     wire::{Id, MAX_BYTES},
@@ -25,14 +30,61 @@ pub struct Packet {
     pub hex: String,
 }
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "WireBundle")]
 pub struct Bundle {
+    #[serde(default, skip_serializing_if = "Pages::is_empty")]
+    pub(crate) pages: Pages,
+    #[serde(serialize_with = "serialize_header")]
     pub snapshot: Snapshot,
     pub head: Id,
     pub packets: Vec<Packet>,
+    #[serde(skip_serializing)]
     pub omitted: BTreeSet<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<Id>,
+}
+fn serialize_header<S: serde::Serializer>(
+    s: &Snapshot,
+    out: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    if let Some(m) = &s.manifest {
+        m.serialize(out)
+    } else {
+        s.serialize(out)
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireBundle {
+    snapshot: super::snapshot::StoredHeader,
+    head: Id,
+    packets: Vec<Packet>,
+    omitted: Option<BTreeSet<Id>>,
+    continuation: Option<Id>,
+    #[serde(default)]
+    pages: Pages,
+}
+impl TryFrom<WireBundle> for Bundle {
+    type Error = anyhow::Error;
+    fn try_from(input: WireBundle) -> Result<Self> {
+        let mut snapshot = input.snapshot.into_snapshot();
+        if snapshot.manifest.is_some() {
+            snapshot.hydrate(&input.pages)?;
+        }
+        let packet_ids: BTreeSet<_> = input.packets.iter().map(|p| p.id).collect();
+        let omitted = match input.omitted {
+            Some(s) => s,
+            None => snapshot.objects.difference(&packet_ids).copied().collect(),
+        };
+        Ok(Self {
+            pages: input.pages,
+            snapshot,
+            head: input.head,
+            packets: input.packets,
+            omitted,
+            continuation: input.continuation,
+        })
+    }
 }
 impl Bundle {
     fn verify_inventory(&self) -> Result<()> {
@@ -130,6 +182,10 @@ impl Archive {
         after: Option<Id>,
         limit: usize,
     ) -> Result<Bundle> {
+        if s.manifest.is_none() {
+            let current = self.convert_archived(s.id()?, s)?;
+            return self.export_page(&self.head(current)?, purpose, after, limit);
+        }
         self.with_read_view(|| self.collect_page(s, purpose, after, limit))
     }
 
@@ -143,10 +199,10 @@ impl Archive {
         ensure!(limit > 0, "positive export page limit required");
         let (head, mut used) = {
             let manifest = s.bytes()?;
-            let used = manifest
-                .len()
-                .checked_mul(3)
-                .context("inventory too large")?;
+            let mut used = manifest.len() * 3 + 512;
+            for page in s.pages.values() {
+                used += serde_json::to_vec(page)?.len() + 96;
+            }
             ensure!(
                 used < 200 * 1024 * 1024,
                 "inventory exceeds exchange size limit"
@@ -178,13 +234,54 @@ impl Archive {
                 omitted.insert(id);
             }
         }
+        let mut pages = s.pages.clone();
+        for p in &packets {
+            self.collect_linked_pages(p, &mut pages, &mut used)?;
+        }
         Ok(Bundle {
+            pages,
             head,
             snapshot: s.clone(),
             packets,
             omitted,
             continuation,
         })
+    }
+    fn collect_linked_pages(
+        &self,
+        packet: &Packet,
+        pages: &mut Pages,
+        used: &mut usize,
+    ) -> Result<()> {
+        if packet.id.format().is_some() {
+            return Ok(());
+        }
+        // Snapshot commitments are small. Larger scientific payloads have no witness sidecar.
+        if packet.hex.len() > 65536 {
+            return Ok(());
+        }
+        let Ok(manifest) = serde_json::from_slice::<Manifest>(&hex::decode(&packet.hex)?) else {
+            return Ok(());
+        };
+        let mut tree = super::custody::tree::Tree::new(&self.db);
+        if manifest.walk(|id| tree.read(id), |_| Ok(())).is_ok() {
+            manifest.walk(
+                |id| {
+                    let p = tree.read(id)?;
+                    if let std::collections::btree_map::Entry::Vacant(slot) = pages.entry(id) {
+                        *used += serde_json::to_vec(&p)?.len() + 96;
+                        ensure!(
+                            *used <= 255 * 1024 * 1024,
+                            "exchange witnesses exceed JSON budget; use stream export"
+                        );
+                        slot.insert(p.clone());
+                    }
+                    Ok(p)
+                },
+                |_| Ok(()),
+            )?;
+        }
+        Ok(())
     }
     fn exchange_packet(&self, s: &Snapshot, id: Id, purpose: &str) -> Option<Packet> {
         if purpose == "train"
@@ -200,14 +297,23 @@ impl Archive {
 
     pub fn import(&mut self, b: &Bundle) -> Result<Id> {
         b.verify_inventory()?;
-        let tx = self.db.transaction()?;
+        let tx = self.db.unchecked_transaction()?;
+        inventory::install(&tx, &b.pages)?;
         let mut bytes = Vec::new();
         for p in &b.packets {
             add_packet(&tx, p, &mut bytes)?;
         }
-        save_imported_head(&tx, b.head, &b.snapshot)?;
+        let head = if b.snapshot.manifest.is_none() {
+            if self.current_head_id(b.head)? == b.head {
+                save_imported_head(&tx, b.head, &b.snapshot)?;
+            }
+            self.convert_archived(b.head, &b.snapshot)?
+        } else {
+            save_imported_head(&tx, b.head, &b.snapshot)?;
+            b.head
+        };
         tx.commit()?;
-        Ok(b.head)
+        Ok(head)
     }
 }
 

@@ -4,13 +4,12 @@ use std::collections::VecDeque;
 
 #[derive(Serialize, Deserialize)]
 pub struct Federation {
-    version: u8,
     pub heads: BTreeSet<Id>,
 }
 impl Federation {
     pub fn new(heads: BTreeSet<Id>) -> Result<Self> {
         ensure!((1..=64).contains(&heads.len()), "invalid federation size");
-        Ok(Self { version: 2, heads })
+        Ok(Self { heads })
     }
     pub fn id(&self) -> Result<Id> {
         Ok(Id::blob(&serde_json::to_vec(self)?))
@@ -82,7 +81,7 @@ impl Federation {
             notices: BTreeSet::new(),
             view: self.id()?,
             heads: self.heads.clone(),
-            evaluator: "rep/paged-declared-dependencies/2",
+            evaluator: "rep/declared-dependencies",
             target,
             budget,
             standing: "open",
@@ -105,8 +104,7 @@ impl Federation {
         let mut inventories = Vec::new();
         let result = (|| -> Result<()> {
             ensure!(
-                self.version == 2
-                    && (1..=64).contains(&self.heads.len())
+                (1..=64).contains(&self.heads.len())
                     && stores.len() == self.heads.len()
                     && stores.iter().map(|(_, id)| *id).collect::<BTreeSet<_>>() == self.heads,
                 "missing pinned source"
@@ -115,7 +113,7 @@ impl Federation {
             let mut present = false;
             let mut unresolved = BTreeSet::new();
             for &(store, id) in stores {
-                let h = store.paged_head(id)?;
+                let h = store.custody_head(id)?;
                 inventories.push((h, Tree::new(&store.db)));
                 let (h, tree) = inventories.last_mut().unwrap();
                 ensure!(
@@ -217,18 +215,18 @@ impl Review {
 
 impl Archive {
     /// Private custody metadata; excluded from member replication.
-    pub fn paged_save_receipt(&self, review: &Review) -> Result<Id> {
+    pub fn custody_save_receipt(&self, review: &Review) -> Result<Id> {
         let data = review.receipt()?;
         let id = Id::blob(&data);
         self.db.execute(
-            "INSERT OR IGNORE INTO rep2_receipts VALUES(?,?)",
+            "INSERT OR IGNORE INTO custody_receipts VALUES(?,?)",
             params![id.to_string(), data],
         )?;
         Ok(id)
     }
-    pub fn paged_receipt(&self, id: Id) -> Result<Vec<u8>> {
+    pub fn custody_receipt(&self, id: Id) -> Result<Vec<u8>> {
         let data: Vec<u8> = self.db.query_row(
-            "SELECT data FROM rep2_receipts WHERE id=?",
+            "SELECT data FROM custody_receipts WHERE id=?",
             [id.to_string()],
             |r| r.get(0),
         )?;

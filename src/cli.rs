@@ -1,4 +1,4 @@
-mod paged;
+mod custody;
 mod search;
 pub use search::{FindArguments, LocalSearch, PrepareSearchArguments, SearchRequest};
 
@@ -21,10 +21,17 @@ use std::{
 
 #[derive(Subcommand)]
 pub enum ArchiveCommand {
-    /// Operate on bounded, per-lab version-two inventories.
-    Paged(paged::Arguments),
+    /// Append, replicate and review bounded archive changes.
+    Custody(custody::Arguments),
     /// Show supported formats, evaluators and independently pinned kit digests.
     Capabilities,
+    /// Convert an existing archive into a new file and retain its historical evidence.
+    MigrateArchive {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    /// Resolve the active head corresponding to an earlier project identifier.
+    MigratedHead { head: Id },
     /// Run all cases in an externally pinned bootstrap package.
     Kit { file: PathBuf, sha256: String },
     /// Run the full synthetic two-archive trial in a fresh directory.
@@ -315,10 +322,18 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
     let public = Id::blob(PUBLIC);
     let open = || Archive::open(&db_path);
     match command {
-        ArchiveCommand::Paged(args) => paged::run(&db_path, args.0),
+        ArchiveCommand::Custody(args) => custody::run(&db_path, args.0),
+        ArchiveCommand::MigrateArchive {
+            source,
+            destination,
+        } => print(json!({"converted":Archive::migrate_archive_file(&source,&destination)?})),
+        ArchiveCommand::MigratedHead { head } => {
+            let db = open()?;
+            print(db.active_head(head)?.id()?)
+        }
         ArchiveCommand::Capabilities => print(json!({
             "version": env!("CARGO_PKG_VERSION"),
-            "capabilities": ["carrier","paged-custody-v2","profile-reader","evaluator","local-executor-reservations"],
+            "capabilities": ["carrier","archive-custody","profile-reader","evaluator","local-executor-reservations"],
             "kits": {"A":kit::pin(Format::A),"B":kit::pin(Format::B)},
             "profile": Id::blob(profile::PROFILE),
             "measurement_profile": Id::blob(profile::MEASUREMENT_PROFILE),
@@ -379,14 +394,14 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             bytes,
         } => {
             let db = open()?;
-            let s = db.head(head)?;
+            let s = db.active_head(head)?;
             print(publish(&path, |file| {
                 db.materialize(&s, descriptor, "read", bytes, file)
             })?)
         }
         ArchiveCommand::Select { head, request } => {
             let db = open()?;
-            print(db.select(&db.head(head)?, &input(&request)?, f)?)
+            print(db.select(&db.active_head(head)?, &input(&request)?, f)?)
         }
         ArchiveCommand::Execute {
             head,
@@ -396,7 +411,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         } => {
             let mut db = open()?;
             print(db.execute_payload_check(
-                &db.head(head)?,
+                &db.active_head(head)?,
                 &input(&request)?,
                 &[public_key].into(),
                 &signing_key(&witness_key)?,
@@ -432,16 +447,17 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         } => {
             let db = open()?;
             let parents = parent.into_iter().collect();
-            let snapshot = if root.is_empty() {
-                db.snapshot(&source, parents)?
+            let head = if root.is_empty() {
+                db.snapshot_id(&source, parents)?
             } else {
                 db.selected_snapshot(&source, parents, root.into_iter().collect())?
+                    .id()?
             };
-            print(snapshot.id()?)
+            print(head)
         }
         ArchiveCommand::Show { head, id, purpose } => {
             let db = open()?;
-            print(db.read(&db.head(head)?, id, &purpose)?)
+            print(db.read(&db.active_head(head)?, id, &purpose)?)
         }
         ArchiveCommand::Resolve {
             head,
@@ -450,7 +466,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             purpose,
         } => {
             let db = open()?;
-            output(&path, &db.resolve(&db.head(head)?, id, &purpose)?)
+            output(&path, &db.resolve_head(head, id, &purpose)?)
         }
         ArchiveCommand::Discover {
             head,
@@ -465,7 +481,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 .map(|s| serde_json::from_value::<Kind>(s.into()))
                 .transpose()?;
             print(db.discover(
-                &db.head(head)?,
+                &db.active_head(head)?,
                 kind,
                 subject.as_deref(),
                 scope.as_deref(),
@@ -500,7 +516,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             after,
         } => {
             let db = open()?;
-            let snapshot = db.head(head)?;
+            let snapshot = db.active_head(head)?;
             let report = if compact {
                 db.argument_graph_page(&snapshot, id, &purpose, budget, depth, after)?
             } else {
@@ -510,7 +526,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         }
         ArchiveCommand::Assess { head, query } => {
             let db = open()?;
-            let s = db.head(head)?;
+            let s = db.active_head(head)?;
             let q = input(&query)?;
             let r = evaluation::assess(&db, &s, &q)?;
             let id = evaluation::deposit_receipt(&db, &s, &q, &r, f)?;
@@ -525,16 +541,17 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             stream,
         } => {
             let db = open()?;
-            let s = db.head(head)?;
+            let head = db.current_head_id(head)?;
             if stream {
                 let count = publish(&path, |file| {
                     let mut output = BufWriter::new(file);
-                    let count = db.export_stream(&s, &purpose, &mut output)?;
+                    let count = db.export_stream_head(head, &purpose, &mut output)?;
                     output.flush()?;
                     Ok(count)
                 })?;
                 return print(json!({"head":head,"continuation":null,"packets":count}));
             }
+            let s = db.active_head(head)?;
             let packet = if limit.is_some() || after.is_some() {
                 db.export_page(&s, &purpose, after, limit.unwrap_or(usize::MAX))?
             } else {
@@ -561,7 +578,8 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             output: path,
         } => {
             let db = open()?;
-            let disclosure = db.project_hull(&db.head(head)?, receipt, &signing_key(&key)?, f)?;
+            let disclosure =
+                db.project_hull(&db.active_head(head)?, receipt, &signing_key(&key)?, f)?;
             output_json(&path, &disclosure.packet)?;
             print(
                 json!({"head":disclosure.packet.head,"queries":disclosure.queries,"private_mapping":disclosure.private_mapping}),
@@ -569,11 +587,11 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         }
         ArchiveCommand::Migrate { head, issuer } => {
             let db = open()?;
-            print(db.migrate(&db.head(head)?, f, &issuer)?)
+            print(db.migrate(&db.active_head(head)?, f, &issuer)?)
         }
         ArchiveCommand::Mapping { head, id } => {
             let db = open()?;
-            print(db.verify_mapping(&db.head(head)?, id)?)
+            print(db.verify_mapping(&db.active_head(head)?, id)?)
         }
         ArchiveCommand::Impact {
             head,
@@ -584,7 +602,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             compact,
         } => {
             let db = open()?;
-            let snapshot = db.head(head)?;
+            let snapshot = db.active_head(head)?;
             if compact {
                 print(db.impact_compact(&snapshot, notice, &mapping, budget, policy)?)
             } else {
@@ -598,7 +616,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         } => {
             let db = open()?;
             print(db.adoption(
-                &db.head(head)?,
+                &db.active_head(head)?,
                 &input(&request)?,
                 &[controller_key].into(),
                 f,
@@ -613,7 +631,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         } => {
             let db = open()?;
             print(db.label(
-                &db.head(head)?,
+                &db.active_head(head)?,
                 receipt,
                 &origin,
                 check.as_deref(),
@@ -632,7 +650,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             scope,
         } => {
             let db = open()?;
-            db.resolve(&db.head(head)?, id, "read")?;
+            db.resolve(&db.active_head(head)?, id, "read")?;
             print(db.document(
                 &profile::attest(id, &scope, &role, "research-policy-1", &signing_key(&key)?)?,
                 f,
@@ -648,7 +666,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             public_key,
         } => {
             let db = open()?;
-            let s = db.head(head)?;
+            let s = db.active_head(head)?;
             db.resolve(&s, target, "read")?;
             profile::verify_attestation(
                 &db.read(&s, attestation, "read")?,
@@ -668,7 +686,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         } => {
             let mut db = open()?;
             print(db.reserve(
-                &db.head(head)?,
+                &db.active_head(head)?,
                 &input::<executor::Request>(&request)?,
                 &[public_key].into(),
                 unix_time()?,
@@ -683,7 +701,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         } => {
             let db = open()?;
             db.reconcile_attempt(
-                &db.head(head)?,
+                &db.active_head(head)?,
                 &attempt,
                 occurrence,
                 signature,

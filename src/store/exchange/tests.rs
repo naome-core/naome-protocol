@@ -3,7 +3,7 @@ use anyhow::Result;
 
 #[test]
 fn import_limit_counts_trailing_whitespace_and_rejects_truncated_json() -> Result<()> {
-    let input = include_bytes!("../../../spec/examples/exchange-v1.json");
+    let input = include_bytes!("../../../spec/examples/exchange.json");
     let limit = input.len() as u64;
     let parsed = Bundle::read_bounded(&input[..], limit)?;
     assert_eq!(parsed.head, parsed.snapshot.id()?);
@@ -39,7 +39,7 @@ fn packet_hex_matches_the_standard_decoder_and_reuses_the_output() {
 
 #[test]
 fn bundle_membership_is_exact_and_independent_of_packet_order() -> Result<()> {
-    let mut bundle = Bundle::read(&include_bytes!("../../../spec/examples/exchange-v1.json")[..])?;
+    let mut bundle = Bundle::read(&include_bytes!("../../../spec/examples/exchange.json")[..])?;
     bundle.packets.reverse();
     bundle.verify_inventory()?;
     let omitted = bundle.packets.pop().unwrap();

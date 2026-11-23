@@ -1,12 +1,30 @@
-# Paged custody qualification results
+# Archive qualification results
 
-## Reproduction
+## Current manifest and migration
 
-Acceptance criteria were committed at 12f572a before measurement. The full-page implementation, its measurements and the follow-up physical-storage criteria were committed at f2ecdfb. The follow-up preserves the logical pages, head IDs and transfer format. From this revision, run:
+The workload and per-tree bounds were frozen at `12f572a`. The active manifest adds a separate authenticated membership root and registers scientific and custody heads in the same local catalog. Its identities and frame bytes change. The earlier splice-layout measurements below remain historical observations at `78419e5`.
 
-    cargo test --locked --lib store::paged::tests
+Reproduce the current run with an optimized Rust build on macOS or Linux.
+
+    cargo test --locked --test archive_migration
     python3 tools/scale/qualify.py new-samples.json
-    python3 tools/scale/qualify.py spec/scale/local-samples.json --verify-saved
+    python3 tools/scale/qualify.py spec/scale/manifest-samples.json --verify-saved
+
+The 48 observations in `manifest-samples.json` include three fresh processes per workload and size. Verification checks the invariant inputs, shared virtual root, bounded page work, single-delta byte count, fork behavior, and deterministic results within each workload. The same 203-byte claim was admitted through the laboratory API and transferred to an independent SQLite recipient. Time includes process startup, admission, scoped lookup and reverse query in the delta phase. RSS is the OS process high-water value. These experiments used real small files and a simulated million-ID payload inventory.
+
+| Prior records | Pages read | Pages created | Backing reads | Frame bytes | Median RSS, MiB | Median delta, ms | Median receiver, ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 18 | 10 | 36 | 1,008 | 5.77 | 8.07 | 7.43 |
+| 1,024 | 28 | 15 | 97 | 1,223 | 7.67 | 12.82 | 11.73 |
+| 12,800 | 37 | 21 | 128 | 1,438 | 7.94 | 12.71 | 12.02 |
+
+The 12,800-record first admission verified 1,755,290 payload bytes across 200 batches. The origin database grew by 189.88 MB. Median first admission and first pull took 14.97 and 18.03 seconds. The first transfer carried 13.11 MB including authenticated descriptors and ancestry proofs.
+
+The ordinary full-snapshot command also has a catalog watermark. A separate regression seals 180 generated payloads, deposits one new object, checks exactly one admitted delta member and the preserved parent, then withdraws it and verifies historical membership and current unavailability. This control checks behavior; the table measures the independent-lab admission API. Scientific views can still materialize all member IDs, exact-subset closure costs depend on the requested graph, and a withdrawal changes the full-seal epoch. Production throughput and physical terabyte recovery remain unmeasured.
+
+## Historical physical-page comparison
+
+Acceptance criteria were committed at `12f572a`. The full-page implementation, observations and follow-up physical-storage criteria were committed at `f2ecdfb`. The difference-based storage at `78419e5` preserved that prototype's logical heads and transfer format. Its saved observations can be checked with `python3 tools/scale/qualify.py spec/scale/local-samples.json --verify-saved`.
 
 The driver compiles an optimized Rust library test and measures each phase in a fresh process with wait4 on macOS or Linux. Each trial uses fresh on-disk SQLite files. Seed, first pull, one-record delta and delta pull run in order. Each layout has three repetitions of each configuration and 48 observations. The comparison checks head IDs, logical counters, receipt sizes, transfer bytes, fork IDs and deterministic results. Both layouts ran sequentially on one macOS 27.3 arm64 host using rustc 1.97.1. OS caches were uncontrolled. Ranges below are the observed minimum and maximum. Logical reads are B+ tree reads. Backing reads are SQLite row fetches for reconstructing pages. Physical device reads were unmeasured. Wire bytes include all actual frame lengths and ancestry proofs.
 
@@ -60,4 +78,4 @@ Historical scientific replay reproduced the rules-2, rules-3, rules-4 and rules-
 
 Three TiB of raw data use 12,582,912 positions at 256 KiB per block. At 15 blocks per capture batch this takes 838,861 data commits. At 10 decimal Gbit/s, the payload alone takes about 2,639 seconds before storage, proofs and contention. These figures are arithmetic rather than observed throughput.
 
-Two example labs producing 800 MiB/s each for ten seconds against a 600 MiB/s receiver create a 10,000 MiB backlog. If aggregate arrivals then fall to 200 MiB/s, ideal drain time is 25 seconds. In this model committed origin history holds the backlog. Sustained production above receiver capacity grows the durable backlog even with bounded RAM. Field-record amplification, compaction, multi-terabyte recovery, WAN transport and physical multi-lab throughput remain unqualified. The v1 scientific evaluator, search and network release commands retain their existing limits.
+Two example labs producing 800 MiB/s each for ten seconds against a 600 MiB/s receiver create a 10,000 MiB backlog. If aggregate arrivals then fall to 200 MiB/s, ideal drain time is 25 seconds. In this model committed origin history holds the backlog. Sustained production above receiver capacity grows the durable backlog even with bounded RAM. Field-record amplification, compaction, multi-terabyte recovery, WAN transport and physical multi-lab throughput remain unqualified. Full scientific views, materialized JSON and complete-release buffering have separate work and size limits.

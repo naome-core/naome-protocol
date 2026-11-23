@@ -144,12 +144,14 @@ fn projection_uses_only_the_selected_receipt_horizon() -> Result<()> {
             archive.project_hull(view, receipt, &fixture::fixture_key(3), format)
         };
         project(&full)?;
-        let mut without_manifest = full.clone();
-        without_manifest.objects.remove(&snapshot_id);
+        let mut members = full.objects.clone();
+        members.remove(&snapshot_id);
+        let without_manifest = archive.seal_members(&full.source, full.parents.clone(), members)?;
         assert!(project(&without_manifest).is_err());
-        let mut without_policy = full;
+        let mut members = full.objects.clone();
         assert!(historical.objects.contains(&case.policy));
-        without_policy.objects.remove(&case.policy);
+        members.remove(&case.policy);
+        let without_policy = archive.seal_members(&full.source, full.parents.clone(), members)?;
         assert!(project(&without_policy).is_err());
     }
     Ok(())
@@ -791,15 +793,22 @@ fn withdrawals_leave_historic_proofs_and_unaffected_arguments_available() -> Res
 
 #[test]
 fn legacy_calibration_fixture_retains_its_published_identity() -> Result<()> {
-    let archive = Archive::memory()?;
-    let case = fixture::seed_legacy(&archive, Format::A)?;
+    // Produced by the pre-migration reference writer at 78419e5 with fixture::seed_legacy.
+    let bundle = naome_protocol::store::Bundle::read(
+        &include_bytes!("fixtures/published-calibration.json")[..],
+    )?;
+    let mut archive = Archive::memory()?;
+    let active = archive.import(&bundle)?;
+    let original: Id =
+        "1:1:b7826ed27f6f1fdc30fad29e48727cc2fef11b9c7316669f3fef7018700ef0a9".parse()?;
+    let receipt: Id =
+        "1:0:ee829956a6e4e9a2469d51ed8385c85b493ca9f286c6ea132d85fa05c16bded4".parse()?;
+    assert_eq!(bundle.head, original);
+    assert_eq!(archive.head(original)?.id()?, original);
+    assert_ne!(active, original);
     assert_eq!(
-        case.published.to_string(),
-        "1:1:b7826ed27f6f1fdc30fad29e48727cc2fef11b9c7316669f3fef7018700ef0a9"
-    );
-    assert_eq!(
-        case.receipts[2].to_string(),
-        "1:0:ee829956a6e4e9a2469d51ed8385c85b493ca9f286c6ea132d85fa05c16bded4"
+        archive.resolve(&archive.head(original)?, receipt, "read")?,
+        archive.resolve(&archive.head(active)?, receipt, "read")?
     );
     Ok(())
 }

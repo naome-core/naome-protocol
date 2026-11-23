@@ -9,8 +9,8 @@ const FANOUT: usize = 32;
 const MAX_PAGE: usize = 16 * 1024;
 type Entry = (String, Id);
 
-#[derive(Serialize, Deserialize)]
-enum Page {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Page {
     Leaf(Vec<Entry>),
     Branch(Vec<Entry>),
 }
@@ -65,7 +65,7 @@ impl Backing {
     }
 }
 
-pub(super) struct Tree<'a> {
+pub(in crate::store) struct Tree<'a> {
     pub db: &'a Connection,
     pub io: PageIo,
 }
@@ -80,7 +80,7 @@ impl<'a> Tree<'a> {
     fn backing(&mut self, id: Id, hops: u8) -> Result<Backing> {
         let stored: Vec<u8> = self
             .db
-            .prepare_cached("SELECT data FROM rep2_pages WHERE id=?")?
+            .prepare_cached("SELECT data FROM custody_pages WHERE id=?")?
             .query_row([id.to_string()], |row| row.get(0))
             .context("missing inventory page")?;
         ensure!(stored.len() <= MAX_PAGE, "oversized backing page");
@@ -117,7 +117,7 @@ impl<'a> Tree<'a> {
         self.io.read_bytes += backing.bytes.len() as u64;
         Ok((serde_json::from_slice(&backing.bytes)?, backing))
     }
-    fn read(&mut self, id: Id) -> Result<Page> {
+    pub(in crate::store) fn read(&mut self, id: Id) -> Result<Page> {
         Ok(self.read_version(id)?.0)
     }
     fn save(
@@ -145,7 +145,7 @@ impl<'a> Tree<'a> {
             let stored = patch.as_deref().unwrap_or(&bytes);
             if self
                 .db
-                .prepare_cached("INSERT OR IGNORE INTO rep2_pages VALUES(?,?)")?
+                .prepare_cached("INSERT OR IGNORE INTO custody_pages VALUES(?,?)")?
                 .execute(params![id.to_string(), stored])?
                 != 0
             {
@@ -158,7 +158,18 @@ impl<'a> Tree<'a> {
         Ok(result)
     }
     pub fn apply(&mut self, root: Option<Id>, changes: BTreeMap<String, Id>) -> Result<Id> {
-        ensure!(!changes.is_empty(), "empty inventory update");
+        if changes.is_empty() {
+            if let Some(id) = root {
+                return Ok(id);
+            }
+            let bytes = serde_json::to_vec(&Page::Leaf(Vec::new()))?;
+            let id = Id::blob(&bytes);
+            self.db.execute(
+                "INSERT OR IGNORE INTO custody_pages VALUES(?,?)",
+                params![id.to_string(), bytes],
+            )?;
+            return Ok(id);
+        }
         let keys: Vec<_> = changes.into_iter().collect();
         let mut row = match root {
             Some(id) => self.update(id, &keys)?,
@@ -207,7 +218,7 @@ impl<'a> Tree<'a> {
         }
     }
     pub fn get(&mut self, mut root: Id, key: &str) -> Result<Option<Id>> {
-        loop {
+        for _ in 0..=32 {
             match self.read(root)? {
                 Page::Leaf(rows) => {
                     return Ok(rows
@@ -224,6 +235,7 @@ impl<'a> Tree<'a> {
                 }
             }
         }
+        anyhow::bail!("tree depth limit")
     }
     pub fn prefix(
         &mut self,

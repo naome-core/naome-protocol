@@ -61,12 +61,20 @@ pub struct Replica {
 impl Replica {
     pub fn new(head: Id, snapshot: Snapshot) -> Result<Self> {
         check_manifest(head, &snapshot)?;
+        let mut proof_bytes = 0usize;
+        for page in snapshot.pages.values() {
+            proof_bytes += serde_json::to_vec(page)?.len();
+            ensure!(
+                proof_bytes <= MAX_RELEASE_BYTES,
+                "release witnesses exceed network limit"
+            );
+        }
         Ok(Self {
             head,
             missing: snapshot.objects.clone(),
             snapshot,
             members: BTreeMap::new(),
-            bytes: 0,
+            bytes: proof_bytes,
         })
     }
 
@@ -203,7 +211,7 @@ impl Archive {
         self.id_set("SELECT head FROM releases")
     }
 
-    pub fn released_manifest(&self, head: Id) -> Result<Snapshot> {
+    fn ensure_released(&self, head: Id) -> Result<()> {
         let released: bool = self.db.query_row(
             "SELECT EXISTS(SELECT head FROM releases WHERE head=?1
                            EXCEPT SELECT head FROM suspended_releases WHERE head=?1)",
@@ -211,18 +219,56 @@ impl Archive {
             |r| r.get(0),
         )?;
         ensure!(released, "inventory has not been released");
-        self.head(head)
+        Ok(())
+    }
+    /// A bounded network release includes membership witnesses needed for linked scientific cuts.
+    pub fn released_manifest(&self, head: Id) -> Result<Snapshot> {
+        self.with_read_view(|| {
+            self.ensure_released(head)?;
+            let mut snapshot = self.head(head)?;
+            let mut size = 0;
+            let mut proof = super::inventory::Pages::new();
+            let mut tree = super::custody::tree::Tree::new(&self.db);
+            let mut include = |m: &super::Manifest| {
+                m.walk(
+                    |id| {
+                        let page = tree.read(id)?;
+                        if let std::collections::btree_map::Entry::Vacant(entry) = proof.entry(id) {
+                            size += serde_json::to_vec(&page)?.len();
+                            ensure!(
+                                size <= MAX_RELEASE_BYTES,
+                                "release witnesses exceed network limit"
+                            );
+                            entry.insert(page.clone());
+                        }
+                        Ok(page)
+                    },
+                    |_| Ok(()),
+                )
+            };
+            include(snapshot.manifest()?)?;
+            for &id in &snapshot.objects {
+                if id.format().is_none() && self.size(id)? <= 32768 {
+                    let bytes = self.resolve(&snapshot, id, "read")?;
+                    if let Ok(m) = serde_json::from_slice::<super::Manifest>(&bytes) {
+                        include(&m)?;
+                    }
+                }
+            }
+            snapshot.pages = proof;
+            Ok(snapshot)
+        })
     }
 
     pub fn released_member(&self, head: Id, id: Id) -> Result<Member> {
         let tx = self.db.unchecked_transaction()?;
-        let s = self.released_manifest(head)?;
+        self.ensure_released(head)?;
+        let m = self.active_manifest(head)?;
         ensure!(
             self.size(id)? <= MAX_MEMBER_BYTES,
             "object exceeds network limit"
         );
-        let (bytes, access) =
-            self.resolve_with(&s, id, |policy| crate::profile::allows(policy, "read"))?;
+        let (bytes, access) = self.resolve_member(&m, id, "read")?;
         if let Some(format) = id.format() {
             ensure!(
                 Record::decode(&bytes, format)?.access == access,
@@ -239,6 +285,7 @@ impl Archive {
 
     pub fn release(&self, head: Id) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
+        let head = self.current_head_id(head)?;
         let snapshot = self.head(head)?;
         self.save(&snapshot)?;
         self.register_release(head, &snapshot)?;
@@ -258,6 +305,18 @@ impl Archive {
 
     // Called in the same write transaction as admission. The receiver resolves
     // every ACL against its own archive, including existing local tombstones.
+    pub(super) fn index_release_members(&self, head: Id, s: &Snapshot) -> Result<()> {
+        if self.has_observed_release(head)? {
+            let mut insert = self
+                .db
+                .prepare_cached("INSERT OR IGNORE INTO archive_release_members VALUES(?,?)")?;
+            let head = head.to_string();
+            for id in &s.objects {
+                insert.execute(rusqlite::params![id.to_string(), head])?;
+            }
+        }
+        Ok(())
+    }
     fn register_release(&self, head: Id, s: &Snapshot) -> Result<()> {
         check_manifest(head, s)?;
         let mut total = 0;
@@ -285,6 +344,7 @@ impl Archive {
             "INSERT OR IGNORE INTO releases(head) VALUES(?)",
             [head.to_string()],
         )?;
+        self.index_release_members(head, s)?;
         Ok(())
     }
 }
@@ -313,14 +373,11 @@ impl Archive {
         parents.insert(request.label_head);
         let mut objects = BTreeSet::new();
         for &head in &parents {
-            objects.extend(self.head(head)?.objects);
+            objects.extend(&self.head(head)?.objects);
         }
-        let horizon = self.save(&Snapshot {
-            version: 1,
-            source: "local replica review".into(),
-            parents,
-            objects,
-        })?;
+        let horizon = self
+            .seal_members("local replica review", parents, objects)?
+            .id()?;
         let mut review = request.clone();
         review.label_head = horizon;
         let extraction = self.training_manifest(&review, Format::A)?;

@@ -1,8 +1,8 @@
-//! Version-two, append-only custody views. Version-one snapshot bytes and replay remain independent.
+//! Authenticated archive admission, immutable laboratory lineages and indexed reads.
 mod frame;
 mod replication;
 mod review;
-mod tree;
+pub(super) mod tree;
 pub use replication::Pull;
 pub use review::{Federation, Review};
 pub use tree::PageIo;
@@ -21,7 +21,7 @@ use tree::Tree;
 pub const BLOCK: usize = 256 * 1024;
 pub const MEMBERS: usize = 64;
 pub const BATCH_BYTES: usize = 4 * 1024 * 1024;
-const SCHEMA: &str = include_str!("paged/schema.sql");
+const SCHEMA: &str = include_str!("custody/schema.sql");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +35,8 @@ pub struct Member {
     pub id: Id,
     pub access: Id,
     pub position: Option<Position>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub absent: bool,
 }
 pub struct Item {
     pub member: Member,
@@ -47,15 +49,19 @@ impl Item {
                 id: Id::blob(&bytes),
                 access,
                 position: None,
+                absent: false,
             },
             bytes,
         }
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Head {
-    pub version: u8,
+    pub origins: BTreeSet<Id>,
+    pub inventory: Id,
+    pub count: u64,
+    pub bootstrap: bool,
     pub source: String,
     pub parent: Option<Id>,
     pub ancestors: Vec<Id>,
@@ -66,6 +72,18 @@ pub struct Head {
     pub unresolved: BTreeSet<Id>,
     pub opaque: u64,
     pub restricted: bool,
+}
+impl Head {
+    pub fn manifest(&self) -> Result<super::Manifest> {
+        let parents = self.origins.clone();
+        Ok(super::Manifest {
+            source: self.source.clone(),
+            parents,
+            inventory: self.inventory,
+            count: self.count,
+            custody: Id::blob(&serde_json::to_vec(self)?),
+        })
+    }
 }
 #[derive(Serialize)]
 pub struct Admission {
@@ -86,7 +104,7 @@ fn position(slot: &Position) -> String {
 
 impl Archive {
     /// Open an existing source for queries or frame export without performing schema or bootstrap writes.
-    pub fn paged_reader(path: impl AsRef<std::path::Path>) -> Result<Self> {
+    pub fn custody_reader(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let db = rusqlite::Connection::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -94,40 +112,59 @@ impl Archive {
         db.busy_timeout(std::time::Duration::from_secs(10))?;
         Ok(Self { db })
     }
-    pub fn init_paged(&self) -> Result<()> {
+    pub(super) fn init_custody(&self) -> Result<()> {
         self.db.execute_batch(SCHEMA)?;
         Ok(())
     }
 
-    pub fn paged_head(&self, id: Id) -> Result<Head> {
+    pub fn custody_head(&self, id: Id) -> Result<Head> {
         let data: Vec<u8> = self
             .db
-            .prepare_cached("SELECT data FROM rep2_heads WHERE id=?")?
+            .prepare_cached("SELECT data FROM custody_heads WHERE id=?")?
             .query_row([id.to_string()], |r| r.get(0))
             .context("unadmitted paged head")?;
-        id.verify(&data)?;
-        Ok(serde_json::from_slice(&data)?)
+        let h: Head = serde_json::from_slice(&data)?;
+        h.manifest()?.verify(id)?;
+        Ok(h)
     }
 
     /// Independently authored children of the same parent each retain an addressable head.
-    pub fn paged_append(
+    pub fn custody_append(
         &self,
         source: &str,
         parent: Option<Id>,
         items: &[Item],
     ) -> Result<Admission> {
         let tx = rusqlite::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-        let admission = self.admit_paged(source, parent, items)?;
+        let admission = self.admit_batch(
+            source,
+            parent,
+            items,
+            &parent.into_iter().collect(),
+            parent.is_none(),
+        )?;
+        self.register_snapshot(&self.custody_head(admission.head)?.manifest()?, false)?;
         tx.commit()?;
         Ok(admission)
     }
 
-    fn admit_paged(&self, source: &str, parent: Option<Id>, items: &[Item]) -> Result<Admission> {
+    pub(super) fn admit_batch(
+        &self,
+        source: &str,
+        parent: Option<Id>,
+        items: &[Item],
+        origins: &BTreeSet<Id>,
+        bootstrap_members: bool,
+    ) -> Result<Admission> {
         ensure!(
-            !source.is_empty() && source.len() <= 256 && (1..=MEMBERS).contains(&items.len()),
+            !source.is_empty()
+                && source.len() <= 256
+                && items.len() <= MEMBERS
+                && (!items.is_empty() || !bootstrap_members)
+                && origins.len() <= 64,
             "invalid source or batch size"
         );
-        let previous = parent.map(|id| self.paged_head(id)).transpose()?;
+        let previous = parent.map(|id| self.custody_head(id)).transpose()?;
         ensure!(
             previous.as_ref().is_none_or(|h| h.source == source),
             "source changed within lineage"
@@ -150,10 +187,10 @@ impl Archive {
         let mut pack = Vec::new();
         let mut slots = Vec::new();
         let mut total = 0;
-        let mut edges = 0;
+        let mut edges = 0_usize;
         let public = Id::blob(PUBLIC);
         let read_only = Id::blob(READ_ONLY);
-        let bootstrap = if parent.is_none() {
+        let bootstrap = if bootstrap_members {
             [PUBLIC, READ_ONLY, PROFILE, MEASUREMENT_PROFILE]
                 .into_iter()
                 .map(|b| Item::blob(b.to_vec(), public))
@@ -166,12 +203,33 @@ impl Archive {
                 id,
                 access,
                 position: slot,
+                absent,
             } = item.member;
             total += item.bytes.len();
             ensure!(
-                item.bytes.len() <= 1024 * 1024 && total <= BATCH_BYTES,
+                item.bytes.len() <= crate::wire::MAX_BYTES
+                    && (total <= BATCH_BYTES || items.len() == 1),
                 "paged byte limit"
             );
+            if absent {
+                ensure!(
+                    item.bytes.is_empty() && slot.is_none(),
+                    "absent member carries data"
+                );
+                let key = object(id);
+                if changes.insert(key.clone(), access).is_none()
+                    && root
+                        .map(|r| tree.get(r, &key))
+                        .transpose()?
+                        .flatten()
+                        .is_none()
+                {
+                    added.insert(id);
+                    opaque += 1;
+                    restricted = true;
+                }
+                continue;
+            }
             validate(id, &item.bytes, access)?;
             if let Some(ref slot) = slot {
                 ensure!(
@@ -203,40 +261,45 @@ impl Archive {
             }
             if let Some(f) = id.format() {
                 let record = Record::decode(&item.bytes, f)?;
-                edges += record.edges.len();
-                ensure!(edges <= 4096, "declared edge budget exhausted");
-                match Document::decode(&record) {
-                    Ok(doc) if doc.kind == crate::profile::Kind::Notice => {
-                        // Only exact endpoints have a complete index. Other notice forms keep
-                        // negative statements open until a versioned evaluator handles them.
-                        let endpoints: Vec<_> = doc
-                            .inputs
-                            .iter()
-                            .filter(|l| {
-                                matches!(
-                                    l.role.as_str(),
-                                    "source-version" | "target" | "calibration"
-                                )
-                            })
-                            .collect();
-                        if endpoints.is_empty() {
-                            opaque += 1;
+                // Large historical records remain readable. An unindexed edge leaves coverage open.
+                let index_edges = edges.saturating_add(record.edges.len()) <= 4096;
+                if index_edges {
+                    edges += record.edges.len();
+                    match Document::decode(&record) {
+                        Ok(doc) if doc.kind == crate::profile::Kind::Notice => {
+                            // Only exact endpoints have a complete index. Other notice forms keep
+                            // negative statements open until a versioned evaluator handles them.
+                            let endpoints: Vec<_> = doc
+                                .inputs
+                                .iter()
+                                .filter(|l| {
+                                    matches!(
+                                        l.role.as_str(),
+                                        "source-version" | "target" | "calibration"
+                                    )
+                                })
+                                .collect();
+                            if endpoints.is_empty() {
+                                opaque += 1;
+                            }
+                            for link in &doc.inputs {
+                                changes.insert(format!("c/{}/{id}", link.target), id);
+                            }
                         }
-                        for link in &doc.inputs {
-                            changes.insert(format!("c/{}/{id}", link.target), id);
-                        }
+                        Ok(doc) if doc.kind != crate::profile::Kind::Mapping => {}
+                        _ => opaque += 1,
                     }
-                    Ok(doc) if doc.kind != crate::profile::Kind::Mapping => {}
-                    _ => opaque += 1,
-                }
-                for dep in record.inputs() {
-                    changes.insert(format!("r/{dep}/{id}"), id);
-                    changes.insert(format!("f/{id}/{dep}"), dep);
-                    references.insert(dep);
+                    for dep in record.inputs() {
+                        changes.insert(format!("r/{dep}/{id}"), id);
+                        changes.insert(format!("f/{id}/{dep}"), dep);
+                        references.insert(dep);
+                    }
+                } else {
+                    opaque += 1;
                 }
                 let exists: bool = self
                     .db
-                    .prepare_cached("SELECT EXISTS(SELECT 1 FROM rep2_records WHERE id=?)")?
+                    .prepare_cached("SELECT EXISTS(SELECT 1 FROM custody_records WHERE id=?)")?
                     .query_row([id.to_string()], |r| r.get(0))?;
                 if !exists {
                     slots.push((id, access, pack.len(), item.bytes.len()));
@@ -283,11 +346,15 @@ impl Archive {
         }
         if !slots.is_empty() {
             self.db
-                .execute("INSERT INTO rep2_packs(data) VALUES(?)", [pack])?;
+                .execute("INSERT INTO custody_packs(data) VALUES(?)", [pack])?;
             let segment = self.db.last_insert_rowid();
             for (id, access, start, len) in slots {
+                let catalog=self.db.prepare_cached("INSERT INTO objects(id,data,access) VALUES(?,x'',?) ON CONFLICT(id) DO UPDATE SET data=x''
+                 WHERE objects.data IS NOT NULL AND objects.access=excluded.access")?
+                    .execute(params![id.to_string(),access.to_string()])?;
+                ensure!(catalog == 1, "conflicting custody for packed record");
                 self.db
-                    .prepare_cached("INSERT INTO rep2_records VALUES(?,?,?,?,?)")?
+                    .prepare_cached("INSERT INTO custody_records VALUES(?,?,?,?,?)")?
                     .execute(params![
                         id.to_string(),
                         segment,
@@ -297,12 +364,18 @@ impl Archive {
                     ])?;
             }
         }
+        let members = added.iter().map(|id| (id.to_string(), *id)).collect();
+        let inventory = tree.apply(previous.as_ref().map(|h| h.inventory), members)?;
+        let count = previous.as_ref().map_or(0, |h| h.count) + added.len() as u64;
         let tree_root = tree.apply(root, changes)?;
         let head = Head {
-            version: 2,
+            inventory,
+            count,
+            origins: origins.clone(),
+            bootstrap: bootstrap_members,
             source: source.into(),
             parent,
-            ancestors: self.paged_jumps(parent)?,
+            ancestors: self.custody_jumps(parent)?,
             sequence,
             tree: tree_root,
             delta: items.iter().map(|i| i.member.clone()).collect(),
@@ -312,25 +385,26 @@ impl Archive {
             restricted,
         };
         let bytes = serde_json::to_vec(&head)?;
-        let id = Id::blob(&bytes);
+        let manifest = head.manifest()?;
+        let id = manifest.id()?;
         if self.db.execute(
-            "INSERT OR IGNORE INTO rep2_heads VALUES(?,?)",
+            "INSERT OR IGNORE INTO custody_heads VALUES(?,?)",
             params![id.to_string(), bytes],
         )? != 0
         {
             self.db.execute(
-                "INSERT INTO rep2_tips VALUES(?,?)",
+                "INSERT INTO custody_tips VALUES(?,?)",
                 params![source, id.to_string()],
             )?;
             if let Some(p) = parent {
                 self.db.execute(
-                    "DELETE FROM rep2_tips WHERE source=? AND head=?",
+                    "DELETE FROM custody_tips WHERE source=? AND head=?",
                     params![source, p.to_string()],
                 )?;
             }
             for (level, ancestor) in head.ancestors.iter().enumerate() {
                 self.db
-                    .prepare_cached("INSERT INTO rep2_jumps VALUES(?,?,?)")?
+                    .prepare_cached("INSERT INTO custody_jumps VALUES(?,?,?)")?
                     .execute(params![id.to_string(), level as i64, ancestor.to_string()])?;
             }
         }
@@ -341,13 +415,8 @@ impl Archive {
         })
     }
 
-    fn paged_raw(&self, id: Id) -> Result<(Vec<u8>, Id)> {
-        if id.format().is_none() {
-            return self.raw(id)?.context("unavailable payload");
-        }
-        let (data,acl):(Vec<u8>,String)=self.db.prepare_cached("SELECT substr(p.data,r.start+1,r.length),r.access FROM rep2_records r JOIN rep2_packs p ON p.id=r.pack WHERE r.id=?")?.query_row([id.to_string()],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        id.verify(&data)?;
-        Ok((data, acl.parse()?))
+    fn custody_raw(&self, id: Id) -> Result<(Vec<u8>, Id)> {
+        self.raw(id)?.context("unavailable archive member")
     }
     fn read_member(&self, tree: &mut Tree<'_>, h: &Head, id: Id, purpose: &str) -> Result<Vec<u8>> {
         let access = tree
@@ -358,14 +427,14 @@ impl Archive {
             "missing access descriptor"
         );
         self.check_access(access, |p| allows(p, purpose))?;
-        let (data, actual) = self.paged_raw(id)?;
+        let (data, actual) = self.custody_raw(id)?;
         ensure!(actual == access, "inconsistent custody descriptor");
         Ok(data)
     }
-    pub fn paged_resolve(&self, head: Id, id: Id, purpose: &str) -> Result<Vec<u8>> {
-        Ok(self.paged_resolve_counted(head, id, purpose)?.0)
+    pub fn custody_resolve(&self, head: Id, id: Id, purpose: &str) -> Result<Vec<u8>> {
+        Ok(self.custody_resolve_counted(head, id, purpose)?.0)
     }
-    pub fn paged_resolve_counted(
+    pub fn custody_resolve_counted(
         &self,
         head: Id,
         id: Id,
@@ -373,15 +442,15 @@ impl Archive {
     ) -> Result<(Vec<u8>, PageIo)> {
         self.with_read_view(|| {
             let mut tree = Tree::new(&self.db);
-            let bytes = self.read_member(&mut tree, &self.paged_head(head)?, id, purpose)?;
+            let bytes = self.read_member(&mut tree, &self.custody_head(head)?, id, purpose)?;
             Ok((bytes, tree.io))
         })
     }
-    pub fn paged_range(&self, head: Id, stream: Id, offset: u64, len: usize) -> Result<Vec<u8>> {
+    pub fn custody_range(&self, head: Id, stream: Id, offset: u64, len: usize) -> Result<Vec<u8>> {
         ensure!(len <= BATCH_BYTES, "range exceeds read budget");
         let end = offset.checked_add(len as u64).context("range overflow")?;
         self.with_read_view(|| {
-            let h = self.paged_head(head)?;
+            let h = self.custody_head(head)?;
             let mut tree = Tree::new(&self.db);
             self.read_member(&mut tree, &h, stream, "read")?;
             let mut out = Vec::with_capacity(len);

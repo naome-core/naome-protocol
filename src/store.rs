@@ -1,5 +1,9 @@
 mod exchange;
-pub mod paged;
+mod extents;
+mod inventory;
+mod upgrade;
+pub use inventory::Manifest;
+pub mod custody;
 mod search_index;
 pub mod sharing;
 mod snapshot;
@@ -68,8 +72,13 @@ impl Archive {
     }
     fn init(db: Connection) -> Result<Self> {
         db.busy_timeout(Duration::from_secs(10))?;
-        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;
-        CREATE TABLE IF NOT EXISTS objects(id TEXT PRIMARY KEY, data BLOB, access TEXT NOT NULL);
+        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;")?;
+        let archive = Self { db };
+        let tx = rusqlite::Transaction::new_unchecked(
+            &archive.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS objects(id TEXT PRIMARY KEY, data BLOB, access TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS heads(id TEXT PRIMARY KEY, manifest BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS rep_imported_heads(head TEXT PRIMARY KEY REFERENCES heads(id));
         CREATE TABLE IF NOT EXISTS rep_search_selection(singleton INTEGER PRIMARY KEY CHECK(singleton=1), head TEXT NOT NULL);
@@ -79,10 +88,12 @@ impl Archive {
         CREATE TABLE IF NOT EXISTS limits(resource TEXT PRIMARY KEY, capacity INTEGER NOT NULL CHECK(capacity>=0));
         CREATE TABLE IF NOT EXISTS revocations(authority TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, request BLOB NOT NULL, state TEXT NOT NULL, witness TEXT);")?;
-        let archive = Self { db };
+        archive.init_custody()?;
         for bytes in [PUBLIC, READ_ONLY, PROFILE] {
             archive.blob(bytes, Id::blob(PUBLIC))?;
         }
+        archive.upgrade_catalog()?;
+        tx.commit()?;
         Ok(archive)
     }
     /// All reads observe one custody state, including when called inside an existing transaction.
@@ -137,33 +148,38 @@ impl Archive {
             tx.execute("UPDATE objects SET data=NULL WHERE id=?", [id.to_string()])? == 1,
             "unknown payload"
         );
-        for head in self.releases()? {
-            if self.head(head)?.objects.contains(&id) {
-                tx.execute(
-                    "INSERT INTO suspended_releases(head) VALUES(?)",
-                    [head.to_string()],
-                )?;
-            }
-        }
+        tx.execute(
+            "DELETE FROM archive_extent_blocks WHERE id=?",
+            [id.to_string()],
+        )?;
+        tx.execute("INSERT OR IGNORE INTO suspended_releases SELECT head FROM archive_release_members WHERE member=?",[id.to_string()])?;
         tx.commit()?;
         Ok(())
     }
     pub(crate) fn size(&self, id: Id) -> Result<usize> {
         Ok(usize::try_from(
             self.db
-                .prepare_cached("SELECT coalesce(length(data),0) FROM objects WHERE id=?")?
+                .prepare_cached("SELECT CASE WHEN o.data IS NULL THEN 0 ELSE coalesce(r.length,e.length,length(o.data),0) END FROM objects o LEFT JOIN custody_records r ON o.id=r.id
+                   LEFT JOIN archive_extents e ON e.id=o.id WHERE o.id=?")?
                 .query_row([id.to_string()], |r| r.get::<_, i64>(0))
                 .optional()?
                 .unwrap_or(0),
         )?)
     }
     pub(crate) fn raw(&self, id: Id) -> Result<Option<(Vec<u8>, Id)>> {
-        let item: Option<(Vec<u8>, String)> = self
+        let item: Option<(Vec<u8>, String,Option<i64>)> = self
             .db
-            .prepare_cached("SELECT data,access FROM objects WHERE id=? AND data IS NOT NULL")?
-            .query_row([id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+            .prepare_cached("SELECT CASE WHEN r.id IS NULL THEN o.data ELSE substr(p.data,r.start+1,r.length) END,o.access,e.length FROM objects o LEFT JOIN custody_records r ON o.id=r.id
+                   LEFT JOIN custody_packs p ON p.id=r.pack
+                   LEFT JOIN archive_extents e ON e.id=o.id WHERE o.id=? AND o.data IS NOT NULL")?
+            .query_row([id.to_string()], |r| Ok((r.get(0)?, r.get(1)?,r.get(2)?)))
             .optional()?;
-        item.map(|(b, a)| {
+        item.map(|(b, a, length)| {
+            let b = if let Some(n) = length {
+                extents::get(&self.db, id, usize::try_from(n)?)?
+            } else {
+                b
+            };
             id.verify(&b)?;
             Ok((b, a.parse()?))
         })
@@ -426,6 +442,18 @@ pub(crate) enum ObjectAvailability {
 }
 
 fn insert(db: &Connection, id: Id, b: &[u8], access: Id) -> Result<ObjectAvailability> {
+    if id.format().is_some()
+        && db
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM custody_records WHERE id=? AND access=?)")?
+            .query_row(params![id.to_string(), access.to_string()], |r| {
+                r.get::<_, bool>(0)
+            })?
+    {
+        return Ok(ObjectAvailability::Available);
+    }
+    if id.format().is_none() && b.len() > custody::BLOCK {
+        return extents::put(db, id, b, access);
+    }
     let added = db.execute(
         "INSERT OR IGNORE INTO objects VALUES(?,?,?)",
         params![id.to_string(), b, access.to_string()],

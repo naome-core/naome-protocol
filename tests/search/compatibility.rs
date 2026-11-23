@@ -4,8 +4,8 @@ const V012_HEAD: &str = "1:1:49f23061e494caa854be82e4fcd4d90fb2adbb0fae26098ea1d
 const V012_CLAIM: &str = "1:0:272aaa50ba84dee45abd5db1e1c7f6d95421439cb2142b01c345a461e6dcf011";
 const V012_NOTICE: &str = "2:0:79760dbdaf935b9446708ab2a401353a0eaf938e99d8d18c859fb2aa5ad3d1d2";
 const V012_PAYLOAD: &str = "1:0:2d18e83105b029228dc48853c135f636a01d76e3f252ba414f69040ea7305df1";
-const V012_EXCHANGE_SHA256: &str =
-    "f770b5783b6187826ed997b7591920919fe757a6da3eb4d6c7df9f6e0141e290";
+const MIGRATED_V012_HEAD: &str =
+    "1:1:39c8c44763994015d4e11e591b2d2ca612eadea8d75edfc71a5669e99280ed82";
 
 #[test]
 fn invalid_cli_search_preserves_the_index_and_session_validation() -> Result<()> {
@@ -114,7 +114,6 @@ fn invalid_cli_search_preserves_the_index_and_session_validation() -> Result<()>
 
 #[test]
 fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
-    use sha2::{Digest, Sha256};
     use std::{fs, process::Command};
 
     // Created with the v0.1.2 CLI (c546fba6ed08403c045b3438fd7ad446de258c5f)
@@ -139,7 +138,7 @@ fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
         );
         Ok(serde_json::from_slice(&output.stdout)?)
     };
-    assert_eq!(run(&["heads"])?, json!([V012_HEAD]));
+    assert_eq!(run(&["heads"])?, json!([MIGRATED_V012_HEAD]));
     let unsupported = Command::new(env!("CARGO_BIN_EXE_nao"))
         .arg("--db")
         .arg(&db)
@@ -148,7 +147,7 @@ fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
         .output()?;
     assert!(!unsupported.status.success());
     let report = run(&["find", "interferometer drift"])?;
-    assert_eq!(report["head"], V012_HEAD);
+    assert_eq!(report["head"], MIGRATED_V012_HEAD);
     assert_eq!(report["hits"][0]["id"], V012_CLAIM);
     let query_file = directory.path().join("example.py");
     fs::write(&query_file, "# interferometer drift\n")?;
@@ -174,8 +173,11 @@ fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
 
     let second = run(&["snapshot", "newer inventory"])?;
     assert_eq!(run(&["search-head"])?, second);
-    assert_eq!(run(&["search-head", V012_HEAD])?, json!(V012_HEAD));
-    assert_eq!(run(&["find", "interferometer drift"])?["head"], V012_HEAD);
+    assert_eq!(run(&["search-head", V012_HEAD])?, json!(MIGRATED_V012_HEAD));
+    assert_eq!(
+        run(&["find", "interferometer drift"])?["head"],
+        MIGRATED_V012_HEAD
+    );
     assert_eq!(
         run(&[
             "prepare-search",
@@ -189,9 +191,14 @@ fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
 
     let file = directory.path().join("exchange.json");
     run(&["export", V012_HEAD, file.to_str().unwrap()])?;
-    assert_eq!(
-        hex::encode(Sha256::digest(fs::read(file)?)),
-        V012_EXCHANGE_SHA256
+    let transferred = naome_protocol::store::Bundle::read(fs::File::open(file)?)?;
+    assert_eq!(transferred.head.to_string(), MIGRATED_V012_HEAD);
+    let mut receiver = Archive::memory()?;
+    assert_eq!(receiver.import(&transferred)?, transferred.head);
+    assert!(
+        receiver
+            .resolve_head(transferred.head, V012_CLAIM.parse()?, "read")
+            .is_ok()
     );
     let archive = Archive::open(&db)?;
     let snapshot = archive.head(V012_HEAD.parse()?)?;
@@ -259,7 +266,6 @@ fn preparation_adds_the_media_passage_index_to_an_existing_cache() -> Result<()>
 
 #[test]
 fn previous_caches_are_rebuilt_without_changing_the_archive() -> Result<()> {
-    use sha2::{Digest, Sha256};
     use std::{
         fs,
         io::Write,
@@ -299,17 +305,18 @@ fn previous_caches_are_rebuilt_without_changing_the_archive() -> Result<()> {
         let head = archive.head(V012_HEAD.parse()?)?;
         assert_eq!(
             archive.releases()?.into_iter().collect::<Vec<_>>(),
-            [head.id()?]
+            [MIGRATED_V012_HEAD.parse()?]
         );
-        let packet = serde_json::to_vec(&archive.export(&head, "read")?)?;
-        assert_eq!(hex::encode(Sha256::digest(packet)), V012_EXCHANGE_SHA256);
+        assert_eq!(head.id()?.to_string(), V012_HEAD);
+        let packet = archive.export(&head, "read")?;
+        assert_eq!(packet.head.to_string(), MIGRATED_V012_HEAD);
+        assert_eq!(packet.snapshot.objects, head.objects);
     }
     Ok(())
 }
 
 #[test]
 fn released_v016_cache_recovers_missing_hits_without_changing_evidence() -> Result<()> {
-    use sha2::{Digest, Sha256};
     use std::{fs, process::Command};
 
     // Populated by v0.1.6 with capture, snapshot, publish, search-head, and
@@ -350,9 +357,13 @@ fn released_v016_cache_recovers_missing_hits_without_changing_evidence() -> Resu
         Ok(serde_json::from_slice(&output.stdout)?)
     };
 
+    let current = Archive::open(&database)?
+        .current_head_id(head.parse()?)?
+        .to_string();
+    assert_ne!(current, head);
     for (query, expected) in [("spectralmarker", compact), ("calibrationmarker", reading)] {
         let report = run(&["find", query])?;
-        assert_eq!(report["head"], head);
+        assert_eq!(report["head"], current);
         assert_eq!(report["index_complete"], true);
         assert_eq!(report["hits"][0]["id"], expected, "{query}");
         assert_eq!(report["limited_coverage"], false, "{query}");
@@ -361,13 +372,18 @@ fn released_v016_cache_recovers_missing_hits_without_changing_evidence() -> Resu
     fs::write(directory.path().join("query.txt"), "calibrationmarker")?;
     let report = run(&["find", "--input", "query.txt", "--media-type", "Text/Plain"])?;
     assert_eq!(report["hits"][0]["id"], reading);
-    assert_eq!(run(&["heads"])?, json!([head]));
+    assert_eq!(run(&["heads"])?, json!([current]));
     run(&["export", head, "exchange.json"])?;
-    assert_eq!(
-        hex::encode(Sha256::digest(fs::read(
-            directory.path().join("exchange.json")
-        )?)),
-        "2f6cedbf1f79592282b5ea55a68b363223eed1ce0123c6026c35a68ac01fba8b"
+    let transfer = naome_protocol::store::Bundle::read(fs::File::open(
+        directory.path().join("exchange.json"),
+    )?)?;
+    assert_eq!(transfer.head.to_string(), current);
+    let mut receiver = Archive::memory()?;
+    receiver.import(&transfer)?;
+    assert!(
+        receiver
+            .resolve_head(transfer.head, reading.parse()?, "read")
+            .is_ok()
     );
     Ok(())
 }

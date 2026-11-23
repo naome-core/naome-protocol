@@ -2,7 +2,7 @@
 use super::*;
 use std::io::{Read, Write};
 
-const MAGIC: &[u8; 4] = b"NPG2";
+pub(super) const MAGIC: &[u8; 4] = b"NAOF";
 const MAX_HEADER: usize = 32 * 1024;
 
 fn put(out: &mut impl Write, bytes: &[u8]) -> Result<()> {
@@ -23,13 +23,11 @@ fn header(reader: &mut impl Read) -> Result<(Head, Id)> {
     let bytes = take(reader, MAX_HEADER)?;
     let h: Head = serde_json::from_slice(&bytes)?;
     ensure!(
-        h.version == 2
-            && h.sequence != 0
-            && h.ancestors.len() <= 64
-            && (1..=MEMBERS).contains(&h.delta.len()),
+        h.sequence != 0 && h.ancestors.len() <= 64 && h.delta.len() <= MEMBERS,
         "invalid delta descriptor"
     );
-    Ok((h, Id::blob(&bytes)))
+    let id = h.manifest()?.id()?;
+    Ok((h, id))
 }
 fn level(distance: u64) -> usize {
     distance.ilog2() as usize
@@ -37,18 +35,18 @@ fn level(distance: u64) -> usize {
 
 impl Archive {
     /// Write the next bounded delta after a confirmed cursor. The sender checks its live grant.
-    pub fn paged_export_step(
+    pub fn custody_export_step(
         &self,
         target: Id,
         after: Option<Id>,
         mut out: impl Write,
     ) -> Result<(usize, PageIo)> {
         self.with_read_view(|| {
-            let tip = self.paged_head(target)?;
+            let tip = self.custody_head(target)?;
             let mut io = self.permitted_pull(target, &tip)?;
             let sequence = match after {
                 Some(id) => self
-                    .paged_head(id)?
+                    .custody_head(id)?
                     .sequence
                     .checked_add(1)
                     .context("sequence overflow")?,
@@ -61,7 +59,7 @@ impl Archive {
             // The delta goes first; the proof walks authenticated skip links from target back to it.
             let distance = tip.sequence - sequence;
             let next = self.ancestor(target, distance)?;
-            let delta = self.paged_head(next)?;
+            let delta = self.custody_head(next)?;
             ensure!(
                 delta.parent == after && delta.sequence == sequence,
                 "cursor belongs to another fork"
@@ -75,7 +73,7 @@ impl Archive {
                 put(&mut out, &serde_json::to_vec(&current)?)?;
                 remaining -= 1_u64 << power;
                 if remaining > 0 {
-                    current = self.paged_head(current.ancestors[power])?;
+                    current = self.custody_head(current.ancestors[power])?;
                 }
             }
             let mut tree = Tree::new(&self.db);
@@ -90,7 +88,7 @@ impl Archive {
         })
     }
     /// Verify a portable step against an independent target pin and rederive all index entries.
-    pub fn paged_import_step(&self, target: Id, mut input: impl Read) -> Result<Admission> {
+    pub fn custody_import_step(&self, target: Id, mut input: impl Read) -> Result<Admission> {
         let mut magic = [0; 4];
         input.read_exact(&mut magic)?;
         ensure!(&magic == MAGIC, "invalid paged frame");
@@ -121,9 +119,13 @@ impl Archive {
             "invalid delta sequence"
         );
         let mut items = Vec::new();
-        let mut remaining = BATCH_BYTES;
+        let mut remaining = if delta.delta.len() == 1 {
+            crate::wire::MAX_BYTES
+        } else {
+            BATCH_BYTES
+        };
         for member in &delta.delta {
-            let bytes = take(&mut input, remaining.min(1024 * 1024))?;
+            let bytes = take(&mut input, remaining)?;
             remaining -= bytes.len();
             items.push(Item {
                 member: member.clone(),
@@ -132,8 +134,15 @@ impl Archive {
         }
         ensure!(input.read(&mut [0])? == 0, "trailing frame data");
         let tx = rusqlite::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-        let result = self.admit_paged(&delta.source, delta.parent, &items)?;
+        let result = self.admit_batch(
+            &delta.source,
+            delta.parent,
+            &items,
+            &delta.origins,
+            delta.bootstrap,
+        )?;
         ensure!(result.head == next, "derived inventory or coverage differs");
+        self.register_snapshot(&delta.manifest()?, true)?;
         tx.commit()?;
         Ok(result)
     }

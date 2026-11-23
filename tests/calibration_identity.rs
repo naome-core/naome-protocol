@@ -32,7 +32,7 @@ fn record(
 }
 
 fn manifest(archive: &Archive, snapshot: &Snapshot) -> Result<Id> {
-    archive.blob(&serde_json::to_vec(snapshot)?, Id::blob(PUBLIC))
+    archive.deposit_manifest(snapshot)
 }
 
 struct Scenario {

@@ -9,7 +9,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
-TEST = "store::paged::tests::qualification_sample"
+TEST = "store::custody::tests::qualification_sample"
 
 
 def build():
@@ -42,6 +42,8 @@ def sample(binary, directory, size, phase):
 
 
 def verify(report):
+    if report.get("archive_format") == "manifest":
+        return verify_manifest(report)
     reference = json.loads((ROOT / "spec/scale/full-page-samples.json").read_text())
     baseline = {(r["phase"], r["size"]): r for r in reference["samples"]}
     def check(original, measured):
@@ -58,6 +60,37 @@ def verify(report):
         if row["phase"] == "first" and row["size"] == 12800 and report["platform"] == reference["platform"]:
             assert row["database_growth"] < other["database_growth"]
     print(f"Verified logical identities, work and transfer fields for {len(report['samples'])} observations.")
+
+
+def verify_manifest(report):
+    """Check invariant outcomes and within-format determinism; timings are observations."""
+    reference = json.loads((ROOT / "spec/scale/local-samples.json").read_text())
+    old = {(r["phase"], r["size"]): r["result"] for r in reference["samples"]}
+    first = {}
+    def stable(data):
+        if isinstance(data, dict):
+            if "reads" in data:
+                assert data["reads"] <= data["backing_reads"] <= 5 * data["reads"]
+            return {k: stable(v) for k, v in data.items()
+                    if k not in {"elapsed_ms", "writer_finish_us", "queue_full_events", "receiver_growth"}}
+        return data
+    for row in report["samples"]:
+        key = row["phase"], row["size"]
+        result = row["result"]
+        original = old[key]
+        for field in ("payload_bytes", "batches", "duplicate_deliveries", "review_standing", "queue_capacity"):
+            if field in original:
+                assert result[field] == original[field], (key, field)
+        if key[0] == "inventory":
+            assert result["root"] == original["root"]
+            assert result["delta_io"]["reads"] <= result["height"]
+            assert result["delta_io"]["writes"] <= 2 * result["height"] + 1
+        if key[0] == "pull-delta":
+            assert result["batches"] == 1 and result["payload_bytes"] == 203
+            assert result["descriptor_bytes"] <= 32 * 1024
+        observed = stable(result)
+        assert observed == first.setdefault(key, observed), key
+    print(f"Verified archive workloads and deterministic observations in {len(report['samples'])} samples.")
 
 
 def main():
@@ -87,7 +120,7 @@ def main():
                         row["repetition"] = trial
                         rows.append(row)
                         print(size, phase, row["process_ms"], flush=True)
-    report = {"platform": platform.platform(), "build": "cargo test --lib --release --locked",
+    report = {"archive_format": "manifest", "platform": platform.platform(), "build": "cargo test --lib --release --locked",
               "rustc": subprocess.check_output(["rustc", "-V"], text=True).strip(),
               "samples": rows}
     verify(report)

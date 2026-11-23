@@ -92,16 +92,14 @@ impl Archive {
         }
         ensure!(pending.is_empty(), "cyclic native migration");
         let source_manifest = self.deposit_manifest(s)?;
-        let native = Snapshot {
-            version: 1,
-            source: format!("{}-{:?}", s.source, target),
-            parents: [s.id()?].into(),
-            objects: s
-                .objects
+        let native = self.seal_members(
+            &(format!("{}-{:?}", s.source, target)),
+            [s.id()?].into(),
+            s.objects
                 .iter()
                 .map(|i| pairs.get(i).copied().unwrap_or(*i))
                 .collect(),
-        };
+        )?;
         let native_head = self.save(&native)?;
         self.deposit_manifest(&native)?;
         let mut links = vec![
@@ -126,12 +124,10 @@ impl Archive {
             target,
             Id::blob(PUBLIC),
         )?;
-        let exchange = Snapshot {
-            version: 1,
-            source: native.source,
-            parents: [source_manifest, native_head].into(),
-            objects: s
-                .objects
+        let exchange = self.seal_members(
+            &(native.source),
+            [source_manifest, native_head].into(),
+            s.objects
                 .union(&native.objects)
                 .copied()
                 .chain([
@@ -142,7 +138,7 @@ impl Archive {
                     Id::blob(PUBLIC),
                 ])
                 .collect(),
-        };
+        )?;
         self.verify_mapping(&exchange, mapping)?;
         let exchange_head = self.save(&exchange)?;
         tx.commit()?;

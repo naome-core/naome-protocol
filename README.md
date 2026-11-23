@@ -31,7 +31,9 @@ Import keeps the current search context. Use `nao find QUERY --head SNAPSHOT_ID`
 
 ## Work with large laboratory archives
 
-Use `nao --db LAB.sqlite paged append LAB members.json` to start an independently writable lineage. Each member names its logical ID, access descriptor and local file. Subsequent batches name a parent. Use `paged tips` to find concurrent branches, `paged share` to grant a specific tip, and `paged pull` to advance a receiver by a bounded number of batches. Separate laboratories can move portable frames using `paged export-step` and `paged import-step`. A federated review names its source heads and checks the coverage available at each one. The specification includes the wire contract, work bounds and limits of local qualification. [Paged custody](spec/scale/paged-custody.md)
+Every new snapshot, scientific receipt, search selection and exchange names the same compact archive manifest. A manifest commits to the source, parents, inventory page root, member count and custody descriptor. Use `nao migrate-archive old.sqlite new.sqlite` to create a migrated copy at a new path. The command opens the source read-only, verifies historical manifest IDs and publishes the destination only after conversion succeeds. Opening an older database for writing also upgrades its catalog in place. Use `nao --db new.sqlite migrated-head OLD_ID` for the active identifier. Historical receipts keep their original evidence bytes, record IDs and evaluator rules.
+
+Use `nao --db LAB.sqlite custody append LAB members.json` to start an independently writable lineage. Each member names its logical ID, access descriptor and local file. Subsequent batches name a parent. Use `custody tips` to find concurrent branches, `custody share` to grant a specific tip, and `custody pull` to advance a receiver by a bounded number of batches. Separate laboratories can move portable frames using `custody export-step` and `custody import-step`. A federated review names its source heads and checks the coverage available at each one. The specification includes the wire contract, work bounds and limits of local qualification. [Paged custody](spec/scale/paged-custody.md)
 
 ## Reproduce the reference trial
 
@@ -77,6 +79,6 @@ New assessment receipts use `rep-rust-rules-6`. It verifies canonical snapshot m
 
 - [Whitepaper](spec/research-evidence-protocol.pdf)
 - [Bootstrap kit A](spec/kits/A.json) and [bootstrap kit B](spec/kits/B.json)
-- [Example exchange file](spec/examples/exchange-v1.json)
+- [Example exchange file](spec/examples/exchange.json)
 
 From a source checkout on Linux x86_64 or Apple silicon, run `python3 tools/ci/whitepaper.py` to rebuild the whitepaper and verify the PDF. The first build downloads the pinned TeX engine and its resources.

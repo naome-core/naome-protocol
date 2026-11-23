@@ -12,37 +12,162 @@ use std::{
     ops::Bound::{Excluded, Unbounded},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+use super::{
+    Manifest,
+    custody::{BATCH_BYTES, Item, MEMBERS, Member},
+    inventory::{self, Pages},
+};
+use serde::{Deserializer, Serializer};
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Snapshot {
-    pub version: u8,
+pub(super) struct ArchivedInventory {
+    version: u8,
+    source: String,
+    parents: BTreeSet<Id>,
+    objects: BTreeSet<Id>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotView {
     pub source: String,
     pub parents: BTreeSet<Id>,
     pub objects: BTreeSet<Id>,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    view: SnapshotView,
+    pub(crate) manifest: Option<Manifest>,
+    pub(crate) pages: Pages,
+    archived_version: u8,
+}
+impl std::ops::Deref for Snapshot {
+    type Target = SnapshotView;
+    fn deref(&self) -> &SnapshotView {
+        &self.view
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Portable<M, P> {
+    manifest: M,
+    pages: P,
+}
+impl Serialize for Snapshot {
+    fn serialize<S: Serializer>(&self, out: S) -> std::result::Result<S::Ok, S::Error> {
+        let m = self.manifest.as_ref().ok_or_else(|| {
+            serde::ser::Error::custom("historical evidence requires migration for exchange")
+        })?;
+        Portable {
+            manifest: m,
+            pages: &self.pages,
+        }
+        .serialize(out)
+    }
+}
+impl<'de> Deserialize<'de> for Snapshot {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let Portable { manifest, pages } = Portable::<Manifest, Pages>::deserialize(d)?;
+        let (members, _) = manifest.witness(&pages).map_err(serde::de::Error::custom)?;
+        Ok(Self::current(manifest, members, pages))
+    }
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(super) enum StoredHeader {
+    Current(Manifest),
+    Archived(ArchivedInventory),
+}
+impl StoredHeader {
+    pub(super) fn into_snapshot(self) -> Snapshot {
+        match self {
+            Self::Current(m) => Snapshot::current(m, BTreeSet::new(), Pages::new()),
+            Self::Archived(a) => Snapshot {
+                view: SnapshotView {
+                    source: a.source,
+                    parents: a.parents,
+                    objects: a.objects,
+                },
+                manifest: None,
+                pages: Pages::new(),
+                archived_version: a.version,
+            },
+        }
+    }
+}
 impl Snapshot {
-    pub fn id(&self) -> Result<Id> {
-        Ok(Id::blob(&self.bytes()?))
+    fn current(manifest: Manifest, objects: BTreeSet<Id>, pages: Pages) -> Self {
+        Self {
+            view: SnapshotView {
+                source: manifest.source.clone(),
+                parents: manifest.parents.clone(),
+                objects,
+            },
+            manifest: Some(manifest),
+            pages,
+            archived_version: 0,
+        }
     }
-
-    pub(super) fn bytes(&self) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(self)?)
+    pub(super) fn hydrate(&mut self, pages: &Pages) -> Result<()> {
+        if let Some(m) = &self.manifest {
+            (self.view.objects, self.pages) = m.witness(pages)?;
+        }
+        Ok(())
     }
-
-    fn validate_header(&self) -> Result<()> {
+    pub(super) fn load_pages(&mut self, db: &Connection) -> Result<()> {
+        if let Some(m) = &self.manifest {
+            (self.view.objects, self.pages) = m.read(db)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn ensure_hydrated(&self) -> Result<()> {
         ensure!(
-            self.version == 1 && !self.source.is_empty(),
-            "invalid snapshot"
+            self.manifest
+                .as_ref()
+                .is_none_or(|m| !self.pages.is_empty() && m.count == self.objects.len() as u64),
+            "snapshot inventory witnesses unavailable"
         );
         Ok(())
     }
-
+    /// Compact header committed by the head identifier. A transport snapshot also carries witnesses.
+    pub fn manifest(&self) -> Result<&Manifest> {
+        self.manifest
+            .as_ref()
+            .context("historical evidence has a flat manifest")
+    }
+    pub fn id(&self) -> Result<Id> {
+        Ok(Id::blob(&self.bytes()?))
+    }
+    pub(super) fn bytes(&self) -> Result<Vec<u8>> {
+        if let Some(m) = &self.manifest {
+            return m.bytes();
+        }
+        Ok(serde_json::to_vec(&ArchivedInventory {
+            version: self.archived_version,
+            source: self.source.clone(),
+            parents: self.parents.clone(),
+            objects: self.objects.clone(),
+        })?)
+    }
+    fn validate_header(&self) -> Result<()> {
+        ensure!(!self.source.is_empty(), "invalid snapshot");
+        if let Some(m) = &self.manifest {
+            ensure!(
+                self.source == m.source && self.parents == m.parents,
+                "changed snapshot header"
+            );
+        } else {
+            ensure!(self.archived_version == 1, "invalid snapshot");
+        }
+        Ok(())
+    }
     pub(super) fn verify_head(&self, id: Id) -> Result<()> {
         self.validate_header()?;
         ensure!(self.id()? == id, "invalid snapshot manifest");
+        if let Some(m) = &self.manifest {
+            let (ids, _) = m.witness(&self.pages)?;
+            ensure!(ids == self.objects, "inconsistent snapshot inventory");
+        }
         Ok(())
     }
-
     pub(crate) fn records(&self) -> impl Iterator<Item = Id> + '_ {
         self.records_after(None)
     }
@@ -76,9 +201,10 @@ pub(crate) enum ManifestEncoding {
 
 impl ManifestEncoding {
     fn decode(self, id: Id, bytes: &[u8]) -> Result<Snapshot> {
-        let snapshot: Snapshot = serde_json::from_slice(bytes)?;
+        let snapshot = serde_json::from_slice::<StoredHeader>(bytes)?.into_snapshot();
         if matches!(self, Self::Canonical) {
-            snapshot.verify_head(id)?;
+            snapshot.validate_header()?;
+            ensure!(snapshot.id()? == id, "invalid snapshot manifest");
         }
         Ok(snapshot)
     }
@@ -86,6 +212,7 @@ impl ManifestEncoding {
 
 // A caller owns the write transaction. A previously known head retains its local status.
 pub(super) fn save_imported_head(db: &Connection, head: Id, snapshot: &Snapshot) -> Result<()> {
+    inventory::install(db, &snapshot.pages)?;
     let id = head.to_string();
     if db.execute(
         "INSERT OR IGNORE INTO heads VALUES(?,?)",
@@ -104,22 +231,195 @@ impl Archive {
         id: Id,
         encoding: ManifestEncoding,
     ) -> Result<Snapshot> {
-        encoding.decode(id, &self.resolve(view, id, "read")?)
+        let mut s = encoding.decode(id, &self.resolve(view, id, "read")?)?;
+        s.load_pages(&self.db)?;
+        Ok(s)
     }
 
-    pub(crate) fn deposit_manifest(&self, snapshot: &Snapshot) -> Result<Id> {
-        self.blob(&snapshot.bytes()?, Id::blob(PUBLIC))
+    pub fn deposit_manifest(&self, snapshot: &Snapshot) -> Result<Id> {
+        if let Some(m) = &snapshot.manifest {
+            return self.blob(&m.bytes()?, Id::blob(PUBLIC));
+        }
+        // Frozen training requests may need to deposit an already archived manifest as an
+        // evidence blob. Copy the verified original; historical inventories have no writer.
+        let id = snapshot.id()?;
+        let original: Option<Vec<u8>> = self
+            .db
+            .query_row(
+                "SELECT manifest FROM archive_historical WHERE id=?",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let bytes = match original {
+            Some(b) => b,
+            None => {
+                self.raw(id)?
+                    .context("historical manifest bytes unavailable")?
+                    .0
+            }
+        };
+        id.verify(&bytes)?;
+        self.blob(&bytes, Id::blob(PUBLIC))
     }
 
     pub fn snapshot(&self, source: &str, parents: BTreeSet<Id>) -> Result<Snapshot> {
-        let s = Snapshot {
-            version: 1,
-            source: source.into(),
-            parents,
-            objects: self.id_set("SELECT id FROM objects WHERE data IS NOT NULL")?,
+        self.head(self.snapshot_id(source, parents)?)
+    }
+
+    /// Seal all locally available members without materializing the inventory. A compatible
+    /// full parent reuses its trees and reads only catalog rows deposited since that parent.
+    pub fn snapshot_id(&self, source: &str, parents: BTreeSet<Id>) -> Result<Id> {
+        let tx = if self.db.is_autocommit() {
+            Some(rusqlite::Transaction::new_unchecked(
+                &self.db,
+                rusqlite::TransactionBehavior::Immediate,
+            )?)
+        } else {
+            None
         };
-        self.save(&s)?;
-        Ok(s)
+        let (water, epoch): (i64, i64) = self.db.query_row(
+            "SELECT (SELECT coalesce(max(serial),0) FROM archive_deposits),withdrawn
+             FROM archive_epoch WHERE singleton=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let encoded = serde_json::to_string(&parents)?;
+        let existing: Option<String> = self
+            .db
+            .query_row(
+                "SELECT id FROM archive_seals
+             WHERE source=? AND parents=? AND high_water=? AND epoch=?",
+                params![source, encoded, water, epoch],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            return id.parse();
+        }
+        let mut base = None;
+        let mut after = 0_i64;
+        for parent in &parents {
+            if let Some(previous) = self
+                .db
+                .query_row(
+                    "SELECT high_water FROM archive_seals WHERE id=? AND source=? AND epoch=?",
+                    params![parent.to_string(), source, epoch],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()?
+                && (base.is_none() || previous > after)
+            {
+                base = Some(*parent);
+                after = previous;
+            }
+        }
+        let mut q = self.db.prepare(
+            "SELECT d.id FROM archive_deposits d JOIN objects o ON o.id=d.id
+             WHERE d.serial>? AND d.serial<=? AND o.data IS NOT NULL ORDER BY d.serial",
+        )?;
+        let rows = q.query_map(params![after, water], |r| r.get::<_, String>(0))?;
+        let ids = rows.map(|r| r?.parse());
+        let head = self.seal_ids(source, &parents, base, ids)?;
+        self.db.execute(
+            "INSERT INTO archive_seals VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET high_water=excluded.high_water,epoch=excluded.epoch",
+            params![head.to_string(), source, encoded, water, epoch],
+        )?;
+        if let Some(tx) = tx {
+            tx.commit()?
+        }
+        Ok(head)
+    }
+    pub(super) fn register_snapshot(&self, m: &Manifest, imported: bool) -> Result<()> {
+        let id = m.id()?.to_string();
+        if self.db.execute(
+            "INSERT OR IGNORE INTO heads VALUES(?,?)",
+            params![id, m.bytes()?],
+        )? != 0
+            && imported
+        {
+            self.db
+                .execute("INSERT INTO rep_imported_heads VALUES(?)", [id])?;
+        }
+        Ok(())
+    }
+    pub fn seal_members(
+        &self,
+        source: &str,
+        parents: BTreeSet<Id>,
+        objects: BTreeSet<Id>,
+    ) -> Result<Snapshot> {
+        let tx = if self.db.is_autocommit() {
+            Some(rusqlite::Transaction::new_unchecked(
+                &self.db,
+                rusqlite::TransactionBehavior::Immediate,
+            )?)
+        } else {
+            None
+        };
+        let head = self.seal_ids(source, &parents, None, objects.iter().copied().map(Ok))?;
+        let snapshot = self.head(head)?;
+        ensure!(snapshot.objects == objects, "sealed inventory differs");
+        if let Some(tx) = tx {
+            tx.commit()?
+        }
+        Ok(snapshot)
+    }
+    fn seal_ids(
+        &self,
+        source: &str,
+        parents: &BTreeSet<Id>,
+        mut cursor: Option<Id>,
+        ids: impl Iterator<Item = Result<Id>>,
+    ) -> Result<Id> {
+        let mut items = Vec::new();
+        let mut total = 0;
+        for id in ids {
+            let id = id?;
+            let raw = self.raw(id)?;
+            let absent = raw.is_none();
+            let (bytes, access) = match raw {
+                Some(pair) => pair,
+                None => {
+                    let known: Option<String> = self
+                        .db
+                        .query_row(
+                            "SELECT access FROM objects WHERE id=?",
+                            [id.to_string()],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    (
+                        Vec::new(),
+                        known.map_or(Ok(Id::blob(PUBLIC)), |s| s.parse())?,
+                    )
+                }
+            };
+            if !items.is_empty() && (items.len() == MEMBERS || total + bytes.len() > BATCH_BYTES) {
+                cursor = Some(
+                    self.admit_batch(source, cursor, &items, parents, false)?
+                        .head,
+                );
+                items.clear();
+                total = 0;
+            }
+            total += bytes.len();
+            items.push(Item {
+                member: Member {
+                    id,
+                    access,
+                    position: None,
+                    absent,
+                },
+                bytes,
+            });
+        }
+        let head = self
+            .admit_batch(source, cursor, &items, parents, false)?
+            .head;
+        let manifest = self.custody_head(head)?.manifest()?;
+        self.register_snapshot(&manifest, false)?;
+        Ok(head)
     }
     /// Seal the readable forward dependency closure of explicitly selected objects.
     pub fn selected_snapshot(
@@ -153,19 +453,17 @@ impl Archive {
                 }
             }
         }
-        let snapshot = Snapshot {
-            version: 1,
-            source: source.into(),
-            parents,
-            objects,
-        };
-        self.save(&snapshot)?;
+        let snapshot = self.seal_members(source, parents, objects)?;
         tx.commit()?;
         Ok(snapshot)
     }
 
     pub fn save(&self, s: &Snapshot) -> Result<Id> {
-        s.validate_header()?;
+        if s.manifest.is_none() {
+            return self.convert_archived(s.id()?, s);
+        }
+        s.verify_head(s.id()?)?;
+        inventory::install(&self.db, &s.pages)?;
         let bytes = s.bytes()?;
         let id = Id::blob(&bytes);
         self.db.execute(
@@ -174,15 +472,75 @@ impl Archive {
         )?;
         Ok(id)
     }
+    /// Follow the migration mapping for active operations. Historical evaluators use head()
+    /// to resolve an exact content-addressed snapshot.
+    pub fn active_head(&self, id: Id) -> Result<Snapshot> {
+        let s = self.head(self.current_head_id(id)?)?;
+        if s.manifest.is_some() {
+            Ok(s)
+        } else {
+            self.head(self.convert_archived(id, &s)?)
+        }
+    }
+    pub(super) fn active_manifest(&self, head: Id) -> Result<Manifest> {
+        let head = self.current_head_id(head)?;
+        let header: Option<Vec<u8>> = self
+            .db
+            .query_row(
+                "SELECT manifest FROM heads WHERE id=?",
+                [head.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(header) = header {
+            let m: Manifest = serde_json::from_slice(&header)?;
+            m.verify(head)?;
+            return Ok(m);
+        }
+        Ok(self.active_head(head)?.manifest()?.clone())
+    }
+    pub(super) fn resolve_member(
+        &self,
+        m: &Manifest,
+        id: Id,
+        purpose: &str,
+    ) -> Result<(Vec<u8>, Id)> {
+        let mut tree = super::custody::tree::Tree::new(&self.db);
+        ensure!(
+            tree.get(m.inventory, &id.to_string())? == Some(id),
+            "outside snapshot"
+        );
+        let (bytes, access) = self.raw(id)?.context("unavailable")?;
+        ensure!(
+            tree.get(m.inventory, &access.to_string())? == Some(access),
+            "missing access descriptor"
+        );
+        self.check_access(access, |policy| crate::profile::allows(policy, purpose))?;
+        Ok((bytes, access))
+    }
+    /// Check a payload and its access descriptor through their authenticated inventory paths.
+    pub fn resolve_head(&self, head: Id, id: Id, purpose: &str) -> Result<Vec<u8>> {
+        self.with_read_view(|| {
+            let m = self.active_manifest(head)?;
+            Ok(self.resolve_member(&m, id, purpose)?.0)
+        })
+    }
     pub fn head(&self, id: Id) -> Result<Snapshot> {
         let b: Option<Vec<u8>> = self
             .db
             .query_row(
-                "SELECT manifest FROM heads WHERE id=?",
+                "SELECT manifest FROM heads WHERE id=?1 UNION ALL SELECT manifest FROM archive_historical WHERE id=?1",
                 [id.to_string()],
                 |r| r.get(0),
             )
             .optional()?;
+        if b.is_none()
+            && let Ok(h) = self.custody_head(id)
+        {
+            let m = h.manifest()?;
+            let (objects, pages) = m.read(&self.db)?;
+            return Ok(Snapshot::current(m, objects, pages));
+        }
         let b = match b {
             Some(b) => b,
             None => {
@@ -193,7 +551,9 @@ impl Archive {
             }
         };
         id.verify(&b)?;
-        ManifestEncoding::Canonical.decode(id, &b)
+        let mut s = ManifestEncoding::Canonical.decode(id, &b)?;
+        s.load_pages(&self.db)?;
+        Ok(s)
     }
 
     /// Resolve a linked receipt inventory using only evidence in the caller's view.

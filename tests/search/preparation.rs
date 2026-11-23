@@ -59,17 +59,15 @@ fn preparation_reuses_objects_across_snapshots_and_keeps_queries_read_only() -> 
     let protected = claim(&archive, "other", "Vibration", acl, Format::B)?;
     let full = archive.snapshot("with policy", [second.id()?].into())?;
     archive.prepare_search(&full, 100, Some(&mut model))?;
-    let restricted = naome_protocol::store::Snapshot {
-        version: full.version,
-        source: "without policy".to_owned(),
-        parents: [full.id()?].into(),
-        objects: full
-            .objects
+    let restricted = archive.seal_members(
+        "without policy",
+        [full.id()?].into(),
+        full.objects
             .iter()
             .copied()
             .filter(|id| *id != acl)
             .collect(),
-    };
+    )?;
     let result = archive.find(&restricted, "Vibration", options, Some(&mut model))?;
     assert!(result.limited_coverage);
     assert!(result.hits.iter().all(|hit| hit.id != protected));

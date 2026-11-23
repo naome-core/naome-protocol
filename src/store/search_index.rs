@@ -77,12 +77,13 @@ impl Archive {
                 .context("no archive snapshot; create one with snapshot or specify --head")?
                 .parse()?,
         };
-        self.head(head)
+        self.head(self.current_head_id(head)?)
     }
 
     /// Pin a search snapshot independently of cache preparation. None restores the default.
     pub fn set_search_head(&self, head: Option<Id>) -> Result<()> {
         if let Some(head) = head {
+            let head = self.current_head_id(head)?;
             self.head(head)?;
             self.db.execute(
                 "INSERT OR REPLACE INTO rep_search_selection VALUES(1,?)",

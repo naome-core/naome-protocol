@@ -1,6 +1,6 @@
 //! Bounded custody commands for independently pinned lab lineages.
 use super::*;
-use crate::store::paged::{BATCH_BYTES, BLOCK, Federation, Item, MEMBERS, Member, Position};
+use crate::store::custody::{BATCH_BYTES, BLOCK, Federation, Item, MEMBERS, Member, Position};
 use anyhow::Context;
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -76,13 +76,6 @@ pub enum Command {
         #[arg(long, default_value_t = 1)]
         batches: usize,
     },
-    Resolve {
-        head: Id,
-        id: Id,
-        output: PathBuf,
-        #[arg(long, default_value = "read")]
-        purpose: String,
-    },
     /// Read exactly the selected byte range into a new file.
     Range {
         head: Id,
@@ -134,7 +127,7 @@ fn capture(
     let mut digest = Sha256::new();
     let mut length = 0_u64;
     let mut parent = Some(initial);
-    db.paged_resolve(initial, stream, "read")?;
+    db.custody_resolve(initial, stream, "read")?;
     let mut block = 0_u64;
     let mut items = Vec::new();
     loop {
@@ -153,7 +146,7 @@ fn capture(
         }
         // Leave room for the default access descriptors on the first batch.
         if !items.is_empty() && (eof || items.len() == BATCH_BYTES / BLOCK - 1) {
-            let admitted = db.paged_append(source, parent, &items)?;
+            let admitted = db.custody_append(source, parent, &items)?;
             parent = Some(admitted.head);
             items.clear();
         }
@@ -184,7 +177,7 @@ pub(super) fn run(db_path: &Path, command: Command) -> Result<()> {
         let federation = Federation::new(heads)?;
         let mut stores = Vec::new();
         for loc in locators {
-            if let Ok(db) = Archive::paged_reader(loc.db) {
+            if let Ok(db) = Archive::custody_reader(loc.db) {
                 stores.push((db, loc.head));
             }
         }
@@ -196,8 +189,7 @@ pub(super) fn run(db_path: &Path, command: Command) -> Result<()> {
         };
         if receipt {
             let db = Archive::open(db_path)?;
-            db.init_paged()?;
-            let receipt = db.paged_save_receipt(&report)?;
+            let receipt = db.custody_save_receipt(&report)?;
             return print(json!({"receipt":receipt,"report":report}));
         }
         return print(report);
@@ -206,14 +198,9 @@ pub(super) fn run(db_path: &Path, command: Command) -> Result<()> {
         Command::Head { .. }
         | Command::Receipt { .. }
         | Command::Tips { .. }
-        | Command::Resolve { .. }
         | Command::Range { .. }
-        | Command::ExportStep { .. } => Archive::paged_reader(db_path)?,
-        _ => {
-            let a = Archive::open(db_path)?;
-            a.init_paged()?;
-            a
-        }
+        | Command::ExportStep { .. } => Archive::custody_reader(db_path)?,
+        _ => Archive::open(db_path)?,
     };
     match command {
         Command::Review { .. } => unreachable!(),
@@ -235,11 +222,12 @@ pub(super) fn run(db_path: &Path, command: Command) -> Result<()> {
                         id: spec.id,
                         access: spec.access,
                         position: spec.position,
+                        absent: false,
                     },
                     bytes,
                 });
             }
-            print(db.paged_append(&source, parent, &items)?)
+            print(db.custody_append(&source, parent, &items)?)
         }
         Command::Capture {
             source,
@@ -259,41 +247,37 @@ pub(super) fn run(db_path: &Path, command: Command) -> Result<()> {
             head,
             after,
             output,
-        } => print(publish(&output, |f| db.paged_export_step(head, after, f))?),
+        } => print(publish(&output, |f| {
+            db.custody_export_step(head, after, f)
+        })?),
         Command::ImportStep { head, file } => {
-            print(db.paged_import_step(head, BufReader::new(File::open(file)?))?)
+            print(db.custody_import_step(head, BufReader::new(File::open(file)?))?)
         }
         Command::Tips {
             source,
             after,
             limit,
-        } => print(db.paged_tips(&source, after, limit)?),
+        } => print(db.custody_tips(&source, after, limit)?),
         Command::Receipt { id } => print(serde_json::from_slice::<serde_json::Value>(
-            &db.paged_receipt(id)?,
+            &db.custody_receipt(id)?,
         )?),
-        Command::Head { head } => print(db.paged_head(head)?),
-        Command::Share { head } => db.paged_share(head, true),
-        Command::Retract { head } => db.paged_share(head, false),
+        Command::Head { head } => print(db.custody_head(head)?),
+        Command::Share { head } => db.custody_share(head, true),
+        Command::Retract { head } => db.custody_share(head, false),
         Command::Pull {
             origin,
             head,
             batches,
         } => {
             ensure!(origin.is_file(), "missing origin archive");
-            print(db.paged_pull(&Archive::paged_reader(origin)?, head, batches)?)
+            print(db.custody_pull(&Archive::custody_reader(origin)?, head, batches)?)
         }
-        Command::Resolve {
-            head,
-            id,
-            output: path,
-            purpose,
-        } => output(&path, &db.paged_resolve(head, id, &purpose)?),
         Command::Range {
             head,
             stream,
             offset,
             length,
             output: path,
-        } => output(&path, &db.paged_range(head, stream, offset, length)?),
+        } => output(&path, &db.custody_range(head, stream, offset, length)?),
     }
 }

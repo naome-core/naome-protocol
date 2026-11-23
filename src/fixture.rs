@@ -110,7 +110,7 @@ fn seed_measurements(store: &Archive, f: Format, legacy: bool) -> Result<Investi
         vec![link("question", question)],
     )?;
     let features = store.snapshot("East", BTreeSet::new())?;
-    let feature_cutoff = store.blob(&serde_json::to_vec(&features)?, Id::blob(PUBLIC))?;
+    let feature_cutoff = store.deposit_manifest(&features)?;
     let release = bar(
         store,
         f,

@@ -1,0 +1,1571 @@
+{
+  "archive_format": "manifest",
+  "platform": "macOS-27.3-arm64-arm-64bit",
+  "build": "cargo test --lib --release --locked",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "samples": [
+    {
+      "database_growth": 0,
+      "elapsed_ms": 252.02362499999998,
+      "phase": "mixed",
+      "result": {
+        "announcements": 8,
+        "batches": 24,
+        "descriptor_bytes": 44964,
+        "duplicate_deliveries": 8,
+        "elapsed_ms": 251.95362500000002,
+        "federated_tips": [
+          "1:1:a725369bb72834b5bb447a4baf2e1c78a4672b3e090c35f7ca850d5a06d7e0d3",
+          "1:1:fdb16d4df7e0c9b1b6a4a0a53a2d7aefa44013c06213642c888758ba8538d314"
+        ],
+        "max_batch_payload": 262329,
+        "payload_bytes": 1595726,
+        "queue_capacity": 2,
+        "queue_full_events": 5,
+        "receiver_reopens": 24,
+        "review_standing": "review",
+        "service_pause_ms": 3,
+        "writer_finish_us": [
+          172715,
+          150254
+        ],
+        "writers": 2
+      },
+      "size": 24,
+      "process_ms": 446.88,
+      "peak_rss_bytes": 13402112,
+      "repetition": 1
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 271.524333,
+      "phase": "mixed",
+      "result": {
+        "announcements": 8,
+        "batches": 24,
+        "descriptor_bytes": 44964,
+        "duplicate_deliveries": 8,
+        "elapsed_ms": 271.45754100000005,
+        "federated_tips": [
+          "1:1:a725369bb72834b5bb447a4baf2e1c78a4672b3e090c35f7ca850d5a06d7e0d3",
+          "1:1:fdb16d4df7e0c9b1b6a4a0a53a2d7aefa44013c06213642c888758ba8538d314"
+        ],
+        "max_batch_payload": 262329,
+        "payload_bytes": 1595726,
+        "queue_capacity": 2,
+        "queue_full_events": 5,
+        "receiver_reopens": 24,
+        "review_standing": "review",
+        "service_pause_ms": 3,
+        "writer_finish_us": [
+          180547,
+          202556
+        ],
+        "writers": 2
+      },
+      "size": 24,
+      "process_ms": 287.655,
+      "peak_rss_bytes": 13713408,
+      "repetition": 2
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 248.941375,
+      "phase": "mixed",
+      "result": {
+        "announcements": 8,
+        "batches": 24,
+        "descriptor_bytes": 44964,
+        "duplicate_deliveries": 8,
+        "elapsed_ms": 248.88674999999998,
+        "federated_tips": [
+          "1:1:a725369bb72834b5bb447a4baf2e1c78a4672b3e090c35f7ca850d5a06d7e0d3",
+          "1:1:fdb16d4df7e0c9b1b6a4a0a53a2d7aefa44013c06213642c888758ba8538d314"
+        ],
+        "max_batch_payload": 262329,
+        "payload_bytes": 1595726,
+        "queue_capacity": 2,
+        "queue_full_events": 5,
+        "receiver_reopens": 24,
+        "review_standing": "review",
+        "service_pause_ms": 3,
+        "writer_finish_us": [
+          163187,
+          140898
+        ],
+        "writers": 2
+      },
+      "size": 24,
+      "process_ms": 262.495,
+      "peak_rss_bytes": 14548992,
+      "repetition": 3
+    },
+    {
+      "database_growth": 16384,
+      "elapsed_ms": 0.768416,
+      "phase": "inventory",
+      "result": {
+        "delta_io": {
+          "backing_read_bytes": 4256,
+          "backing_reads": 2,
+          "backing_written_bytes": 284,
+          "read_bytes": 4256,
+          "reads": 2,
+          "writes": 2,
+          "written_bytes": 4402
+        },
+        "height": 2,
+        "initial_io": {
+          "backing_read_bytes": 0,
+          "backing_reads": 0,
+          "backing_written_bytes": 15236,
+          "read_bytes": 0,
+          "reads": 0,
+          "writes": 5,
+          "written_bytes": 15236
+        },
+        "root": "1:1:099a070fe4dbf60cec1a0cce433c011d4a8455bd11bfd605c1f2d282f6eeaa50"
+      },
+      "size": 100,
+      "process_ms": 19.958,
+      "peak_rss_bytes": 5210112,
+      "repetition": 1
+    },
+    {
+      "database_growth": 16384,
+      "elapsed_ms": 1.863166,
+      "phase": "inventory",
+      "result": {
+        "delta_io": {
+          "backing_read_bytes": 4256,
+          "backing_reads": 2,
+          "backing_written_bytes": 284,
+          "read_bytes": 4256,
+          "reads": 2,
+          "writes": 2,
+          "written_bytes": 4402
+        },
+        "height": 2,
+        "initial_io": {
+          "backing_read_bytes": 0,
+          "backing_reads": 0,
+          "backing_written_bytes": 15236,
+          "read_bytes": 0,
+          "reads": 0,
+          "writes": 5,
+          "written_bytes": 15236
+        },
+        "root": "1:1:099a070fe4dbf60cec1a0cce433c011d4a8455bd11bfd605c1f2d282f6eeaa50"
+      },
+      "size": 100,
+      "process_ms": 34.533,
+      "peak_rss_bytes": 5226496,
+      "repetition": 2
+    },
+    {
+      "database_growth": 16384,
+      "elapsed_ms": 0.76025,
+      "phase": "inventory",
+      "result": {
+        "delta_io": {
+          "backing_read_bytes": 4256,
+          "backing_reads": 2,
+          "backing_written_bytes": 284,
+          "read_bytes": 4256,
+          "reads": 2,
+          "writes": 2,
+          "written_bytes": 4402
+        },
+        "height": 2,
+        "initial_io": {
+          "backing_read_bytes": 0,
+          "backing_reads": 0,
+          "backing_written_bytes": 15236,
+          "read_bytes": 0,
+          "reads": 0,
+          "writes": 5,
+          "written_bytes": 15236
+        },
+        "root": "1:1:099a070fe4dbf60cec1a0cce433c011d4a8455bd11bfd605c1f2d282f6eeaa50"
+      },
+      "size": 100,
+      "process_ms": 24.123,
+      "peak_rss_bytes": 5210112,
+      "repetition": 3
+    },
+    {
+      "database_growth": 1789952,
+      "elapsed_ms": 32.79375,
+      "phase": "inventory",
+      "result": {
+        "delta_io": {
+          "backing_read_bytes": 32000,
+          "backing_reads": 11,
+          "backing_written_bytes": 7423,
+          "read_bytes": 9670,
+          "reads": 3,
+          "writes": 3,
+          "written_bytes": 9816
+        },
+        "height": 3,
+        "initial_io": {
+          "backing_read_bytes": 846785,
+          "backing_reads": 335,
+          "backing_written_bytes": 1554701,
+          "read_bytes": 359124,
+          "reads": 113,
+          "writes": 402,
+          "written_bytes": 1682758
+        },
+        "root": "1:1:1e0ddde841382f83eb81de6ef24dc93b323d88d16d953326408816131306e205"
+      },
+      "size": 10000,
+      "process_ms": 55.717,
+      "peak_rss_bytes": 8110080,
+      "repetition": 1
+    },
+    {
+      "database_growth": 1789952,
+      "elapsed_ms": 29.779957999999997,
+      "phase": "inventory",
+      "result": {
+        "delta_io": {
+          "backing_read_bytes": 32000,
+          "backing_reads": 11,
+          "backing_written_bytes": 7423,
+          "read_bytes": 9670,
+          "reads": 3,
+          "writes": 3,
+          "written_bytes": 9816
+        },
+        "height": 3,
+        "initial_io": {
+          "backing_read_bytes": 846785,
+          "backing_reads": 335,
+          "backing_written_bytes": 1554701,
+          "read_bytes": 359124,
+          "reads": 113,
+          "writes": 402,
+          "written_bytes": 1682758
+        },
+        "root": "1:1:1e0ddde841382f83eb81de6ef24dc93b323d88d16d953326408816131306e205"
+      },
+      "size": 10000,
+      "process_ms": 54.46,
+      "peak_rss_bytes": 8093696,
+      "repetition": 2
+    },
+    {
+      "database_growth": 1789952,
+      "elapsed_ms": 25.635959,
+      "phase": "inventory",
+      "result": {
+        "delta_io": {
+          "backing_read_bytes": 32000,
+          "backing_reads": 11,
+          "backing_written_bytes": 7423,
+          "read_bytes": 9670,
+          "reads": 3,
+          "writes": 3,
+          "written_bytes": 9816
+        },
+        "height": 3,
+        "initial_io": {
+          "backing_read_bytes": 846785,
+          "backing_reads": 335,
+          "backing_written_bytes": 1554701,
+          "read_bytes": 359124,
+          "reads": 113,
+          "writes": 402,
+          "written_bytes": 1682758
+        },
+        "root": "1:1:1e0ddde841382f83eb81de6ef24dc93b323d88d16d953326408816131306e205"
+      },
+      "size": 10000,
+      "process_ms": 62.434,
+      "peak_rss_bytes": 8142848,
+      "repetition": 3
+    },
+    {
+      "database_growth": 183644160,
+      "elapsed_ms": 3894.730833,
+      "phase": "inventory",
+      "result": {
+        "delta_io": {
+          "backing_read_bytes": 19014,
+          "backing_reads": 14,
+          "backing_written_bytes": 2886,
+          "read_bytes": 13636,
+          "reads": 5,
+          "writes": 6,
+          "written_bytes": 13938
+        },
+        "height": 5,
+        "initial_io": {
+          "backing_read_bytes": 112017776,
+          "backing_reads": 54569,
+          "backing_written_bytes": 160884359,
+          "read_bytes": 58638256,
+          "reads": 18194,
+          "writes": 46924,
+          "written_bytes": 190371982
+        },
+        "root": "1:1:61e7c7c285c4af1abf86c2e700ee97c0a1799f04ba2f6ab4af839104e8207ab7"
+      },
+      "size": 1000000,
+      "process_ms": 3913.93,
+      "peak_rss_bytes": 8339456,
+      "repetition": 1
+    },
+    {
+      "database_growth": 183644160,
+      "elapsed_ms": 3123.333166,
+      "phase": "inventory",
+      "result": {
+        "delta_io": {
+          "backing_read_bytes": 19014,
+          "backing_reads": 14,
+          "backing_written_bytes": 2886,
+          "read_bytes": 13636,
+          "reads": 5,
+          "writes": 6,
+          "written_bytes": 13938
+        },
+        "height": 5,
+        "initial_io": {
+          "backing_read_bytes": 112017776,
+          "backing_reads": 54569,
+          "backing_written_bytes": 160884359,
+          "read_bytes": 58638256,
+          "reads": 18194,
+          "writes": 46924,
+          "written_bytes": 190371982
+        },
+        "root": "1:1:61e7c7c285c4af1abf86c2e700ee97c0a1799f04ba2f6ab4af839104e8207ab7"
+      },
+      "size": 1000000,
+      "process_ms": 3138.96,
+      "peak_rss_bytes": 8306688,
+      "repetition": 2
+    },
+    {
+      "database_growth": 183644160,
+      "elapsed_ms": 3104.768125,
+      "phase": "inventory",
+      "result": {
+        "delta_io": {
+          "backing_read_bytes": 19014,
+          "backing_reads": 14,
+          "backing_written_bytes": 2886,
+          "read_bytes": 13636,
+          "reads": 5,
+          "writes": 6,
+          "written_bytes": 13938
+        },
+        "height": 5,
+        "initial_io": {
+          "backing_read_bytes": 112017776,
+          "backing_reads": 54569,
+          "backing_written_bytes": 160884359,
+          "read_bytes": 58638256,
+          "reads": 18194,
+          "writes": 46924,
+          "written_bytes": 190371982
+        },
+        "root": "1:1:61e7c7c285c4af1abf86c2e700ee97c0a1799f04ba2f6ab4af839104e8207ab7"
+      },
+      "size": 1000000,
+      "process_ms": 3120.355,
+      "peak_rss_bytes": 8290304,
+      "repetition": 3
+    },
+    {
+      "database_growth": 425984,
+      "elapsed_ms": 11.108917,
+      "phase": "first",
+      "result": {
+        "head": "1:1:7329a7ccda13a1a34f3239a2ec1b521337fcb05a2dafcca473e86d9ea4150541",
+        "io": {
+          "backing_read_bytes": 679019,
+          "backing_reads": 212,
+          "backing_written_bytes": 219740,
+          "read_bytes": 679019,
+          "reads": 212,
+          "writes": 46,
+          "written_bytes": 234522
+        },
+        "payload_bytes": 17298
+      },
+      "size": 128,
+      "process_ms": 27.635,
+      "peak_rss_bytes": 7045120,
+      "repetition": 1
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 32.5105,
+      "phase": "pull-first",
+      "result": {
+        "batches": 2,
+        "descriptor_bytes": 35376,
+        "payload_bytes": 17298,
+        "receiver_growth": 425984,
+        "receiver_io": {
+          "backing_read_bytes": 679019,
+          "backing_reads": 212,
+          "backing_written_bytes": 219740,
+          "read_bytes": 679019,
+          "reads": 212,
+          "writes": 46,
+          "written_bytes": 234522
+        },
+        "sender_io": {
+          "backing_read_bytes": 2874424,
+          "backing_reads": 768,
+          "backing_written_bytes": 0,
+          "read_bytes": 2021387,
+          "reads": 512,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 37.71,
+      "peak_rss_bytes": 7241728,
+      "repetition": 1
+    },
+    {
+      "database_growth": 28672,
+      "elapsed_ms": 2.6059579999999998,
+      "phase": "delta",
+      "result": {
+        "admit": {
+          "head": "1:1:8aa72f21da08ed6d57e305dd4423e3163647fd589f8a65beb09fc75bbc837c96",
+          "io": {
+            "backing_read_bytes": 147045,
+            "backing_reads": 36,
+            "backing_written_bytes": 9819,
+            "read_bytes": 82372,
+            "reads": 18,
+            "writes": 10,
+            "written_bytes": 43982
+          },
+          "sequence": 3
+        },
+        "member_io": {
+          "backing_read_bytes": 27100,
+          "backing_reads": 8,
+          "backing_written_bytes": 0,
+          "read_bytes": 17866,
+          "reads": 4,
+          "writes": 0,
+          "written_bytes": 0
+        },
+        "payload_bytes": 203,
+        "receipt_bytes": 457,
+        "reverse_io": {
+          "backing_read_bytes": 42971,
+          "backing_reads": 11,
+          "backing_written_bytes": 0,
+          "read_bytes": 30095,
+          "reads": 6,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 7.028,
+      "peak_rss_bytes": 6062080,
+      "repetition": 1
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 2.6115,
+      "phase": "pull-delta",
+      "result": {
+        "batches": 1,
+        "descriptor_bytes": 805,
+        "payload_bytes": 203,
+        "receiver_growth": 28672,
+        "receiver_io": {
+          "backing_read_bytes": 147045,
+          "backing_reads": 36,
+          "backing_written_bytes": 9819,
+          "read_bytes": 82372,
+          "reads": 18,
+          "writes": 10,
+          "written_bytes": 43982
+        },
+        "sender_io": {
+          "backing_read_bytes": 27100,
+          "backing_reads": 8,
+          "backing_written_bytes": 0,
+          "read_bytes": 17866,
+          "reads": 4,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 6.958,
+      "peak_rss_bytes": 6144000,
+      "repetition": 1
+    },
+    {
+      "database_growth": 425984,
+      "elapsed_ms": 8.946166999999999,
+      "phase": "first",
+      "result": {
+        "head": "1:1:7329a7ccda13a1a34f3239a2ec1b521337fcb05a2dafcca473e86d9ea4150541",
+        "io": {
+          "backing_read_bytes": 679019,
+          "backing_reads": 212,
+          "backing_written_bytes": 219740,
+          "read_bytes": 679019,
+          "reads": 212,
+          "writes": 46,
+          "written_bytes": 234522
+        },
+        "payload_bytes": 17298
+      },
+      "size": 128,
+      "process_ms": 21.92,
+      "peak_rss_bytes": 6815744,
+      "repetition": 2
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 36.52225,
+      "phase": "pull-first",
+      "result": {
+        "batches": 2,
+        "descriptor_bytes": 35376,
+        "payload_bytes": 17298,
+        "receiver_growth": 425984,
+        "receiver_io": {
+          "backing_read_bytes": 679019,
+          "backing_reads": 212,
+          "backing_written_bytes": 219740,
+          "read_bytes": 679019,
+          "reads": 212,
+          "writes": 46,
+          "written_bytes": 234522
+        },
+        "sender_io": {
+          "backing_read_bytes": 2874424,
+          "backing_reads": 768,
+          "backing_written_bytes": 0,
+          "read_bytes": 2021387,
+          "reads": 512,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 41.334,
+      "peak_rss_bytes": 7307264,
+      "repetition": 2
+    },
+    {
+      "database_growth": 28672,
+      "elapsed_ms": 4.2783750000000005,
+      "phase": "delta",
+      "result": {
+        "admit": {
+          "head": "1:1:8aa72f21da08ed6d57e305dd4423e3163647fd589f8a65beb09fc75bbc837c96",
+          "io": {
+            "backing_read_bytes": 147045,
+            "backing_reads": 36,
+            "backing_written_bytes": 9819,
+            "read_bytes": 82372,
+            "reads": 18,
+            "writes": 10,
+            "written_bytes": 43982
+          },
+          "sequence": 3
+        },
+        "member_io": {
+          "backing_read_bytes": 27100,
+          "backing_reads": 8,
+          "backing_written_bytes": 0,
+          "read_bytes": 17866,
+          "reads": 4,
+          "writes": 0,
+          "written_bytes": 0
+        },
+        "payload_bytes": 203,
+        "receipt_bytes": 457,
+        "reverse_io": {
+          "backing_read_bytes": 42971,
+          "backing_reads": 11,
+          "backing_written_bytes": 0,
+          "read_bytes": 30095,
+          "reads": 6,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 10.726,
+      "peak_rss_bytes": 6045696,
+      "repetition": 2
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 2.887917,
+      "phase": "pull-delta",
+      "result": {
+        "batches": 1,
+        "descriptor_bytes": 805,
+        "payload_bytes": 203,
+        "receiver_growth": 28672,
+        "receiver_io": {
+          "backing_read_bytes": 147045,
+          "backing_reads": 36,
+          "backing_written_bytes": 9819,
+          "read_bytes": 82372,
+          "reads": 18,
+          "writes": 10,
+          "written_bytes": 43982
+        },
+        "sender_io": {
+          "backing_read_bytes": 27100,
+          "backing_reads": 8,
+          "backing_written_bytes": 0,
+          "read_bytes": 17866,
+          "reads": 4,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 7.432,
+      "peak_rss_bytes": 6160384,
+      "repetition": 2
+    },
+    {
+      "database_growth": 425984,
+      "elapsed_ms": 10.111291999999999,
+      "phase": "first",
+      "result": {
+        "head": "1:1:7329a7ccda13a1a34f3239a2ec1b521337fcb05a2dafcca473e86d9ea4150541",
+        "io": {
+          "backing_read_bytes": 679019,
+          "backing_reads": 212,
+          "backing_written_bytes": 219740,
+          "read_bytes": 679019,
+          "reads": 212,
+          "writes": 46,
+          "written_bytes": 234522
+        },
+        "payload_bytes": 17298
+      },
+      "size": 128,
+      "process_ms": 24.669,
+      "peak_rss_bytes": 7045120,
+      "repetition": 3
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 35.912166,
+      "phase": "pull-first",
+      "result": {
+        "batches": 2,
+        "descriptor_bytes": 35376,
+        "payload_bytes": 17298,
+        "receiver_growth": 425984,
+        "receiver_io": {
+          "backing_read_bytes": 679019,
+          "backing_reads": 212,
+          "backing_written_bytes": 219740,
+          "read_bytes": 679019,
+          "reads": 212,
+          "writes": 46,
+          "written_bytes": 234522
+        },
+        "sender_io": {
+          "backing_read_bytes": 2874424,
+          "backing_reads": 768,
+          "backing_written_bytes": 0,
+          "read_bytes": 2021387,
+          "reads": 512,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 40.263,
+      "peak_rss_bytes": 7159808,
+      "repetition": 3
+    },
+    {
+      "database_growth": 28672,
+      "elapsed_ms": 2.977375,
+      "phase": "delta",
+      "result": {
+        "admit": {
+          "head": "1:1:8aa72f21da08ed6d57e305dd4423e3163647fd589f8a65beb09fc75bbc837c96",
+          "io": {
+            "backing_read_bytes": 147045,
+            "backing_reads": 36,
+            "backing_written_bytes": 9819,
+            "read_bytes": 82372,
+            "reads": 18,
+            "writes": 10,
+            "written_bytes": 43982
+          },
+          "sequence": 3
+        },
+        "member_io": {
+          "backing_read_bytes": 27100,
+          "backing_reads": 8,
+          "backing_written_bytes": 0,
+          "read_bytes": 17866,
+          "reads": 4,
+          "writes": 0,
+          "written_bytes": 0
+        },
+        "payload_bytes": 203,
+        "receipt_bytes": 457,
+        "reverse_io": {
+          "backing_read_bytes": 42971,
+          "backing_reads": 11,
+          "backing_written_bytes": 0,
+          "read_bytes": 30095,
+          "reads": 6,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 8.073,
+      "peak_rss_bytes": 5996544,
+      "repetition": 3
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 3.210209,
+      "phase": "pull-delta",
+      "result": {
+        "batches": 1,
+        "descriptor_bytes": 805,
+        "payload_bytes": 203,
+        "receiver_growth": 28672,
+        "receiver_io": {
+          "backing_read_bytes": 147045,
+          "backing_reads": 36,
+          "backing_written_bytes": 9819,
+          "read_bytes": 82372,
+          "reads": 18,
+          "writes": 10,
+          "written_bytes": 43982
+        },
+        "sender_io": {
+          "backing_read_bytes": 27100,
+          "backing_reads": 8,
+          "backing_written_bytes": 0,
+          "read_bytes": 17866,
+          "reads": 4,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 128,
+      "process_ms": 7.585,
+      "peak_rss_bytes": 6094848,
+      "repetition": 3
+    },
+    {
+      "database_growth": 8822784,
+      "elapsed_ms": 347.935292,
+      "phase": "first",
+      "result": {
+        "head": "1:1:c43fab8a58eb53d3ef489731cee4cf76a52e7c2d6aec2e077ec96b48d72f521e",
+        "io": {
+          "backing_read_bytes": 39199606,
+          "backing_reads": 15641,
+          "backing_written_bytes": 4867674,
+          "read_bytes": 17268784,
+          "reads": 5541,
+          "writes": 2029,
+          "written_bytes": 8667864
+        },
+        "payload_bytes": 139178
+      },
+      "size": 1024,
+      "process_ms": 361.421,
+      "peak_rss_bytes": 9355264,
+      "repetition": 1
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 587.8104579999999,
+      "phase": "pull-first",
+      "result": {
+        "batches": 16,
+        "descriptor_bytes": 573042,
+        "payload_bytes": 139178,
+        "receiver_growth": 8822784,
+        "receiver_io": {
+          "backing_read_bytes": 39199606,
+          "backing_reads": 15641,
+          "backing_written_bytes": 4867674,
+          "read_bytes": 17268784,
+          "reads": 5541,
+          "writes": 2029,
+          "written_bytes": 8667864
+        },
+        "sender_io": {
+          "backing_read_bytes": 43753660,
+          "backing_reads": 16613,
+          "backing_written_bytes": 0,
+          "read_bytes": 17596646,
+          "reads": 5888,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 1024,
+      "process_ms": 595.224,
+      "peak_rss_bytes": 11403264,
+      "repetition": 1
+    },
+    {
+      "database_growth": 32768,
+      "elapsed_ms": 5.325749999999999,
+      "phase": "delta",
+      "result": {
+        "admit": {
+          "head": "1:1:6f0a3dc5361a1b869474fb423848c116d6cc18c8afb8d35c90ec0bc4b50717e6",
+          "io": {
+            "backing_read_bytes": 254964,
+            "backing_reads": 97,
+            "backing_written_bytes": 13473,
+            "read_bytes": 106935,
+            "reads": 28,
+            "writes": 15,
+            "written_bytes": 67998
+          },
+          "sequence": 17
+        },
+        "member_io": {
+          "backing_read_bytes": 48082,
+          "backing_reads": 20,
+          "backing_written_bytes": 0,
+          "read_bytes": 20104,
+          "reads": 6,
+          "writes": 0,
+          "written_bytes": 0
+        },
+        "payload_bytes": 203,
+        "receipt_bytes": 457,
+        "reverse_io": {
+          "backing_read_bytes": 60564,
+          "backing_reads": 20,
+          "backing_written_bytes": 0,
+          "read_bytes": 30543,
+          "reads": 9,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 1024,
+      "process_ms": 11.331,
+      "peak_rss_bytes": 8044544,
+      "repetition": 1
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 5.373832999999999,
+      "phase": "pull-delta",
+      "result": {
+        "batches": 1,
+        "descriptor_bytes": 1020,
+        "payload_bytes": 203,
+        "receiver_growth": 32768,
+        "receiver_io": {
+          "backing_read_bytes": 254964,
+          "backing_reads": 97,
+          "backing_written_bytes": 13473,
+          "read_bytes": 106935,
+          "reads": 28,
+          "writes": 15,
+          "written_bytes": 67998
+        },
+        "sender_io": {
+          "backing_read_bytes": 48082,
+          "backing_reads": 20,
+          "backing_written_bytes": 0,
+          "read_bytes": 20104,
+          "reads": 6,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 1024,
+      "process_ms": 10.372,
+      "peak_rss_bytes": 8241152,
+      "repetition": 1
+    },
+    {
+      "database_growth": 8822784,
+      "elapsed_ms": 323.341792,
+      "phase": "first",
+      "result": {
+        "head": "1:1:c43fab8a58eb53d3ef489731cee4cf76a52e7c2d6aec2e077ec96b48d72f521e",
+        "io": {
+          "backing_read_bytes": 39199606,
+          "backing_reads": 15641,
+          "backing_written_bytes": 4867674,
+          "read_bytes": 17268784,
+          "reads": 5541,
+          "writes": 2029,
+          "written_bytes": 8667864
+        },
+        "payload_bytes": 139178
+      },
+      "size": 1024,
+      "process_ms": 338.473,
+      "peak_rss_bytes": 9256960,
+      "repetition": 2
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 604.656125,
+      "phase": "pull-first",
+      "result": {
+        "batches": 16,
+        "descriptor_bytes": 573042,
+        "payload_bytes": 139178,
+        "receiver_growth": 8822784,
+        "receiver_io": {
+          "backing_read_bytes": 39199606,
+          "backing_reads": 15641,
+          "backing_written_bytes": 4867674,
+          "read_bytes": 17268784,
+          "reads": 5541,
+          "writes": 2029,
+          "written_bytes": 8667864
+        },
+        "sender_io": {
+          "backing_read_bytes": 43753660,
+          "backing_reads": 16613,
+          "backing_written_bytes": 0,
+          "read_bytes": 17596646,
+          "reads": 5888,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 1024,
+      "process_ms": 609.539,
+      "peak_rss_bytes": 11501568,
+      "repetition": 2
+    },
+    {
+      "database_growth": 32768,
+      "elapsed_ms": 7.030041,
+      "phase": "delta",
+      "result": {
+        "admit": {
+          "head": "1:1:6f0a3dc5361a1b869474fb423848c116d6cc18c8afb8d35c90ec0bc4b50717e6",
+          "io": {
+            "backing_read_bytes": 254964,
+            "backing_reads": 97,
+            "backing_written_bytes": 13473,
+            "read_bytes": 106935,
+            "reads": 28,
+            "writes": 15,
+            "written_bytes": 67998
+          },
+          "sequence": 17
+        },
+        "member_io": {
+          "backing_read_bytes": 48082,
+          "backing_reads": 20,
+          "backing_written_bytes": 0,
+          "read_bytes": 20104,
+          "reads": 6,
+          "writes": 0,
+          "written_bytes": 0
+        },
+        "payload_bytes": 203,
+        "receipt_bytes": 457,
+        "reverse_io": {
+          "backing_read_bytes": 60564,
+          "backing_reads": 20,
+          "backing_written_bytes": 0,
+          "read_bytes": 30543,
+          "reads": 9,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 1024,
+      "process_ms": 12.819,
+      "peak_rss_bytes": 7946240,
+      "repetition": 2
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 6.083875,
+      "phase": "pull-delta",
+      "result": {
+        "batches": 1,
+        "descriptor_bytes": 1020,
+        "payload_bytes": 203,
+        "receiver_growth": 32768,
+        "receiver_io": {
+          "backing_read_bytes": 254964,
+          "backing_reads": 97,
+          "backing_written_bytes": 13473,
+          "read_bytes": 106935,
+          "reads": 28,
+          "writes": 15,
+          "written_bytes": 67998
+        },
+        "sender_io": {
+          "backing_read_bytes": 48082,
+          "backing_reads": 20,
+          "backing_written_bytes": 0,
+          "read_bytes": 20104,
+          "reads": 6,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 1024,
+      "process_ms": 11.728,
+      "peak_rss_bytes": 8060928,
+      "repetition": 2
+    },
+    {
+      "database_growth": 8822784,
+      "elapsed_ms": 403.470167,
+      "phase": "first",
+      "result": {
+        "head": "1:1:c43fab8a58eb53d3ef489731cee4cf76a52e7c2d6aec2e077ec96b48d72f521e",
+        "io": {
+          "backing_read_bytes": 39199606,
+          "backing_reads": 15641,
+          "backing_written_bytes": 4867674,
+          "read_bytes": 17268784,
+          "reads": 5541,
+          "writes": 2029,
+          "written_bytes": 8667864
+        },
+        "payload_bytes": 139178
+      },
+      "size": 1024,
+      "process_ms": 419.076,
+      "peak_rss_bytes": 9322496,
+      "repetition": 3
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 746.7609160000001,
+      "phase": "pull-first",
+      "result": {
+        "batches": 16,
+        "descriptor_bytes": 573042,
+        "payload_bytes": 139178,
+        "receiver_growth": 8822784,
+        "receiver_io": {
+          "backing_read_bytes": 39199606,
+          "backing_reads": 15641,
+          "backing_written_bytes": 4867674,
+          "read_bytes": 17268784,
+          "reads": 5541,
+          "writes": 2029,
+          "written_bytes": 8667864
+        },
+        "sender_io": {
+          "backing_read_bytes": 43753660,
+          "backing_reads": 16613,
+          "backing_written_bytes": 0,
+          "read_bytes": 17596646,
+          "reads": 5888,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 1024,
+      "process_ms": 754.036,
+      "peak_rss_bytes": 11239424,
+      "repetition": 3
+    },
+    {
+      "database_growth": 32768,
+      "elapsed_ms": 7.875584,
+      "phase": "delta",
+      "result": {
+        "admit": {
+          "head": "1:1:6f0a3dc5361a1b869474fb423848c116d6cc18c8afb8d35c90ec0bc4b50717e6",
+          "io": {
+            "backing_read_bytes": 254964,
+            "backing_reads": 97,
+            "backing_written_bytes": 13473,
+            "read_bytes": 106935,
+            "reads": 28,
+            "writes": 15,
+            "written_bytes": 67998
+          },
+          "sequence": 17
+        },
+        "member_io": {
+          "backing_read_bytes": 48082,
+          "backing_reads": 20,
+          "backing_written_bytes": 0,
+          "read_bytes": 20104,
+          "reads": 6,
+          "writes": 0,
+          "written_bytes": 0
+        },
+        "payload_bytes": 203,
+        "receipt_bytes": 457,
+        "reverse_io": {
+          "backing_read_bytes": 60564,
+          "backing_reads": 20,
+          "backing_written_bytes": 0,
+          "read_bytes": 30543,
+          "reads": 9,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 1024,
+      "process_ms": 15.762,
+      "peak_rss_bytes": 8077312,
+      "repetition": 3
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 7.946541999999999,
+      "phase": "pull-delta",
+      "result": {
+        "batches": 1,
+        "descriptor_bytes": 1020,
+        "payload_bytes": 203,
+        "receiver_growth": 32768,
+        "receiver_io": {
+          "backing_read_bytes": 254964,
+          "backing_reads": 97,
+          "backing_written_bytes": 13473,
+          "read_bytes": 106935,
+          "reads": 28,
+          "writes": 15,
+          "written_bytes": 67998
+        },
+        "sender_io": {
+          "backing_read_bytes": 48082,
+          "backing_reads": 20,
+          "backing_written_bytes": 0,
+          "read_bytes": 20104,
+          "reads": 6,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 1024,
+      "process_ms": 13.911,
+      "peak_rss_bytes": 8323072,
+      "repetition": 3
+    },
+    {
+      "database_growth": 189878272,
+      "elapsed_ms": 14949.245832999999,
+      "phase": "first",
+      "result": {
+        "head": "1:1:034452deca130f2d19177bf80e389f861652182e98f996b2f4204fde56d66f2b",
+        "io": {
+          "backing_read_bytes": 840298755,
+          "backing_reads": 387626,
+          "backing_written_bytes": 114016885,
+          "read_bytes": 468972364,
+          "reads": 129607,
+          "writes": 71645,
+          "written_bytes": 309097827
+        },
+        "payload_bytes": 1755290
+      },
+      "size": 12800,
+      "process_ms": 14970.132,
+      "peak_rss_bytes": 9633792,
+      "repetition": 1
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 18368.648042,
+      "phase": "pull-first",
+      "result": {
+        "batches": 200,
+        "descriptor_bytes": 11352502,
+        "payload_bytes": 1755290,
+        "receiver_growth": 189911040,
+        "receiver_io": {
+          "backing_read_bytes": 840298755,
+          "backing_reads": 387626,
+          "backing_written_bytes": 114016885,
+          "read_bytes": 468972364,
+          "reads": 129607,
+          "writes": 71645,
+          "written_bytes": 309097827
+        },
+        "sender_io": {
+          "backing_read_bytes": 709311944,
+          "backing_reads": 286110,
+          "backing_written_bytes": 0,
+          "read_bytes": 311150995,
+          "reads": 94848,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 12800,
+      "process_ms": 18373.766,
+      "peak_rss_bytes": 12337152,
+      "repetition": 1
+    },
+    {
+      "database_growth": 53248,
+      "elapsed_ms": 10.986832999999999,
+      "phase": "delta",
+      "result": {
+        "admit": {
+          "head": "1:1:72895e427a3a5c43e98d9b59434915a6e594d3f6b9aa4ef9884f4d64f01251f5",
+          "io": {
+            "backing_read_bytes": 295291,
+            "backing_reads": 128,
+            "backing_written_bytes": 30814,
+            "read_bytes": 152584,
+            "reads": 37,
+            "writes": 21,
+            "written_bytes": 96069
+          },
+          "sequence": 201
+        },
+        "member_io": {
+          "backing_read_bytes": 59829,
+          "backing_reads": 29,
+          "backing_written_bytes": 0,
+          "read_bytes": 28022,
+          "reads": 8,
+          "writes": 0,
+          "written_bytes": 0
+        },
+        "payload_bytes": 203,
+        "receipt_bytes": 457,
+        "reverse_io": {
+          "backing_read_bytes": 89337,
+          "backing_reads": 45,
+          "backing_written_bytes": 0,
+          "read_bytes": 45799,
+          "reads": 12,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 12800,
+      "process_ms": 18.437,
+      "peak_rss_bytes": 8323072,
+      "repetition": 1
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 7.991167000000001,
+      "phase": "pull-delta",
+      "result": {
+        "batches": 1,
+        "descriptor_bytes": 1235,
+        "payload_bytes": 203,
+        "receiver_growth": 53248,
+        "receiver_io": {
+          "backing_read_bytes": 295291,
+          "backing_reads": 128,
+          "backing_written_bytes": 30814,
+          "read_bytes": 152584,
+          "reads": 37,
+          "writes": 21,
+          "written_bytes": 96069
+        },
+        "sender_io": {
+          "backing_read_bytes": 59829,
+          "backing_reads": 29,
+          "backing_written_bytes": 0,
+          "read_bytes": 28022,
+          "reads": 8,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 12800,
+      "process_ms": 13.647,
+      "peak_rss_bytes": 8798208,
+      "repetition": 1
+    },
+    {
+      "database_growth": 189878272,
+      "elapsed_ms": 13481.015125,
+      "phase": "first",
+      "result": {
+        "head": "1:1:034452deca130f2d19177bf80e389f861652182e98f996b2f4204fde56d66f2b",
+        "io": {
+          "backing_read_bytes": 840298755,
+          "backing_reads": 387626,
+          "backing_written_bytes": 114016885,
+          "read_bytes": 468972364,
+          "reads": 129607,
+          "writes": 71645,
+          "written_bytes": 309097827
+        },
+        "payload_bytes": 1755290
+      },
+      "size": 12800,
+      "process_ms": 13497.18,
+      "peak_rss_bytes": 9469952,
+      "repetition": 2
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 16780.233583,
+      "phase": "pull-first",
+      "result": {
+        "batches": 200,
+        "descriptor_bytes": 11352502,
+        "payload_bytes": 1755290,
+        "receiver_growth": 189911040,
+        "receiver_io": {
+          "backing_read_bytes": 840298755,
+          "backing_reads": 387626,
+          "backing_written_bytes": 114016885,
+          "read_bytes": 468972364,
+          "reads": 129607,
+          "writes": 71645,
+          "written_bytes": 309097827
+        },
+        "sender_io": {
+          "backing_read_bytes": 709311944,
+          "backing_reads": 286110,
+          "backing_written_bytes": 0,
+          "read_bytes": 311150995,
+          "reads": 94848,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 12800,
+      "process_ms": 16785.326,
+      "peak_rss_bytes": 12189696,
+      "repetition": 2
+    },
+    {
+      "database_growth": 53248,
+      "elapsed_ms": 7.406542,
+      "phase": "delta",
+      "result": {
+        "admit": {
+          "head": "1:1:72895e427a3a5c43e98d9b59434915a6e594d3f6b9aa4ef9884f4d64f01251f5",
+          "io": {
+            "backing_read_bytes": 295291,
+            "backing_reads": 128,
+            "backing_written_bytes": 30814,
+            "read_bytes": 152584,
+            "reads": 37,
+            "writes": 21,
+            "written_bytes": 96069
+          },
+          "sequence": 201
+        },
+        "member_io": {
+          "backing_read_bytes": 59829,
+          "backing_reads": 29,
+          "backing_written_bytes": 0,
+          "read_bytes": 28022,
+          "reads": 8,
+          "writes": 0,
+          "written_bytes": 0
+        },
+        "payload_bytes": 203,
+        "receipt_bytes": 457,
+        "reverse_io": {
+          "backing_read_bytes": 89337,
+          "backing_reads": 45,
+          "backing_written_bytes": 0,
+          "read_bytes": 45799,
+          "reads": 12,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 12800,
+      "process_ms": 12.705,
+      "peak_rss_bytes": 8290304,
+      "repetition": 2
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 6.8292090000000005,
+      "phase": "pull-delta",
+      "result": {
+        "batches": 1,
+        "descriptor_bytes": 1235,
+        "payload_bytes": 203,
+        "receiver_growth": 53248,
+        "receiver_io": {
+          "backing_read_bytes": 295291,
+          "backing_reads": 128,
+          "backing_written_bytes": 30814,
+          "read_bytes": 152584,
+          "reads": 37,
+          "writes": 21,
+          "written_bytes": 96069
+        },
+        "sender_io": {
+          "backing_read_bytes": 59829,
+          "backing_reads": 29,
+          "backing_written_bytes": 0,
+          "read_bytes": 28022,
+          "reads": 8,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 12800,
+      "process_ms": 11.444,
+      "peak_rss_bytes": 8896512,
+      "repetition": 2
+    },
+    {
+      "database_growth": 189878272,
+      "elapsed_ms": 15169.949666999999,
+      "phase": "first",
+      "result": {
+        "head": "1:1:034452deca130f2d19177bf80e389f861652182e98f996b2f4204fde56d66f2b",
+        "io": {
+          "backing_read_bytes": 840298755,
+          "backing_reads": 387626,
+          "backing_written_bytes": 114016885,
+          "read_bytes": 468972364,
+          "reads": 129607,
+          "writes": 71645,
+          "written_bytes": 309097827
+        },
+        "payload_bytes": 1755290
+      },
+      "size": 12800,
+      "process_ms": 15183.084,
+      "peak_rss_bytes": 9469952,
+      "repetition": 3
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 18020.776250000003,
+      "phase": "pull-first",
+      "result": {
+        "batches": 200,
+        "descriptor_bytes": 11352502,
+        "payload_bytes": 1755290,
+        "receiver_growth": 189911040,
+        "receiver_io": {
+          "backing_read_bytes": 840298755,
+          "backing_reads": 387626,
+          "backing_written_bytes": 114016885,
+          "read_bytes": 468972364,
+          "reads": 129607,
+          "writes": 71645,
+          "written_bytes": 309097827
+        },
+        "sender_io": {
+          "backing_read_bytes": 709311944,
+          "backing_reads": 286110,
+          "backing_written_bytes": 0,
+          "read_bytes": 311150995,
+          "reads": 94848,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 12800,
+      "process_ms": 18027.066,
+      "peak_rss_bytes": 12402688,
+      "repetition": 3
+    },
+    {
+      "database_growth": 53248,
+      "elapsed_ms": 7.412375,
+      "phase": "delta",
+      "result": {
+        "admit": {
+          "head": "1:1:72895e427a3a5c43e98d9b59434915a6e594d3f6b9aa4ef9884f4d64f01251f5",
+          "io": {
+            "backing_read_bytes": 295291,
+            "backing_reads": 128,
+            "backing_written_bytes": 30814,
+            "read_bytes": 152584,
+            "reads": 37,
+            "writes": 21,
+            "written_bytes": 96069
+          },
+          "sequence": 201
+        },
+        "member_io": {
+          "backing_read_bytes": 59829,
+          "backing_reads": 29,
+          "backing_written_bytes": 0,
+          "read_bytes": 28022,
+          "reads": 8,
+          "writes": 0,
+          "written_bytes": 0
+        },
+        "payload_bytes": 203,
+        "receipt_bytes": 457,
+        "reverse_io": {
+          "backing_read_bytes": 89337,
+          "backing_reads": 45,
+          "backing_written_bytes": 0,
+          "read_bytes": 45799,
+          "reads": 12,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 12800,
+      "process_ms": 12.015,
+      "peak_rss_bytes": 8388608,
+      "repetition": 3
+    },
+    {
+      "database_growth": 0,
+      "elapsed_ms": 7.310167,
+      "phase": "pull-delta",
+      "result": {
+        "batches": 1,
+        "descriptor_bytes": 1235,
+        "payload_bytes": 203,
+        "receiver_growth": 53248,
+        "receiver_io": {
+          "backing_read_bytes": 295291,
+          "backing_reads": 128,
+          "backing_written_bytes": 30814,
+          "read_bytes": 152584,
+          "reads": 37,
+          "writes": 21,
+          "written_bytes": 96069
+        },
+        "sender_io": {
+          "backing_read_bytes": 59829,
+          "backing_reads": 29,
+          "backing_written_bytes": 0,
+          "read_bytes": 28022,
+          "reads": 8,
+          "writes": 0,
+          "written_bytes": 0
+        }
+      },
+      "size": 12800,
+      "process_ms": 12.015,
+      "peak_rss_bytes": 8896512,
+      "repetition": 3
+    }
+  ]
+}

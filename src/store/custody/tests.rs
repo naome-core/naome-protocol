@@ -32,13 +32,13 @@ fn specimen(n: u64, kind: Kind, input: Option<(Id, &str)>) -> Item {
             id: Id::record(f, &bytes),
             access: public(),
             position: None,
+            absent: false,
         },
         bytes,
     }
 }
 fn store() -> Result<Archive> {
     let a = Archive::memory()?;
-    a.init_paged()?;
     Ok(a)
 }
 fn view(heads: &[Id]) -> Federation {
@@ -57,23 +57,23 @@ fn exact_coverage_corrections_and_historical_receipts() -> Result<()> {
     let control = specimen(2, Kind::Claim, None);
     let unrelated = control.member.id;
     let base = a
-        .paged_append("lab-A", None, &[reading, conclusion, control])?
+        .custody_append("lab-A", None, &[reading, conclusion, control])?
         .head;
     assert_eq!(
         view(&[base]).review(&[(&a, base)], read, 100)?.standing,
         "open"
     );
-    let closed = a.paged_append("lab-A", Some(base), &[raw])?.head;
+    let closed = a.custody_append("lab-A", Some(base), &[raw])?.head;
     let deps = view(&[closed]).review(&[(&a, closed)], source, 100)?;
     assert_eq!(deps.dependents, BTreeSet::from([read, claim]));
     assert_eq!(deps.standing, "review");
     let review = |head, target, budget| view(&[head]).corrections(&[(&a, head)], target, budget);
     let initial = review(closed, claim, 100)?;
     assert_eq!(initial.standing, "outside");
-    let saved = a.paged_save_receipt(&initial)?;
+    let saved = a.custody_save_receipt(&initial)?;
     let notice = specimen(3, Kind::Notice, Some((source, "source-version")));
     let notice_id = notice.member.id;
-    let updated = a.paged_append("lab-A", Some(closed), &[notice])?.head;
+    let updated = a.custody_append("lab-A", Some(closed), &[notice])?.head;
     let current = review(updated, claim, 100)?;
     assert_eq!(current.notices, BTreeSet::from([notice_id]));
     assert_eq!(current.standing, "review");
@@ -81,7 +81,7 @@ fn exact_coverage_corrections_and_historical_receipts() -> Result<()> {
     assert_eq!(review(updated, claim, 1)?.standing, "open");
     assert_eq!(
         review(closed, claim, 100)?.receipt()?,
-        a.paged_receipt(saved)?
+        a.custody_receipt(saved)?
     );
     assert_eq!(
         view(&[closed, updated])
@@ -91,8 +91,8 @@ fn exact_coverage_corrections_and_historical_receipts() -> Result<()> {
     );
     a.withdraw(source)?;
     assert_eq!(review(updated, claim, 100)?.standing, "open");
-    assert!(a.paged_resolve(closed, source, "read").is_err());
-    assert_eq!(a.paged_receipt(saved)?, initial.receipt()?);
+    assert!(a.custody_resolve(closed, source, "read").is_err());
+    assert_eq!(a.custody_receipt(saved)?, initial.receipt()?);
     Ok(())
 }
 
@@ -103,9 +103,9 @@ fn receiver_admits_verified_batches_preserves_forks_and_rechecks_grants() -> Res
     let lab = "origin";
     let seed = Item::blob(vec![0; BLOCK], public());
     let raw = seed.member.id;
-    let first = a.paged_append(lab, None, &[seed])?.head;
+    let first = a.custody_append(lab, None, &[seed])?.head;
     let child = |n| {
-        a.paged_append(
+        a.custody_append(
             lab,
             Some(first),
             &[specimen(n, Kind::Claim, Some((raw, "evidence")))],
@@ -114,22 +114,22 @@ fn receiver_admits_verified_batches_preserves_forks_and_rechecks_grants() -> Res
     let left = child(1)?.head;
     let right = child(2)?.head;
     assert_eq!(
-        a.paged_tips(lab, None, 10)?
+        a.custody_tips(lab, None, 10)?
             .into_iter()
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([left, right])
     );
-    assert!(b.paged_pull(&a, left, 1).is_err());
-    a.paged_share(left, true)?;
-    a.paged_share(right, true)?;
-    assert_eq!(b.paged_pull(&a, left, 1)?.cursor, first);
-    assert!(b.paged_head(left).is_err());
-    a.paged_share(left, false)?;
-    assert!(b.paged_pull(&a, left, 1).is_err());
-    a.paged_share(left, true)?;
-    assert!(b.paged_pull(&a, left, 1)?.complete);
-    assert_eq!(b.paged_pull(&a, left, 1)?.payload_bytes, 0);
-    assert!(b.paged_pull(&a, right, 1)?.complete);
+    assert!(b.custody_pull(&a, left, 1).is_err());
+    a.custody_share(left, true)?;
+    a.custody_share(right, true)?;
+    assert_eq!(b.custody_pull(&a, left, 1)?.cursor, first);
+    assert!(b.custody_head(left).is_err());
+    a.custody_share(left, false)?;
+    assert!(b.custody_pull(&a, left, 1).is_err());
+    a.custody_share(left, true)?;
+    assert!(b.custody_pull(&a, left, 1)?.complete);
+    assert_eq!(b.custody_pull(&a, left, 1)?.payload_bytes, 0);
+    assert!(b.custody_pull(&a, right, 1)?.complete);
     assert_eq!(
         view(&[left, right])
             .review(&[(&b, left), (&b, right)], raw, 100)?
@@ -138,9 +138,9 @@ fn receiver_admits_verified_batches_preserves_forks_and_rechecks_grants() -> Res
         2
     );
     a.withdraw(raw)?;
-    assert!(b.paged_pull(&a, right, 1).is_err());
+    assert!(b.custody_pull(&a, right, 1).is_err());
     // The independent replica retains its own custody state.
-    assert_eq!(b.paged_resolve(right, raw, "read")?.len(), BLOCK);
+    assert_eq!(b.custody_resolve(right, raw, "read")?.len(), BLOCK);
     Ok(())
 }
 
@@ -159,17 +159,17 @@ fn raw_ranges_restrictions_and_failed_admissions() -> Result<()> {
     }
     let id = blocks[0].member.id;
     blocks.push(Item::blob(b"scope".to_vec(), public()));
-    let head = a.paged_append("a", None, &blocks)?.head;
+    let head = a.custody_append("a", None, &blocks)?.head;
     assert_eq!(
-        a.paged_range(head, stream, BLOCK as u64 - 2, 5)?,
+        a.custody_range(head, stream, BLOCK as u64 - 2, 5)?,
         [4, 4, 9, 9, 9]
     );
-    assert!(a.paged_range(head, stream, BLOCK as u64, 18).is_err());
-    assert!(a.paged_resolve(head, id, "train").is_err());
+    assert!(a.custody_range(head, stream, BLOCK as u64, 18).is_err());
+    assert!(a.custody_resolve(head, id, "train").is_err());
     let mut invalid = Item::blob(b"complete".to_vec(), public());
     invalid.bytes.pop();
     assert!(
-        a.paged_append(
+        a.custody_append(
             "a",
             Some(head),
             &[Item::blob(b"prefix".to_vec(), public()), invalid]
@@ -179,16 +179,16 @@ fn raw_ranges_restrictions_and_failed_admissions() -> Result<()> {
     assert!(a.raw(Id::blob(b"prefix"))?.is_none());
     let hidden = Item::blob(br#"{"purposes":[],"version":1}"#.to_vec(), public());
     let denied = Item::blob(b"private".to_vec(), hidden.member.id);
-    let restricted = a.paged_append("a", Some(head), &[hidden, denied])?.head;
-    assert!(a.paged_share(restricted, true).is_err());
+    let restricted = a.custody_append("a", Some(head), &[hidden, denied])?.head;
+    assert!(a.custody_share(restricted, true).is_err());
     assert_eq!(
         view(&[restricted])
             .review(&[(&a, restricted)], id, 50)?
             .standing,
         "open"
     );
-    let root = a.paged_head(head)?.tree;
-    a.db.execute("DELETE FROM rep2_pages WHERE id=?", [root.to_string()])?;
+    let root = a.custody_head(head)?.tree;
+    a.db.execute("DELETE FROM custody_pages WHERE id=?", [root.to_string()])?;
     assert_eq!(
         view(&[head]).review(&[(&a, head)], id, 50)?.standing,
         "open"
@@ -206,7 +206,6 @@ fn qualification_sample() -> Result<()> {
     let phase = env::var("NAOME_SAMPLE_PHASE")?;
     let path = directory.join("lab.sqlite");
     let a = Archive::open(&path)?;
-    a.init_paged()?;
     let started = Instant::now();
     let before = fs::metadata(&path)?.len();
     let tip_file = directory.join("tip");
@@ -250,12 +249,12 @@ fn qualification_sample() -> Result<()> {
                     .map(|i| specimen(i as u64, Kind::Occurrence, None))
                     .collect();
                 payload += items.iter().map(|v| v.bytes.len()).sum::<usize>();
-                let receipt = a.paged_append("independent-lab", parent, &items)?;
+                let receipt = a.custody_append("independent-lab", parent, &items)?;
                 io += receipt.io;
                 parent = Some(receipt.head);
             }
             let head = parent.unwrap();
-            a.paged_share(head, true)?;
+            a.custody_share(head, true)?;
             fs::write(tip_file, head.to_string())?;
             json!({"head":head,"payload_bytes":payload,"io":io})
         }
@@ -263,7 +262,6 @@ fn qualification_sample() -> Result<()> {
             let head: Id = fs::read_to_string(tip_file)?.parse()?;
             let dest = directory.join("receiver.sqlite");
             let b = Archive::open(&dest)?;
-            b.init_paged()?;
             let start_size = fs::metadata(&dest)?.len();
             let mut send = PageIo::default();
             let mut receive = PageIo::default();
@@ -271,7 +269,7 @@ fn qualification_sample() -> Result<()> {
             let mut desc = 0;
             let mut batches = 0;
             loop {
-                let next = b.paged_pull(&a, head, 16)?;
+                let next = b.custody_pull(&a, head, 16)?;
                 send += next.sender_io;
                 receive += next.receiver_io;
                 bytes += next.payload_bytes;
@@ -281,7 +279,7 @@ fn qualification_sample() -> Result<()> {
                     break;
                 }
             }
-            let duplicate = b.paged_pull(&a, head, 1)?;
+            let duplicate = b.custody_pull(&a, head, 1)?;
             assert_eq!(duplicate.payload_bytes + duplicate.batches, 0);
             json!({"batches":batches,"sender_io":send,"receiver_io":receive,"payload_bytes":bytes,
                    "descriptor_bytes":desc,"receiver_growth":fs::metadata(dest)?.len()-start_size})
@@ -292,14 +290,14 @@ fn qualification_sample() -> Result<()> {
             let next = specimen(u64::MAX, Kind::Claim, Some((first.member.id, "evidence")));
             let target = next.member.id;
             let bytes = next.bytes.clone();
-            let receipt = a.paged_append("independent-lab", Some(base), &[next])?;
-            assert!(a.paged_resolve(base, target, "read").is_err());
-            let (data, read_io) = a.paged_resolve_counted(receipt.head, target, "read")?;
+            let receipt = a.custody_append("independent-lab", Some(base), &[next])?;
+            assert!(a.custody_resolve(base, target, "read").is_err());
+            let (data, read_io) = a.custody_resolve_counted(receipt.head, target, "read")?;
             assert_eq!(data, bytes);
             let report =
                 view(&[receipt.head]).review(&[(&a, receipt.head)], first.member.id, 100)?;
             assert_eq!(report.dependents, BTreeSet::from([target]));
-            a.paged_share(receipt.head, true)?;
+            a.custody_share(receipt.head, true)?;
             fs::write(tip_file, receipt.head.to_string())?;
             json!({"payload_bytes":bytes.len(),"admit":receipt,"member_io":read_io,"reverse_io":report.io,
                    "receipt_bytes":report.receipt()?.len()})
@@ -322,8 +320,8 @@ fn federation_closes_a_remote_premise_only_when_its_source_is_present() -> Resul
     let target = raw.member.id;
     let claim = specimen(9, Kind::Claim, Some((target, "evidence")));
     let result = claim.member.id;
-    let first = a.paged_append("measurements", None, &[raw])?.head;
-    let second = b.paged_append("analyses", None, &[claim])?.head;
+    let first = a.custody_append("measurements", None, &[raw])?.head;
+    let second = b.custody_append("analyses", None, &[claim])?.head;
     assert_eq!(
         view(&[second])
             .review(&[(&b, second)], result, 100)?
@@ -362,7 +360,6 @@ fn mixed_bursts(directory: &std::path::Path) -> Result<serde_json::Value> {
         let ready = barrier.clone();
         writers.push(thread::spawn(move || -> Result<(u64, usize)> {
             let a = Archive::open(dir.join(format!("lab-{lab}.sqlite")))?;
-            a.init_paged()?;
             let source = format!("lab-{lab}");
             let mut tip = None;
             let mut stalled = 0;
@@ -378,10 +375,10 @@ fn mixed_bursts(directory: &std::path::Path) -> Result<serde_json::Value> {
                 if tip.is_none() {
                     members.push(Item::blob(source.as_bytes().to_vec(), public()));
                 }
-                let head = a.paged_append(&source, tip, &members)?.head;
+                let head = a.custody_append(&source, tip, &members)?.head;
                 tip = Some(head);
                 if seq % 3 == 2 {
-                    a.paged_share(head, true)?;
+                    a.custody_share(head, true)?;
                     match signal.try_send((lab, head)) {
                         Ok(()) => {}
                         Err(TrySendError::Full(msg)) => {
@@ -409,8 +406,7 @@ fn mixed_bursts(directory: &std::path::Path) -> Result<serde_json::Value> {
         let path = directory.join(format!("replica-{lab}.sqlite"));
         loop {
             let db = Archive::open(&path)?;
-            db.init_paged()?;
-            let next = db.paged_pull(&origin, head, 1)?;
+            let next = db.custody_pull(&origin, head, 1)?;
             received += next.batches;
             payload += next.payload_bytes;
             desc += next.descriptor_bytes;
@@ -423,7 +419,7 @@ fn mixed_bursts(directory: &std::path::Path) -> Result<serde_json::Value> {
             }
         }
         let db = Archive::open(&path)?;
-        let duplicate = db.paged_pull(&origin, head, 1)?;
+        let duplicate = db.custody_pull(&origin, head, 1)?;
         assert_eq!(duplicate.payload_bytes + duplicate.batches, 0);
         duplicates += 1;
         tips.insert(lab, head);
@@ -438,11 +434,11 @@ fn mixed_bursts(directory: &std::path::Path) -> Result<serde_json::Value> {
     let b = Archive::open(directory.join("replica-1.sqlite"))?;
     let heads = [tips[&0], tips[&1]];
     let merged = view(&heads);
-    let raw = a.paged_head(heads[0])?.delta[0].id;
+    let raw = a.custody_head(heads[0])?.delta[0].id;
     let report = merged.review(&[(&a, heads[0]), (&b, heads[1])], raw, 100)?;
     // Every raw block also contributes to its stream. The measurement links to this particular block.
     assert_eq!(report.dependents.len(), 2);
-    let last = a.paged_range(heads[0], Id::blob(b"lab-0"), 11 * BLOCK as u64, 8)?;
+    let last = a.custody_range(heads[0], Id::blob(b"lab-0"), 11 * BLOCK as u64, 8)?;
     assert_eq!(last, 11_u64.to_be_bytes());
     Ok(
         json!({"writers":2,"batches":received,"announcements":8,"queue_capacity":2,
@@ -461,7 +457,7 @@ fn portable_frames_verify_pinned_ancestry_and_rollback_partial_input() -> Result
     let mut parent = None;
     for n in 0..9 {
         let h = a
-            .paged_append(
+            .custody_append(
                 "instrument-A",
                 parent,
                 &[specimen(n, Kind::Occurrence, None)],
@@ -471,20 +467,23 @@ fn portable_frames_verify_pinned_ancestry_and_rollback_partial_input() -> Result
         tips.push(h);
     }
     let tip = tips[8];
-    a.paged_share(tip, true)?;
+    a.custody_share(tip, true)?;
     let mut after = None;
     for next in tips {
         let mut frame = Vec::new();
-        a.paged_export_step(tip, after, &mut frame)?;
-        assert!(b.paged_import_step(tip, &frame[..frame.len() - 1]).is_err());
-        assert!(b.paged_head(next).is_err());
+        a.custody_export_step(tip, after, &mut frame)?;
         assert!(
-            b.paged_import_step(Id::blob(b"a different pin"), frame.as_slice())
+            b.custody_import_step(tip, &frame[..frame.len() - 1])
                 .is_err()
         );
-        let result = b.paged_import_step(tip, frame.as_slice())?;
+        assert!(b.custody_head(next).is_err());
+        assert!(
+            b.custody_import_step(Id::blob(b"a different pin"), frame.as_slice())
+                .is_err()
+        );
+        let result = b.custody_import_step(tip, frame.as_slice())?;
         assert_eq!(next, result.head);
-        assert_eq!(b.paged_import_step(tip, frame.as_slice())?.head, next);
+        assert_eq!(b.custody_import_step(tip, frame.as_slice())?.head, next);
         after = Some(next);
     }
     Ok(())
@@ -496,28 +495,34 @@ fn a_pinned_but_incomplete_index_cannot_exclude_a_notice() -> Result<()> {
     let b = store()?;
     let original = Item::blob(b"source version".to_vec(), public());
     let target = original.member.id;
-    let base = a.paged_append("lab", None, &[original])?.head;
-    a.paged_share(base, true)?;
-    b.paged_pull(&a, base, 1)?;
+    let base = a.custody_append("lab", None, &[original])?.head;
+    a.custody_share(base, true)?;
+    b.custody_pull(&a, base, 1)?;
     let notice = specimen(7, Kind::Notice, Some((target, "source-version")));
     let bytes = notice.bytes.clone();
     let notice_id = notice.member.id;
-    let tip = a.paged_append("lab", Some(base), &[notice])?.head;
-    let mut claimed = a.paged_head(tip)?;
-    claimed.tree = a.paged_head(base)?.tree;
+    let tip = a.custody_append("lab", Some(base), &[notice])?.head;
+    let mut claimed = a.custody_head(tip)?;
+    claimed.tree = a.custody_head(base)?.tree;
     let metadata = serde_json::to_vec(&claimed)?;
-    let pin = Id::blob(&metadata);
-    let mut frame = b"NPG2".to_vec();
+    let pin = claimed.manifest()?.id()?;
+    let mut frame = super::frame::MAGIC.to_vec();
     for field in [&metadata, &bytes] {
         frame.extend_from_slice(&(field.len() as u32).to_be_bytes());
         frame.extend_from_slice(field);
     }
-    assert!(b.paged_import_step(pin, frame.as_slice()).is_err());
-    assert!(b.paged_head(pin).is_err());
-    assert!(b.paged_raw(notice_id).is_err());
-    assert_eq!(b.paged_tips("lab", None, 10)?, vec![base]);
+    assert_eq!(
+        b.custody_import_step(pin, frame.as_slice())
+            .err()
+            .unwrap()
+            .to_string(),
+        "derived inventory or coverage differs"
+    );
+    assert!(b.custody_head(pin).is_err());
+    assert!(b.custody_raw(notice_id).is_err());
+    assert_eq!(b.custody_tips("lab", None, 10)?, vec![base]);
     let unscoped = a
-        .paged_append("lab", Some(base), &[specimen(8, Kind::Notice, None)])?
+        .custody_append("lab", Some(base), &[specimen(8, Kind::Notice, None)])?
         .head;
     assert_eq!(
         view(&[unscoped])

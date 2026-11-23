@@ -15,9 +15,9 @@ fn archived_and_current_rules_apply_their_own_manifest_encoding() -> Result<()> 
         let case = fixture::seed(&archive, Format::A)?;
         let west = archive.snapshot("West", Default::default())?;
         let bytes = if canonical {
-            serde_json::to_vec(&west)?
+            west.manifest()?.bytes()?
         } else {
-            serde_json::to_vec_pretty(&west)?
+            serde_json::to_vec_pretty(west.manifest()?)?
         };
         let id = archive.blob(&bytes, Id::blob(PUBLIC))?;
         let witness = fixture::put(

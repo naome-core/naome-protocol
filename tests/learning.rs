@@ -154,7 +154,12 @@ fn released_v012_receipt_replays_with_its_original_withdrawal_semantics() -> Res
         serde_json::from_str(include_str!("fixtures/v0.1.2-required-withdrawal.json"))?;
     let mut archive = Archive::memory()?;
     let head = archive.import(&vector.bundle)?;
-    assert_eq!(head, vector.request.label_head);
+    assert_ne!(head, vector.request.label_head);
+    assert_eq!(archive.current_head_id(vector.request.label_head)?, head);
+    assert_eq!(
+        archive.head(vector.request.label_head)?.id()?,
+        vector.request.label_head
+    );
     let label = vector.request.examples[0].label;
     let view = archive.head(head)?;
     let receipt = archive.read(&view, vector.receipt, "read")?;
@@ -222,7 +227,12 @@ fn rules_5_receipt_replays_with_its_original_record_budget() -> Result<()> {
     let vector: Vector = serde_json::from_str(include_str!("fixtures/rules-5-record-budget.json"))?;
     let mut archive = Archive::memory()?;
     let head = archive.import(&vector.bundle)?;
-    assert_eq!(head, vector.request.label_head);
+    assert_ne!(head, vector.request.label_head);
+    assert_eq!(archive.current_head_id(vector.request.label_head)?, head);
+    assert_eq!(
+        archive.head(vector.request.label_head)?.id()?,
+        vector.request.label_head
+    );
     let snapshot = archive.head(head)?;
     let receipt = archive.read(&snapshot, vector.receipt, "read")?;
     assert_eq!(receipt.fields["evaluator"], "rep-rust-rules-5");
@@ -327,7 +337,6 @@ fn adoption_compares_frozen_arms_and_rejects_exposure() -> Result<()> {
     use naome_protocol::adoption::Adoption;
     let a = Archive::memory()?;
     let f = Format::B;
-    let public = Id::blob(PUBLIC);
     let put = |k, body, edges| fixture::put(&a, f, k, "successor", "held-out trial", body, edges);
     let task = put(Kind::Question, json!({"question":"finite task"}), vec![])?;
     let protected = put(
@@ -352,7 +361,7 @@ fn adoption_compares_frozen_arms_and_rejects_exposure() -> Result<()> {
         ],
     )?;
     let sealed = a.snapshot("precommit", BTreeSet::new())?;
-    let sealed_head = a.blob(&serde_json::to_vec(&sealed)?, public)?;
+    let sealed_head = a.deposit_manifest(&sealed)?;
     for exposures in [0, 1] {
         let observation = put(
             Kind::Occurrence,
@@ -490,13 +499,18 @@ fn check_outcome_cutoff(format: Format, early: bool, use_raw: bool, chunked: boo
         exact_observation
     };
     let baseline = archive.blob(b"shared pre-outcome baseline", Id::blob(PUBLIC))?;
-    let mut before = archive.head(data.feature_cutoff)?;
-    before.objects.insert(baseline);
-    before.source = "synthetic prospective cutoff".into();
+    let before = archive.head(data.feature_cutoff)?;
+    let mut members = before.objects.clone();
+    members.insert(baseline);
     if early {
-        before.objects.insert(exact_observation);
+        members.insert(exact_observation);
     }
-    let cutoff = archive.blob(&serde_json::to_vec(&before)?, Id::blob(PUBLIC))?;
+    let before = archive.seal_members(
+        "synthetic prospective cutoff",
+        before.parents.clone(),
+        members,
+    )?;
+    let cutoff = archive.deposit_manifest(&before)?;
     outcome.inputs.push(link("outcome-input", recorded_payload));
     outcome.inputs.push(link("baseline", baseline));
     let outcome_id = archive.document(&outcome, format, Id::blob(PUBLIC))?;
@@ -587,7 +601,7 @@ fn prospective_training_requires_an_admitted_witness_and_concealed_outcomes() ->
         let outcome = arg.roles("reading").next().unwrap();
         let mut release = a.read(&old, arg.one("release")?, "read")?;
         let cutoff = if signed {
-            a.blob(&serde_json::to_vec(&old)?, Id::blob(PUBLIC))?
+            a.deposit_manifest(&old)?
         } else {
             i.feature_cutoff
         };
@@ -679,7 +693,7 @@ fn signed_disciplinary_targets_survive_exchange_and_enforce_use_scope() -> Resul
         vec![],
     )?;
     let ready = a.snapshot("features", BTreeSet::new())?;
-    let before = a.blob(&serde_json::to_vec(&ready)?, unrestricted)?;
+    let before = a.blob(&ready.manifest()?.bytes()?, unrestricted)?;
     let cases = [
         (
             "clinical",
@@ -873,7 +887,10 @@ fn historical_extraction_reads_mapping_manifests_under_the_receipts_rules() -> R
     let migration = archive.migrate(&head, Format::B, "lab")?;
     let exchange = archive.head(migration.exchange_head)?;
     let mut mapping = archive.read(&exchange, migration.mapping, "read")?;
-    let pretty = archive.blob(&serde_json::to_vec_pretty(&head)?, Id::blob(PUBLIC))?;
+    let pretty = archive.blob(
+        &serde_json::to_vec_pretty(head.manifest()?)?,
+        Id::blob(PUBLIC),
+    )?;
     mapping
         .inputs
         .iter_mut()
