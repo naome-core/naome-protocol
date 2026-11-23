@@ -1,6 +1,7 @@
 use super::{Query, Receipt};
 use crate::{
-    profile::{Document, Kind},
+    migration::Equivalence,
+    profile::{CALIBRATION_EVENT_IDENTITY, Document, Kind, verify_attestation},
     store::{Archive, Snapshot},
     wire::Id,
 };
@@ -15,6 +16,8 @@ pub(crate) struct ReadInventory {
     inspected: BTreeMap<Id, bool>,
     remaining_cache_bytes: Option<usize>,
     attestations: BTreeMap<Id, BTreeSet<Id>>,
+    identity_checks: BTreeSet<Id>,
+    skipped_identity_checks: bool,
     sizes: BTreeMap<Id, usize>,
     complete_bytes: Option<usize>,
 }
@@ -77,7 +80,21 @@ impl ReadInventory {
             .map(|&id| (id, &self.documents[&id]))
     }
 
-    fn read(&mut self, store: &Archive, snapshot: &Snapshot, id: Id, retain: bool) {
+    pub(crate) fn identity_checks(&self) -> Result<&BTreeSet<Id>> {
+        ensure!(
+            !self.skipped_identity_checks,
+            "identity check retention budget exhausted"
+        );
+        Ok(&self.identity_checks)
+    }
+
+    pub(crate) fn read(
+        &mut self,
+        store: &Archive,
+        snapshot: &Snapshot,
+        id: Id,
+        retain: bool,
+    ) -> bool {
         let hidden = match store.read(snapshot, id, "read") {
             Ok(document) => {
                 match document.kind {
@@ -89,18 +106,34 @@ impl ReadInventory {
                             self.attestations.entry(target).or_default().insert(id);
                         }
                     }
+                    Kind::Assessment
+                        if document
+                            .fields
+                            .get("test")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(CALIBRATION_EVENT_IDENTITY) =>
+                    {
+                        if !retain {
+                            self.skipped_identity_checks = true;
+                            self.inspected.insert(id, false);
+                            return true;
+                        }
+                        self.identity_checks.insert(id);
+                    }
                     _ if !retain => {
                         self.inspected.insert(id, false);
-                        return;
+                        return true;
                     }
                     _ => {}
                 }
                 self.documents.insert(id, document);
-                false
+                self.inspected.insert(id, false);
+                return true;
             }
             Err(_) => store.may_be_notice(snapshot, id),
         };
         self.inspected.insert(id, hidden);
+        false
     }
 
     pub(super) fn search(
@@ -155,5 +188,36 @@ impl ReadInventory {
         ensure!(out.frontier.is_empty(), "notice search budget exhausted");
         self.complete_bytes = Some(query.byte_limit - bytes_left);
         Ok(())
+    }
+}
+
+pub(crate) struct EvidenceView<'a> {
+    pub store: &'a Archive,
+    pub snapshot: &'a Snapshot,
+    pub inventory: &'a ReadInventory,
+    pub aliases: &'a Equivalence,
+}
+
+impl EvidenceView<'_> {
+    pub(crate) fn signature(
+        &self,
+        id: Id,
+        scope: &str,
+        role: &str,
+        trusted: &BTreeSet<String>,
+    ) -> Option<Id> {
+        for endpoint in self.aliases.endpoints(id) {
+            if self.store.resolve(self.snapshot, endpoint, "read").is_err() {
+                continue;
+            }
+            for (signature, record) in self.inventory.attestations(endpoint) {
+                if verify_attestation(record, endpoint, scope, role, "research-policy-1", trusted)
+                    .is_ok()
+                {
+                    return Some(signature);
+                }
+            }
+        }
+        None
     }
 }

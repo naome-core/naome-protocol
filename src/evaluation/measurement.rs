@@ -1,6 +1,9 @@
 use super::{
     Evaluation, Receipt, Standing, Status,
-    correction::{MeasurementUse, Notice, WithdrawalChecks},
+    correction::{
+        LinkedCalibrationNotice, MeasurementUse, Notice, WithdrawalApplicability, WithdrawalChecks,
+        require_micrometres,
+    },
 };
 use crate::{
     profile::{Document, Kind},
@@ -28,34 +31,96 @@ impl Evaluation<'_> {
         for &id in &self.inventory.notices {
             let n = &self.inventory.documents[&id];
             out.visible_notices.insert(id);
-            if !n.roles("calibration").any(|k| targets.contains(&k)) {
-                continue;
-            }
-            if !Notice(n).calibration_applies(scope, measurement)? {
+            let direct = n
+                .roles("calibration")
+                .any(|candidate| targets.contains(&candidate));
+            let mut scope = scope;
+            let signature = if direct {
+                if !Notice(n).calibration_applies(scope, measurement)? {
+                    out.check(
+                        "notice applicability",
+                        Status::NotApplicable,
+                        "outside effective scope, mode or event interval",
+                        &[id],
+                    );
+                    continue;
+                }
+                self.signed(id, &n.scope, "calibration")
+            } else {
+                let Some(linked_notice) = LinkedCalibrationNotice::parse(n) else {
+                    continue;
+                };
+                let Some((_, identity)) = self
+                    .calibration_identities
+                    .recipients_for(&self.aliases, linked_notice.source)
+                    .find(|(recipient, proof)| {
+                        targets.contains(recipient)
+                            && proof.recipient_scope == scope
+                            && proof.source_scope == n.scope
+                            && proof.mode == mode
+                    })
+                else {
+                    continue;
+                };
+                let Some(sig) = self.calibration_identities.correction_signature(
+                    &self.evidence_view(),
+                    id,
+                    &n.scope,
+                    linked_notice.signature_role(),
+                ) else {
+                    out.check(
+                        "notice authority",
+                        Status::Fail,
+                        "no admitted source calibration signature",
+                        &[id],
+                    );
+                    continue;
+                };
+                let mut inputs = vec![id, sig];
+                inputs.extend(&identity.inputs);
                 out.check(
-                    "notice applicability",
-                    Status::NotApplicable,
-                    "outside effective scope, mode or event interval",
-                    &[id],
+                    "calibration event identity",
+                    Status::Pass,
+                    "admitted direct identity evidence under the recipient policy",
+                    &inputs,
                 );
-                continue;
-            }
-            let sig = match self.signed(id, &n.scope, "calibration") {
+                scope = &n.scope;
+                let applicability = linked_notice.applicability(measurement);
+                withdrawals.record(id, &[target], &applicability);
+                match applicability {
+                    WithdrawalApplicability::Excluded => {
+                        out.check(
+                            "notice applicability",
+                            Status::NotApplicable,
+                            "outside effective mode or event interval for the linked calibration",
+                            &[id, target],
+                        );
+                        continue;
+                    }
+                    WithdrawalApplicability::Unknown(error) => return Err(error),
+                    WithdrawalApplicability::Applies if linked_notice.withdrawal => {
+                        linked_notice.verify_evidence(|id| self.doc(id, Kind::Occurrence))?;
+                        out.applicable_notices.insert(id);
+                        out.check(
+                            "notice authority",
+                            Status::Pass,
+                            "verified source calibration withdrawal",
+                            &[id, sig],
+                        );
+                        bail!("linked calibration withdrawn for this use");
+                    }
+                    WithdrawalApplicability::Applies => {}
+                }
+                Ok(sig)
+            };
+            let sig = match signature {
                 Ok(x) => x,
                 Err(e) => {
                     out.check("notice authority", Status::Fail, &e.to_string(), &[id]);
                     continue;
                 }
             };
-            let report = n.one("evidence")?;
-            let evidence = self.doc(report, Kind::Occurrence)?;
-            require_micrometres(n)?;
-            require_micrometres(evidence)?;
-            ensure!(
-                evidence.scope == n.scope
-                    && evidence.field::<i64>("bias")? == n.field::<i64>("bias")?,
-                "notice evidence disagrees"
-            );
+            let report = Notice(n).calibration_evidence(|id| self.doc(id, Kind::Occurrence))?;
             out.applicable_notices.insert(id);
             out.check(
                 "notice authority",
@@ -251,17 +316,6 @@ impl Evaluation<'_> {
         }
         Ok(results)
     }
-}
-
-// Older claims and bias records use the research profile's implicit micrometre grid.
-fn require_micrometres(doc: &Document) -> Result<()> {
-    ensure!(
-        doc.fields
-            .get("unit")
-            .is_none_or(|unit| unit.as_str() == Some("um")),
-        "declared unit disagrees with the micrometre grid"
-    );
-    Ok(())
 }
 
 pub(super) enum Predicate {

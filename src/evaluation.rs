@@ -1,16 +1,22 @@
+pub(crate) mod calibration_identity;
 pub(crate) mod correction;
+pub(crate) mod dependency_correction;
 mod inventory;
 mod measurement;
 mod science;
+use calibration_identity::CalibrationIdentities;
 use correction::{
     MeasurementUse, Notice, WithdrawalApplicability, WithdrawalChecks, WithdrawalRules,
 };
-pub(crate) use inventory::ReadInventory;
+use dependency_correction::{
+    CorrectionImpact, DependencyCorrection, admitted_corrections, correction_keys,
+};
+pub(crate) use inventory::{EvidenceView, ReadInventory};
 use measurement::Predicate;
 
 use crate::{
     migration::Equivalence,
-    profile::{Document, Kind, PUBLIC, link, verify_attestation},
+    profile::{Document, Kind, PUBLIC, link},
     store::{Archive, Snapshot},
     wire::{Format, Id},
 };
@@ -24,6 +30,8 @@ const FIRST_SCOPED_EVALUATOR_ID: &str = "rep-rust-0.1.2-dev";
 const WITHDRAWAL_APPLICABILITY: &str = "withdrawal applicability";
 // This identifier versions the receipt semantics. Package releases can reuse it.
 const RULES_V1: &str = "rep-rust-rules-1";
+pub(crate) const CALIBRATION_IDENTITY_EVALUATOR_ID: &str = "rep-rust-rules-2";
+pub(crate) const INPUT_CORRECTION_EVALUATOR_ID: &str = "rep-rust-rules-3";
 pub(crate) const EVALUATOR_ID: &str = RULES_V1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,28 +137,52 @@ struct EvaluatorRules {
     ids: &'static [&'static str],
     withdrawal: WithdrawalRules,
     resolve_required_withdrawals: bool,
+    physical_identity: bool,
+    input_corrections: bool,
 }
 
 const REPLAY_RULES: &[EvaluatorRules] = &[
     EvaluatorRules {
+        ids: &[INPUT_CORRECTION_EVALUATOR_ID],
+        withdrawal: WithdrawalRules::Scoped,
+        resolve_required_withdrawals: true,
+        physical_identity: true,
+        input_corrections: true,
+    },
+    EvaluatorRules {
+        ids: &[CALIBRATION_IDENTITY_EVALUATOR_ID],
+        withdrawal: WithdrawalRules::Scoped,
+        resolve_required_withdrawals: true,
+        physical_identity: true,
+        input_corrections: false,
+    },
+    EvaluatorRules {
         ids: &[RULES_V1],
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
+        physical_identity: false,
+        input_corrections: false,
     },
     EvaluatorRules {
         ids: &["rep-rust-0.1.2", "rep-rust-0.1.2-dev.1"],
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: false,
+        physical_identity: false,
+        input_corrections: false,
     },
     EvaluatorRules {
         ids: &[FIRST_SCOPED_EVALUATOR_ID],
         withdrawal: WithdrawalRules::FirstScoped,
         resolve_required_withdrawals: false,
+        physical_identity: false,
+        input_corrections: false,
     },
     EvaluatorRules {
         ids: &[V0_1_0_EVALUATOR_ID, "rep-rust-0.1.1"],
         withdrawal: WithdrawalRules::ScopeOnly,
         resolve_required_withdrawals: false,
+        physical_identity: false,
+        input_corrections: false,
     },
 ];
 
@@ -168,6 +200,8 @@ pub struct Evaluation<'a> {
     aliases: Equivalence,
     policy: Document,
     withdrawal_rules: WithdrawalRules,
+    calibration_identities: CalibrationIdentities,
+    input_corrections: bool,
 }
 impl Evaluation<'_> {
     fn doc(&self, id: Id, kind: Kind) -> Result<&Document> {
@@ -179,29 +213,20 @@ impl Evaluation<'_> {
         ensure!(d.kind == kind, "wrong input kind");
         Ok(d)
     }
+    fn evidence_view(&self) -> EvidenceView<'_> {
+        EvidenceView {
+            store: self.store,
+            snapshot: self.s,
+            inventory: self.inventory,
+            aliases: &self.aliases,
+        }
+    }
     fn signed(&self, id: Id, scope: &str, role: &str) -> Result<Id> {
         let keys: BTreeMap<String, BTreeSet<String>> = self.policy.field("keys")?;
         let trusted = keys.get(role).context("no admitted authority for role")?;
-        for endpoint in self.aliases.endpoints(id) {
-            if self.store.resolve(self.s, endpoint, "read").is_err() {
-                continue;
-            }
-            for (sig, document) in self.inventory.attestations(endpoint) {
-                if verify_attestation(
-                    document,
-                    endpoint,
-                    scope,
-                    role,
-                    "research-policy-1",
-                    trusted,
-                )
-                .is_ok()
-                {
-                    return Ok(sig);
-                }
-            }
-        }
-        bail!("no admissible {role} signature")
+        self.evidence_view()
+            .signature(id, scope, role, trusted)
+            .with_context(|| format!("no admissible {role} signature"))
     }
     fn challenged(
         &self,
@@ -214,6 +239,9 @@ impl Evaluation<'_> {
         let mut open = false;
         for &id in &self.inventory.notices {
             let n = &self.inventory.documents[&id];
+            if self.input_corrections && DependencyCorrection::is_correction(n) {
+                continue;
+            }
             let notice = Notice(n);
             if !notice.in_scope(scope) {
                 continue;
@@ -462,6 +490,7 @@ impl Evaluation<'_> {
                 );
                 for (notice_id, n) in &self.inventory.documents {
                     if n.kind == Kind::Notice
+                        && !(self.input_corrections && DependencyCorrection::is_correction(n))
                         && !original_view.objects.contains(notice_id)
                         && Notice(n).refers_to(&self.aliases, &lineage.visited)
                     {
@@ -486,8 +515,22 @@ impl Evaluation<'_> {
         }
     }
 }
+pub(crate) fn query_evaluator(store: &Archive, s: &Snapshot, q: &Query) -> &'static str {
+    if let Ok(policy) = store.read(s, q.policy, "read")
+        && policy.kind == Kind::Policy
+    {
+        if policy.fields.contains_key("input_correction_keys") {
+            return INPUT_CORRECTION_EVALUATOR_ID;
+        }
+        if policy.fields.contains_key("foreign_calibration_keys") {
+            return CALIBRATION_IDENTITY_EVALUATOR_ID;
+        }
+    }
+    EVALUATOR_ID
+}
+
 pub fn assess(store: &Archive, s: &Snapshot, q: &Query) -> Result<Receipt> {
-    assess_for_evaluator(store, s, q, EVALUATOR_ID)
+    assess_for_evaluator(store, s, q, query_evaluator(store, s, q))
 }
 
 pub(crate) fn assess_for_evaluator(
@@ -554,6 +597,20 @@ pub(crate) fn assess_with_inventory(
                 "previous receipt covers another target"
             );
         }
+        let calibration_identities = if rules.physical_identity {
+            CalibrationIdentities::admit(
+                &EvidenceView {
+                    store,
+                    snapshot: s,
+                    inventory,
+                    aliases: &aliases,
+                },
+                &policy,
+                q.budget,
+            )?
+        } else {
+            CalibrationIdentities::default()
+        };
         let view = Evaluation {
             store,
             s,
@@ -561,7 +618,15 @@ pub(crate) fn assess_with_inventory(
             aliases,
             policy,
             withdrawal_rules,
+            calibration_identities,
+            input_corrections: rules.input_corrections,
         };
+        let input_corrections = if rules.input_corrections {
+            admitted_corrections(&view.evidence_view(), &correction_keys(&view.policy)?)?
+        } else {
+            Vec::new()
+        };
+        let mut correction_exclusions: BTreeMap<Id, usize> = BTreeMap::new();
         let mut pro = false;
         let mut con = false;
         for &arg in &q.arguments {
@@ -576,10 +641,9 @@ pub(crate) fn assess_with_inventory(
                     a.fields.get("method").and_then(Value::as_str) == Some("recorded-difference")
                 })
                 .and_then(|a| a.one("reading").ok());
-            let premises = match recorded_reading {
-                Some(reading) => store.explain_recorded_reading(s, arg, reading, q.budget),
-                None => evidence,
-            };
+            let recorded_premises = recorded_reading
+                .map(|reading| store.explain_recorded_reading(s, arg, reading, q.budget));
+            let premises = recorded_premises.as_ref().unwrap_or(&evidence);
             out.frontier.extend(premises.frontier.keys());
             let result = (|| -> Result<Vec<Standing>> {
                 ensure!(
@@ -591,6 +655,57 @@ pub(crate) fn assess_with_inventory(
                     a.subject == c.subject && a.scope == c.scope && a.one("claim")? == q.target,
                     "argument targets a different claim"
                 );
+                if !input_corrections.is_empty() {
+                    out.frontier.extend(evidence.frontier.keys());
+                    ensure!(
+                        evidence.frontier.is_empty(),
+                        "input dependencies are incomplete"
+                    );
+                    let evidence_view = view.evidence_view();
+                    let mut pending = false;
+                    for entry in &input_corrections {
+                        let inputs = [entry.id, entry.signature, arg];
+                        match entry.correction.exposure(
+                            &evidence_view,
+                            &[arg],
+                            &evidence.visited,
+                        )? {
+                            CorrectionImpact::Affected => {
+                                out.applicable_notices.insert(entry.id);
+                                out.check(
+                                    "input correction applicability",
+                                    Status::Pass,
+                                    "admitted notice overlaps a declared source dependency",
+                                    &inputs,
+                                );
+                                pending = true;
+                            }
+                            CorrectionImpact::Open => {
+                                out.unknown(
+                                    "input correction applicability",
+                                    "declared input coverage cannot exclude this correction",
+                                    &inputs,
+                                );
+                                pending = true;
+                            }
+                            CorrectionImpact::Outside => {
+                                *correction_exclusions.entry(entry.id).or_default() += 1;
+                                if q.required_notices
+                                    .iter()
+                                    .any(|id| view.aliases.endpoints(*id).contains(&entry.id))
+                                {
+                                    out.check(
+                                        "input correction applicability",
+                                        Status::NotApplicable,
+                                        "recorded source dependencies exclude the corrected scope",
+                                        &inputs,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    ensure!(!pending, "admitted input correction requires reassessment");
+                }
                 let measurement = MeasurementUse::for_argument(
                     a,
                     |id| view.inventory.documents.get(&id),
@@ -623,7 +738,15 @@ pub(crate) fn assess_with_inventory(
                 } else {
                     withdrawals.excludes_notice(&endpoints)
                 };
-            ensure!(applies || excluded, "required notice applicability unknown");
+            let input_excluded = out.frontier.is_empty()
+                && !q.arguments.is_empty()
+                && endpoints
+                    .iter()
+                    .any(|id| correction_exclusions.get(id) == Some(&q.arguments.len()));
+            ensure!(
+                applies || excluded || input_excluded,
+                "required notice applicability unknown"
+            );
         }
         if let Some(now) = q.current_at {
             let max_age: u64 = view.policy.field("max_age")?;
@@ -687,7 +810,7 @@ pub fn deposit_receipt(
     r: &Receipt,
     f: Format,
 ) -> Result<Id> {
-    deposit_receipt_for_evaluator(store, s, q, r, f, EVALUATOR_ID)
+    deposit_receipt_for_evaluator(store, s, q, r, f, query_evaluator(store, s, q))
 }
 pub(crate) fn deposit_receipt_for_evaluator(
     store: &Archive,
