@@ -55,7 +55,12 @@ fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
         capabilities["input_correction_evaluator"],
         "rep-rust-rules-3"
     );
+    assert_eq!(
+        capabilities["correction_reassessment_evaluator"],
+        "rep-rust-rules-4"
+    );
     let expected = [
+        "rep-rust-rules-4",
         "rep-rust-rules-3",
         "rep-rust-rules-2",
         "rep-rust-rules-1",

@@ -311,6 +311,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 "receipt_evaluator": evaluation::EVALUATOR_ID,
                 "calibration_identity_evaluator": evaluation::CALIBRATION_IDENTITY_EVALUATOR_ID,
                 "input_correction_evaluator": evaluation::INPUT_CORRECTION_EVALUATOR_ID,
+                "correction_reassessment_evaluator": evaluation::CORRECTION_REASSESSMENT_EVALUATOR_ID,
                 "replay_evaluators": evaluation::replay_evaluator_ids().collect::<Vec<_>>(),
                 "evaluators": ["simultaneous-bounds","certified-hull","signed-tests","typed-outcome","delegated","recorded-difference","least-zero","domain-inclusion","source-independence","sample-description","survey-identification","unit-grid-map"],
             }));

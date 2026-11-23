@@ -339,3 +339,152 @@ fn run_profile(
     assert_ne!(revised_id, historical);
     Ok(())
 }
+
+fn unrelated_raw_reading_setup() -> Result<(Archive, Query, Id, Id, Id, Value)> {
+    let archive = Archive::memory()?;
+    let study = Study {
+        archive: &archive,
+        format: Format::B,
+    };
+    let public = Id::blob(PUBLIC);
+    let old = archive.blob(b"original version of source A", public)?;
+    let unrelated = archive.blob(b"unrelated provenance blob for raw reading B", public)?;
+    let evidence = archive.blob(b"source A comparison", public)?;
+    let key = hex::encode(fixture_key(ISSUER).verifying_key().to_bytes());
+    let policy = put(
+        &archive,
+        Format::B,
+        Kind::Policy,
+        SUBJECT,
+        "research-policy-1",
+        json!({"keys":{"data-origin":[key]},"input_correction_keys":{SCOPE:{(old.to_string()):[key]}}}),
+        vec![],
+    )?;
+    let claim = study.record(
+        Kind::Claim,
+        json!({"predicate":"raw-change-above","unit":"tick","threshold":200}),
+        vec![],
+    )?;
+    let query = study.query(claim, policy, link("dataset", unrelated), 220, vec![])?;
+    let coverage = json!({"profile":"table-rows-1","selector":{"ranges":[[1,2]]}});
+    Ok((archive, query, old, unrelated, evidence, coverage))
+}
+
+#[test]
+fn malformed_authorized_notice_cannot_block_unrelated_assessment() -> Result<()> {
+    let (archive, query, old, unrelated, evidence, coverage) = unrelated_raw_reading_setup()?;
+    let study = Study {
+        archive: &archive,
+        format: Format::B,
+    };
+    let dependent = study.query(
+        query.target,
+        query.policy,
+        study.use_source(old, &coverage),
+        220,
+        vec![],
+    )?;
+    let before = archive.snapshot("original", Default::default())?;
+    for candidate in [&query, &dependent] {
+        assert_eq!(
+            assess(&archive, &before, candidate)?.result,
+            Some(Standing::Supported)
+        );
+    }
+    let notice = study.record(
+        Kind::Notice,
+        json!({"action":"correct-input","reason":"checked input revision","coverage":coverage}),
+        vec![
+            link("source-version", old),
+            link("evidence", evidence),
+            link("calibration", unrelated),
+        ],
+    )?;
+    sign(
+        &archive,
+        Format::B,
+        notice,
+        SCOPE,
+        "input-correction",
+        ISSUER,
+    )?;
+    let after = archive.snapshot("after malformed correction", [before.id()?].into())?;
+    let result = assess(&archive, &after, &query)?;
+    assert_eq!(result.result, Some(Standing::Supported));
+    assert!(result.horizon_complete && result.frontier.is_empty());
+    let impact = archive.impact_with_policy(&after, notice, &[], 1000, Some(query.policy))?;
+    assert!(impact.by_kind.is_empty());
+    assert_eq!(
+        impact.needs_reassessment["argument"],
+        [dependent.arguments[0]].into()
+    );
+    let result = assess(&archive, &after, &dependent)?;
+    assert_eq!(result.result, Some(Standing::Unresolved));
+    assert!(result.checks.iter().any(|check| {
+        check.test == "input correction applicability"
+            && check.status == Status::Unknown
+            && check.inputs.contains(&notice)
+    }));
+    Ok(())
+}
+
+#[test]
+fn unrelated_valid_notice_does_not_require_raw_provenance() -> Result<()> {
+    let (archive, query, old, unrelated, evidence, coverage) = unrelated_raw_reading_setup()?;
+    let study = Study {
+        archive: &archive,
+        format: Format::B,
+    };
+    archive.withdraw(unrelated)?;
+    let before = archive.snapshot("after provenance withdrawal", Default::default())?;
+    assert_eq!(
+        assess(&archive, &before, &query)?.result,
+        Some(Standing::Supported)
+    );
+    study.notice(old, &coverage, evidence, ISSUER)?;
+    let after = archive.snapshot("after unrelated correction", [before.id()?].into())?;
+    let result = assess(&archive, &after, &query)?;
+    assert_eq!(result.result, Some(Standing::Supported));
+    Ok(())
+}
+
+#[test]
+fn missing_provenance_record_keeps_possible_correction_exposure_open() -> Result<()> {
+    let (archive, query, old, _, evidence, coverage) = unrelated_raw_reading_setup()?;
+    let study = Study {
+        archive: &archive,
+        format: Format::B,
+    };
+    let derivation = study.record(
+        Kind::Derivation,
+        json!({"method":"calculated a summary"}),
+        vec![study.use_source(old, &coverage)],
+    )?;
+    let query = study.query(
+        query.target,
+        query.policy,
+        link("dataset", derivation),
+        220,
+        vec![],
+    )?;
+    let mut before = archive.snapshot(
+        "raw value without its provenance record",
+        Default::default(),
+    )?;
+    assert!(before.objects.remove(&derivation));
+    let original = assess(&archive, &before, &query)?;
+    assert_eq!(original.result, Some(Standing::Supported));
+
+    let (notice, _) = study.notice(old, &coverage, evidence, ISSUER)?;
+    let mut after = archive.snapshot("after input correction", [archive.save(&before)?].into())?;
+    assert!(after.objects.remove(&derivation));
+    let current = assess(&archive, &after, &query)?;
+    assert_eq!(current.result, Some(Standing::Unresolved));
+    assert!(current.frontier.contains(&derivation));
+    assert!(current.checks.iter().any(|check| {
+        check.test == "input correction applicability"
+            && check.status == Status::Unknown
+            && check.inputs.contains(&notice)
+    }));
+    Ok(())
+}

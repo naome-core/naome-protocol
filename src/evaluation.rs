@@ -28,10 +28,12 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) const V0_1_0_EVALUATOR_ID: &str = "rep-rust-0.1.0";
 const FIRST_SCOPED_EVALUATOR_ID: &str = "rep-rust-0.1.2-dev";
 const WITHDRAWAL_APPLICABILITY: &str = "withdrawal applicability";
+const CALIBRATION_IDENTITY_CHECK: &str = "calibration event identity";
 // This identifier versions the receipt semantics. Package releases can reuse it.
 const RULES_V1: &str = "rep-rust-rules-1";
 pub(crate) const CALIBRATION_IDENTITY_EVALUATOR_ID: &str = "rep-rust-rules-2";
 pub(crate) const INPUT_CORRECTION_EVALUATOR_ID: &str = "rep-rust-rules-3";
+pub(crate) const CORRECTION_REASSESSMENT_EVALUATOR_ID: &str = "rep-rust-rules-4";
 pub(crate) const EVALUATOR_ID: &str = RULES_V1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,15 +141,25 @@ struct EvaluatorRules {
     resolve_required_withdrawals: bool,
     physical_identity: bool,
     input_corrections: bool,
+    scoped_corrections: bool,
 }
 
 const REPLAY_RULES: &[EvaluatorRules] = &[
+    EvaluatorRules {
+        ids: &[CORRECTION_REASSESSMENT_EVALUATOR_ID],
+        withdrawal: WithdrawalRules::Scoped,
+        resolve_required_withdrawals: true,
+        physical_identity: true,
+        input_corrections: true,
+        scoped_corrections: true,
+    },
     EvaluatorRules {
         ids: &[INPUT_CORRECTION_EVALUATOR_ID],
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
         physical_identity: true,
         input_corrections: true,
+        scoped_corrections: false,
     },
     EvaluatorRules {
         ids: &[CALIBRATION_IDENTITY_EVALUATOR_ID],
@@ -155,6 +167,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         resolve_required_withdrawals: true,
         physical_identity: true,
         input_corrections: false,
+        scoped_corrections: false,
     },
     EvaluatorRules {
         ids: &[RULES_V1],
@@ -162,6 +175,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         resolve_required_withdrawals: true,
         physical_identity: false,
         input_corrections: false,
+        scoped_corrections: false,
     },
     EvaluatorRules {
         ids: &["rep-rust-0.1.2", "rep-rust-0.1.2-dev.1"],
@@ -169,6 +183,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         resolve_required_withdrawals: false,
         physical_identity: false,
         input_corrections: false,
+        scoped_corrections: false,
     },
     EvaluatorRules {
         ids: &[FIRST_SCOPED_EVALUATOR_ID],
@@ -176,6 +191,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         resolve_required_withdrawals: false,
         physical_identity: false,
         input_corrections: false,
+        scoped_corrections: false,
     },
     EvaluatorRules {
         ids: &[V0_1_0_EVALUATOR_ID, "rep-rust-0.1.1"],
@@ -183,6 +199,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         resolve_required_withdrawals: false,
         physical_identity: false,
         input_corrections: false,
+        scoped_corrections: false,
     },
 ];
 
@@ -202,6 +219,7 @@ pub struct Evaluation<'a> {
     withdrawal_rules: WithdrawalRules,
     calibration_identities: CalibrationIdentities,
     input_corrections: bool,
+    scoped_corrections: bool,
 }
 impl Evaluation<'_> {
     fn doc(&self, id: Id, kind: Kind) -> Result<&Document> {
@@ -239,7 +257,9 @@ impl Evaluation<'_> {
         let mut open = false;
         for &id in &self.inventory.notices {
             let n = &self.inventory.documents[&id];
-            if self.input_corrections && DependencyCorrection::is_correction(n) {
+            if (self.input_corrections || self.scoped_corrections)
+                && DependencyCorrection::is_correction(n)
+            {
                 continue;
             }
             let notice = Notice(n);
@@ -490,12 +510,23 @@ impl Evaluation<'_> {
                 );
                 for (notice_id, n) in &self.inventory.documents {
                     if n.kind == Kind::Notice
-                        && !(self.input_corrections && DependencyCorrection::is_correction(n))
+                        && !((self.input_corrections || self.scoped_corrections)
+                            && DependencyCorrection::is_correction(n))
                         && !original_view.objects.contains(notice_id)
                         && Notice(n).refers_to(&self.aliases, &lineage.visited)
                     {
                         bail!("delegated receipt requires reassessment after a later notice");
                     }
+                }
+                if self.scoped_corrections
+                    && self.linked_calibration_requires_reassessment(
+                        r,
+                        original,
+                        &lineage.visited,
+                        out,
+                    )?
+                {
+                    return Ok(vec![]);
                 }
                 Ok(vec![r.field("result")?])
             }
@@ -514,17 +545,81 @@ impl Evaluation<'_> {
             ),
         }
     }
+
+    fn linked_calibration_requires_reassessment(
+        &self,
+        previous: &Document,
+        receipt: Id,
+        lineage: &BTreeSet<Id>,
+        out: &mut Receipt,
+    ) -> Result<bool> {
+        let mut applied = BTreeSet::new();
+        if let Ok(transcript) = previous.field::<Receipt>("original_transcript") {
+            applied.extend(transcript.checks.iter().filter_map(|check| {
+                if check.test != CALIBRATION_IDENTITY_CHECK || check.status != Status::Pass {
+                    return None;
+                }
+                check
+                    .inputs
+                    .first()
+                    .copied()
+                    .filter(|id| transcript.applicable_notices.contains(id))
+            }));
+        }
+        let evidence = self.evidence_view();
+        // Only measurement arguments in the delegated lineage establish actual use.
+        let arguments: Vec<_> = lineage
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.inventory
+                    .documents
+                    .get(id)
+                    .is_some_and(|document| document.kind == Kind::Argument)
+            })
+            .collect();
+        let mut pending = false;
+        for &id in &self.inventory.notices {
+            let notice = &self.inventory.documents[&id];
+            if DependencyCorrection::is_correction(notice) {
+                continue;
+            }
+            let mut frontier = BTreeSet::new();
+            let uses = self.calibration_identities.affected_uses(
+                &evidence,
+                id,
+                notice,
+                arguments.iter().copied(),
+                self.s.objects.len(),
+                &mut frontier,
+            )?;
+            let previously_applied = !self.aliases.endpoints(id).is_disjoint(&applied);
+            let applies = !uses.is_empty();
+            if applies {
+                out.applicable_notices.insert(id);
+            }
+            if !frontier.is_empty() || previously_applied != applies {
+                out.frontier.extend(frontier);
+                let mut inputs = vec![receipt, id];
+                inputs.extend(uses);
+                out.unknown(
+                    "delegated calibration applicability",
+                    "delegated receipt requires reassessment of a linked calibration notice",
+                    &inputs,
+                );
+                pending = true;
+            }
+        }
+        Ok(pending)
+    }
 }
 pub(crate) fn query_evaluator(store: &Archive, s: &Snapshot, q: &Query) -> &'static str {
     if let Ok(policy) = store.read(s, q.policy, "read")
         && policy.kind == Kind::Policy
+        && (policy.fields.contains_key("input_correction_keys")
+            || policy.fields.contains_key("foreign_calibration_keys"))
     {
-        if policy.fields.contains_key("input_correction_keys") {
-            return INPUT_CORRECTION_EVALUATOR_ID;
-        }
-        if policy.fields.contains_key("foreign_calibration_keys") {
-            return CALIBRATION_IDENTITY_EVALUATOR_ID;
-        }
+        return CORRECTION_REASSESSMENT_EVALUATOR_ID;
     }
     EVALUATOR_ID
 }
@@ -611,6 +706,8 @@ pub(crate) fn assess_with_inventory(
         } else {
             CalibrationIdentities::default()
         };
+        let input_corrections = rules.input_corrections
+            && (!rules.scoped_corrections || policy.fields.contains_key("input_correction_keys"));
         let view = Evaluation {
             store,
             s,
@@ -619,10 +716,15 @@ pub(crate) fn assess_with_inventory(
             policy,
             withdrawal_rules,
             calibration_identities,
-            input_corrections: rules.input_corrections,
+            input_corrections,
+            scoped_corrections: rules.scoped_corrections,
         };
-        let input_corrections = if rules.input_corrections {
-            admitted_corrections(&view.evidence_view(), &correction_keys(&view.policy)?)?
+        let input_corrections = if input_corrections {
+            admitted_corrections(
+                &view.evidence_view(),
+                &correction_keys(&view.policy)?,
+                rules.scoped_corrections,
+            )?
         } else {
             Vec::new()
         };
@@ -656,20 +758,22 @@ pub(crate) fn assess_with_inventory(
                     "argument targets a different claim"
                 );
                 if !input_corrections.is_empty() {
-                    out.frontier.extend(evidence.frontier.keys());
-                    ensure!(
-                        evidence.frontier.is_empty(),
-                        "input dependencies are incomplete"
-                    );
+                    // Keep the full-provenance requirement when replaying rules-3 receipts.
+                    if !rules.scoped_corrections {
+                        out.frontier.extend(evidence.frontier.keys());
+                        ensure!(
+                            evidence.frontier.is_empty(),
+                            "input dependencies are incomplete"
+                        );
+                    }
                     let evidence_view = view.evidence_view();
                     let mut pending = false;
                     for entry in &input_corrections {
                         let inputs = [entry.id, entry.signature, arg];
-                        match entry.correction.exposure(
-                            &evidence_view,
-                            &[arg],
-                            &evidence.visited,
-                        )? {
+                        match entry
+                            .correction
+                            .exposure(&evidence_view, &[arg], &evidence)?
+                        {
                             CorrectionImpact::Affected => {
                                 out.applicable_notices.insert(entry.id);
                                 out.check(
@@ -681,6 +785,7 @@ pub(crate) fn assess_with_inventory(
                                 pending = true;
                             }
                             CorrectionImpact::Open => {
+                                out.frontier.extend(evidence.frontier.keys());
                                 out.unknown(
                                     "input correction applicability",
                                     "declared input coverage cannot exclude this correction",

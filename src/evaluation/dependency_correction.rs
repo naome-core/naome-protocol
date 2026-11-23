@@ -4,7 +4,7 @@ use super::{EvidenceView, ReadInventory};
 use crate::{
     migration::Equivalence,
     profile::{Document, Kind, Link},
-    store::{Archive, Snapshot},
+    store::{Archive, Closure, Snapshot},
     wire::Id,
 };
 use anyhow::Result;
@@ -37,10 +37,12 @@ impl DependencyCorrection {
         store: &Archive,
         snapshot: &Snapshot,
         aliases: &Equivalence,
+        scope_invalid: bool,
     ) -> Result<Self> {
         anyhow::ensure!(Self::is_correction(notice), "expected an input correction");
+        let mixed_notice = notice.roles("calibration").next().is_some();
         anyhow::ensure!(
-            notice.roles("calibration").next().is_none(),
+            scope_invalid || !mixed_notice,
             "input correction cannot also target a calibration notice branch"
         );
         let source = aliases.endpoints(notice.one("source-version")?);
@@ -53,7 +55,7 @@ impl DependencyCorrection {
                 .iter()
                 .any(|&id| store.readable(snapshot, id).is_ok())
         });
-        let scope = if source_readable && evidence_readable {
+        let scope = if !mixed_notice && source_readable && evidence_readable {
             notice.field("coverage").ok()
         } else {
             None
@@ -160,16 +162,25 @@ impl DependencyCorrection {
         &self,
         view: &EvidenceView<'_>,
         roots: &[Id],
-        premises: &BTreeSet<Id>,
+        premises: &Closure,
     ) -> Result<CorrectionImpact> {
-        if self.source.is_disjoint(premises) {
+        if premises.frontier.is_empty() && self.source.is_disjoint(&premises.visited) {
             return Ok(CorrectionImpact::Outside);
         }
         let mut impact = CorrectionImpact::Outside;
         let mut seen = BTreeSet::new();
         let mut pending = roots.to_vec();
         while let Some(id) = pending.pop() {
-            if !seen.insert(id) || !premises.contains(&id) {
+            if !seen.insert(id) {
+                continue;
+            }
+            if !premises.visited.contains(&id) {
+                // An unreadable record might lead to the corrected source. A blob has no outgoing edges.
+                if premises.frontier.contains_key(&id)
+                    && (id.format().is_some() || self.source_version(id))
+                {
+                    impact = impact.max(CorrectionImpact::Open);
+                }
                 continue;
             }
             if self.source_version(id) {
@@ -184,7 +195,7 @@ impl DependencyCorrection {
                     }
                 };
                 for edge in &document.inputs {
-                    if !Self::dependency_edge(document, edge) || !premises.contains(&edge.target) {
+                    if !Self::dependency_edge(document, edge) {
                         continue;
                     }
                     if let Some(direct) = self.edge_impact(edge) {
@@ -238,6 +249,7 @@ pub(crate) struct AdmittedCorrection {
 pub(crate) fn admitted_corrections(
     view: &EvidenceView<'_>,
     keys: &CorrectionKeys,
+    scope_invalid: bool,
 ) -> Result<Vec<AdmittedCorrection>> {
     let mut admitted = Vec::new();
     if !keys.is_empty() {
@@ -255,6 +267,7 @@ pub(crate) fn admitted_corrections(
                         view.store,
                         view.snapshot,
                         view.aliases,
+                        scope_invalid,
                     )?,
                 });
             }

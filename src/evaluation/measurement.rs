@@ -1,9 +1,10 @@
 use super::{
-    Evaluation, Receipt, Standing, Status,
+    CALIBRATION_IDENTITY_CHECK, Evaluation, Receipt, Standing, Status,
     correction::{
         LinkedCalibrationNotice, MeasurementUse, Notice, WithdrawalApplicability, WithdrawalChecks,
         require_micrometres,
     },
+    dependency_correction::DependencyCorrection,
 };
 use crate::{
     profile::{Document, Kind},
@@ -31,6 +32,9 @@ impl Evaluation<'_> {
         for &id in &self.inventory.notices {
             let n = &self.inventory.documents[&id];
             out.visible_notices.insert(id);
+            if self.scoped_corrections && DependencyCorrection::is_correction(n) {
+                continue;
+            }
             let direct = n
                 .roles("calibration")
                 .any(|candidate| targets.contains(&candidate));
@@ -79,7 +83,7 @@ impl Evaluation<'_> {
                 let mut inputs = vec![id, sig];
                 inputs.extend(&identity.inputs);
                 out.check(
-                    "calibration event identity",
+                    CALIBRATION_IDENTITY_CHECK,
                     Status::Pass,
                     "admitted direct identity evidence under the recipient policy",
                     &inputs,

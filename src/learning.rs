@@ -459,15 +459,15 @@ impl TrainingReview<'_> {
                 inventory: &trust.inventory,
                 aliases,
             };
-            for admitted in admitted_corrections(&evidence, &trust.correction_keys)? {
+            for admitted in admitted_corrections(&evidence, &trust.correction_keys, true)? {
                 ensure!(
                     admitted
                         .correction
-                        .exposure(&evidence, &ex.features, &features.visited)?
+                        .exposure(&evidence, &ex.features, &features)?
                         == CorrectionImpact::Outside
                         && admitted
                             .correction
-                            .exposure(&evidence, &[ex.label], &label.visited)?
+                            .exposure(&evidence, &[ex.label], &label)?
                             == CorrectionImpact::Outside,
                     "an admitted input correction requires reassessment of a training dependency"
                 );
@@ -718,9 +718,9 @@ impl Archive {
         }
         let correction_notice = Notice(&n);
         let input_correction = DependencyCorrection::is_correction(&n)
-            .then(|| DependencyCorrection::parse(&n, self, s, &eq))
+            .then(|| DependencyCorrection::parse(&n, self, s, &eq, true))
             .transpose()?;
-        let calibration = n.roles("calibration").next().is_some();
+        let calibration = input_correction.is_none() && n.roles("calibration").next().is_some();
         let (initial, correction) = if calibration {
             (
                 eq.endpoints(n.one("calibration")?),
@@ -764,8 +764,14 @@ impl Archive {
                     correction_signature(&evidence, &correction_keys(&policy)?, notice, &n);
             } else {
                 let identities = CalibrationIdentities::admit(&evidence, &policy, budget)?;
-                foreign_uses =
-                    identities.affected_uses(&evidence, notice, &n, budget, &mut frontier)?;
+                foreign_uses = identities.affected_uses(
+                    &evidence,
+                    notice,
+                    &n,
+                    docs.keys().copied(),
+                    budget,
+                    &mut frontier,
+                )?;
             }
         }
         if let Some(correction) = input_correction {
@@ -788,8 +794,9 @@ impl Archive {
                 frontier,
             });
         }
-        let argument_excluded = |argument: &Document| {
-            argument.kind == Kind::Argument
+        let argument_excluded = |id: Id, argument: &Document| {
+            !foreign_uses.contains(&id)
+                && argument.kind == Kind::Argument
                 && MeasurementUse::for_argument(
                     argument,
                     |id| docs.get(&id),
@@ -818,7 +825,7 @@ impl Archive {
             }
             if withdrawal {
                 let excluded = match d.kind {
-                    Kind::Argument => argument_excluded(d),
+                    Kind::Argument => argument_excluded(id, d),
                     Kind::Occurrence if d.fields.contains_key("gauge") => correction_notice
                         .excludes_current_withdrawal(
                             &d.scope,
@@ -827,7 +834,9 @@ impl Archive {
                     Kind::Assessment => {
                         let mut arguments = d.roles("argument").peekable();
                         arguments.peek().is_some()
-                            && arguments.all(|id| docs.get(&id).is_some_and(&argument_excluded))
+                            && arguments.all(|id| {
+                                docs.get(&id).is_some_and(|doc| argument_excluded(id, doc))
+                            })
                             && !d.inputs.iter().any(|edge| {
                                 edge.role != "dependency" && initial.contains(&edge.target)
                             })

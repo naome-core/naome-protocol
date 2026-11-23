@@ -177,6 +177,7 @@ impl CalibrationIdentities {
         evidence: &EvidenceView<'_>,
         notice_id: Id,
         notice: &Document,
+        candidates: impl IntoIterator<Item = Id>,
         budget: usize,
         frontier: &mut BTreeSet<Id>,
     ) -> Result<BTreeSet<Id>> {
@@ -204,24 +205,11 @@ impl CalibrationIdentities {
             return Ok(foreign_uses);
         }
         let docs = &evidence.inventory.documents;
-        linked.verify_evidence(|id| docs.get(&id).context("notice evidence unavailable"))?;
-        frontier.extend(
-            evidence
-                .store
-                .explain(
-                    evidence.snapshot,
-                    &[notice_id, signature],
-                    "read",
-                    budget,
-                    48,
-                )
-                .frontier
-                .keys(),
-        );
-        if !frontier.is_empty() {
-            return Ok(foreign_uses);
-        }
-        for (&id, document) in docs {
+        let mut unknown_uses = BTreeSet::new();
+        for id in candidates {
+            let Some(document) = docs.get(&id) else {
+                continue;
+            };
             let Ok(calibration) = document.one("calibration") else {
                 continue;
             };
@@ -249,20 +237,36 @@ impl CalibrationIdentities {
             };
             if let Some(measurement) = measurement {
                 if !measurement.complete() {
-                    frontier.insert(id);
+                    unknown_uses.insert(id);
                 } else if measurement.matches_mode(&proof.mode) {
                     match linked.applicability(measurement) {
                         WithdrawalApplicability::Applies => {
                             foreign_uses.insert(id);
                         }
                         WithdrawalApplicability::Unknown(_) => {
-                            frontier.insert(id);
+                            unknown_uses.insert(id);
                         }
                         WithdrawalApplicability::Excluded => {}
                     }
                 }
             }
         }
+        if foreign_uses.is_empty() && unknown_uses.is_empty() {
+            return Ok(foreign_uses);
+        }
+        linked.verify_evidence(|id| docs.get(&id).context("notice evidence unavailable"))?;
+        let dependencies = evidence.store.explain(
+            evidence.snapshot,
+            &[notice_id, signature],
+            "read",
+            budget,
+            48,
+        );
+        if !dependencies.frontier.is_empty() {
+            foreign_uses.clear();
+        }
+        frontier.extend(dependencies.frontier.keys());
+        frontier.extend(unknown_uses);
         Ok(foreign_uses)
     }
 

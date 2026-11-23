@@ -400,7 +400,7 @@ fn later_identity_withdrawal_keeps_historical_receipt_and_blocks_required_correc
     let receipt_inventory = a.snapshot("receipt", [before.id()?].into())?;
     assert_eq!(
         a.read(&receipt_inventory, receipt_id, "read")?.fields["evaluator"],
-        json!("rep-rust-rules-2")
+        json!("rep-rust-rules-4")
     );
     let label = a.label(
         &receipt_inventory,
@@ -567,5 +567,144 @@ fn a_signed_link_with_incompatible_time_axes_leaves_applicability_open() -> Resu
     assert_eq!(receipt.result, Some(Standing::Unresolved));
     assert!(receipt.applicable_notices.is_empty());
     assert!(trial.impact(&head)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn foreign_withdrawal_reaches_local_receipt_and_label() -> Result<()> {
+    let trial = Scenario::new()?;
+    let archive = &trial.archive;
+    let historical = assess(archive, &trial.before, &trial.measured)?;
+    assert_eq!(historical.result, Some(Standing::Supported));
+    let receipt = deposit_receipt(
+        archive,
+        &trial.before,
+        &trial.measured,
+        &historical,
+        Format::B,
+    )?;
+    let label_horizon = archive.snapshot("deposited local result", [trial.before.id()?].into())?;
+    let label = archive.label(&label_horizon, receipt, "synthetic", None, None, Format::B)?;
+    trial.identity(
+        trial.local_calibration,
+        trial.local_original,
+        "execution",
+        "complete",
+        Status::Pass,
+        8,
+    )?;
+    let withdrawal = put(
+        archive,
+        Format::A,
+        Kind::Notice,
+        "North withdrawal",
+        FOREIGN,
+        json!({"action":"withdraw","reason":"reference was out of tolerance","mode":"axial","interval":[1,1]}),
+        vec![link("target", trial.source_calibration)],
+    )?;
+    fixture::sign(archive, Format::A, withdrawal, FOREIGN, "notice", 1)?;
+    let head = trial.head()?;
+    let mut query = trial.measured.clone();
+    query.required_notices = vec![withdrawal];
+    let current = assess(archive, &head, &query)?;
+    assert_eq!(current.result, Some(Standing::Unresolved));
+    assert!(current.applicable_notices.contains(&withdrawal));
+    let impact = archive.impact_with_policy(&head, withdrawal, &[], 10_000, Some(query.policy))?;
+    assert!(impact.by_kind["argument"].contains(&query.arguments[0]));
+    assert!(
+        impact
+            .by_kind
+            .get("assessment")
+            .is_some_and(|ids| ids.contains(&receipt))
+    );
+    assert!(
+        impact
+            .by_kind
+            .get("label")
+            .is_some_and(|ids| ids.contains(&label))
+    );
+    Ok(())
+}
+
+fn delegate(
+    archive: &Archive,
+    snapshot: &Snapshot,
+    query: &Query,
+    standing: Standing,
+) -> Result<Query> {
+    let original = assess(archive, snapshot, query)?;
+    assert_eq!(original.result, Some(standing));
+    let receipt = deposit_receipt(archive, snapshot, query, &original, Format::B)?;
+    fixture::sign(archive, Format::B, receipt, LOCAL, "assessor", 4)?;
+    let argument = record(
+        archive,
+        Kind::Argument,
+        LOCAL,
+        json!({"method":"delegated"}),
+        vec![link("claim", query.target), link("receipt", receipt)],
+    )?;
+    Ok(Query {
+        arguments: vec![argument],
+        ..query.clone()
+    })
+}
+
+#[test]
+fn delegation_reassesses_only_the_use_affected_by_a_linked_correction() -> Result<()> {
+    let trial = Scenario::new()?;
+    let archive = &trial.archive;
+    let affected = delegate(archive, &trial.before, &trial.measured, Standing::Supported)?;
+    let outside = delegate(archive, &trial.before, &trial.outside, Standing::Supported)?;
+    let before_identity = trial.head()?;
+    assert_eq!(
+        assess(archive, &before_identity, &affected)?.result,
+        Some(Standing::Supported)
+    );
+
+    let identity = trial.identity(
+        trial.local_calibration,
+        trial.local_original,
+        "execution",
+        "complete",
+        Status::Pass,
+        8,
+    )?;
+    let head = trial.head()?;
+    let corrected = assess(archive, &head, &trial.measured)?;
+    assert_eq!(corrected.result, Some(Standing::Refuted));
+    assert!(corrected.applicable_notices.contains(&trial.correction));
+    let current = assess(archive, &head, &affected)?;
+    assert_eq!(current.result, Some(Standing::Unresolved));
+    assert!(current.applicable_notices.contains(&trial.correction));
+    assert!(current.checks.iter().any(|check| {
+        check.test == "delegated calibration applicability" && check.status == Status::Unknown
+    }));
+    assert_eq!(
+        assess(archive, &head, &outside)?.result,
+        Some(Standing::Supported)
+    );
+    assert_eq!(
+        assess(archive, &before_identity, &affected)?.result,
+        Some(Standing::Supported)
+    );
+
+    let revised = delegate(archive, &head, &trial.measured, Standing::Refuted)?;
+    assert_eq!(
+        assess(archive, &trial.head()?, &revised)?.result,
+        Some(Standing::Refuted)
+    );
+    // A signed withdrawal of the link also invalidates a receipt that relied on it.
+    let withdrawal = record(
+        archive,
+        Kind::Notice,
+        LOCAL,
+        json!({"action":"withdraw","reason":"corrected equipment register"}),
+        vec![link("target", identity)],
+    )?;
+    fixture::sign(archive, Format::B, withdrawal, LOCAL, "notice", 9)?;
+    assert_eq!(
+        assess(archive, &trial.head()?, &revised)?.result,
+        Some(Standing::Unresolved)
+    );
     Ok(())
 }
