@@ -323,13 +323,19 @@ impl TrainingReview<'_> {
             );
             *historical = Some((receipt_head, snapshot, ReadInventory::for_replay()));
         }
-        let (_, historical, inventory) =
+        let (historical_head, historical, inventory) =
             historical.as_mut().context("missing receipt inventory")?;
         let replay =
             assess_with_inventory(store, historical, &original, &evaluator, inventory)?.receipt;
-        let expected =
-            crate::evaluation::receipt_document(store, historical, &original, &replay, &evaluator)?
-                .encode(Id::blob(PUBLIC))?;
+        let expected = crate::evaluation::receipt_document(
+            store,
+            historical,
+            *historical_head,
+            &original,
+            &replay,
+            &evaluator,
+        )?
+        .encode(Id::blob(PUBLIC))?;
         let endpoints = aliases.endpoints(receipt_id);
         ensure!(
             [Format::A, Format::B]

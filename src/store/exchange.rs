@@ -111,14 +111,18 @@ impl Archive {
         limit: usize,
     ) -> Result<Bundle> {
         ensure!(limit > 0, "positive export page limit required");
-        let mut used = serde_json::to_vec(s)?
-            .len()
-            .checked_mul(3)
-            .context("inventory too large")?;
-        ensure!(
-            used < 200 * 1024 * 1024,
-            "inventory exceeds exchange size limit"
-        );
+        let (head, mut used) = {
+            let manifest = serde_json::to_vec(s)?;
+            let used = manifest
+                .len()
+                .checked_mul(3)
+                .context("inventory too large")?;
+            ensure!(
+                used < 200 * 1024 * 1024,
+                "inventory exceeds exchange size limit"
+            );
+            (Id::blob(&manifest), used)
+        };
         let mut last = None;
         let mut continuation = None;
         let mut examined = 0;
@@ -145,7 +149,7 @@ impl Archive {
             }
         }
         Ok(Bundle {
-            head: s.id()?,
+            head,
             snapshot: s.clone(),
             packets,
             omitted,
