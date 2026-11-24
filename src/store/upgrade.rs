@@ -1,5 +1,5 @@
 //! The flat inventory decoder is confined to migration and immutable historical evidence.
-use super::{Archive, Snapshot};
+use super::{Archive, Snapshot, inventory::bound_parents};
 use crate::wire::Id;
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
@@ -159,7 +159,14 @@ impl Archive {
         let prior_row: i64 =
             self.db
                 .query_row("SELECT coalesce(max(rowid),0) FROM heads", [], |r| r.get(0))?;
-        let next = self.seal_members(&s.source, s.parents.clone(), s.objects.clone())?;
+        let parents = bound_parents(s.parents.clone(), |group| {
+            // Legacy parents can be external pins. Group them without loading their payloads
+            // or adding synthetic inventories to the local search catalog.
+            Ok(self
+                .admit_batch("legacy snapshot ancestry", None, &[], &group, false)?
+                .head)
+        })?;
+        let next = self.seal_members(&s.source, parents, s.objects.clone())?;
         let current = next.id()?;
         let previous = old.to_string();
         let now = current.to_string();
@@ -173,11 +180,7 @@ impl Archive {
              WHERE head=? AND EXISTS(SELECT 1 FROM heads WHERE id=? AND rowid>?)",
             params![now, previous, now, prior_row],
         )?;
-        self.db.execute(
-            "INSERT OR IGNORE INTO releases SELECT ? FROM releases WHERE head=?",
-            params![now, previous],
-        )?;
-        self.db.execute("INSERT OR IGNORE INTO suspended_releases SELECT ? FROM suspended_releases WHERE head=?",params![now,previous])?;
+        self.migrate_release(old, current, &next)?;
         self.db.execute(
             "UPDATE rep_search_selection SET head=? WHERE head=?",
             params![now, previous],
@@ -188,7 +191,6 @@ impl Archive {
         }
         self.db
             .execute("DELETE FROM heads WHERE id=?", [&previous])?;
-        self.index_release_members(current, &next)?;
         if let Some(tx) = tx {
             tx.commit()?
         }

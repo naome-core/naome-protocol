@@ -1,7 +1,7 @@
 //! Complete inventories explicitly released to a configured replication group.
 use super::{
     Archive, Snapshot, insert,
-    inventory::{Page, Pages},
+    inventory::{Page, Pages, bound_parents},
     snapshot::save_imported_head,
 };
 use crate::{
@@ -9,28 +9,42 @@ use crate::{
     wire::{Id, Record},
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Transaction, TransactionBehavior};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const MAX_MANIFEST_PARENTS: usize = 64;
+pub use super::inventory::MAX_MANIFEST_PARENTS;
 pub const CATALOG_PAGE_SIZE: usize = 32;
 pub const MAX_MEMBERS: usize = 512;
 pub const MAX_MEMBER_BYTES: usize = 1024 * 1024;
 pub const MAX_RELEASE_BYTES: usize = 16 * 1024 * 1024;
 
+#[derive(Debug)]
+struct ReleaseLimit(&'static str);
+
+impl std::fmt::Display for ReleaseLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for ReleaseLimit {}
+
 fn charge_page(total: usize, page: &Page) -> Result<usize> {
     let total = total + serde_json::to_vec(page)?.len();
-    ensure!(
-        total <= MAX_RELEASE_BYTES,
-        "release witnesses exceed network limit"
-    );
+    if total > MAX_RELEASE_BYTES {
+        return Err(ReleaseLimit("release witnesses exceed network limit").into());
+    }
     Ok(total)
 }
 
 fn charge_member(total: usize, size: usize) -> Result<usize> {
-    ensure!(size <= MAX_MEMBER_BYTES, "object exceeds network limit");
+    if size > MAX_MEMBER_BYTES {
+        return Err(ReleaseLimit("object exceeds network limit").into());
+    }
     let total = total + size;
-    ensure!(total <= MAX_RELEASE_BYTES, "release exceeds network limit");
+    if total > MAX_RELEASE_BYTES {
+        return Err(ReleaseLimit("release exceeds network limit").into());
+    }
     Ok(total)
 }
 
@@ -219,7 +233,7 @@ impl Archive {
         )?)
     }
 
-    /// Includes historical memberships whose payloads have since been withdrawn.
+    /// Includes historical memberships of releases that no longer qualify for delivery.
     pub fn observed_releases(&self) -> Result<BTreeSet<Id>> {
         self.id_set("SELECT head FROM releases")
     }
@@ -238,13 +252,14 @@ impl Archive {
     pub fn released_manifest(&self, head: Id) -> Result<Snapshot> {
         self.with_read_view(|| {
             self.ensure_released(head)?;
-            self.release_manifest(head)
+            let mut snapshot = self.head(head)?;
+            snapshot.pages = self.release_pages(head, &snapshot)?;
+            Ok(snapshot)
         })
     }
 
-    fn release_manifest(&self, head: Id) -> Result<Snapshot> {
-        let mut snapshot = self.head(head)?;
-        check_manifest(head, &snapshot)?;
+    fn release_pages(&self, head: Id, snapshot: &Snapshot) -> Result<Pages> {
+        check_manifest(head, snapshot)?;
         let mut total = 0;
         let mut proof = Pages::new();
         let mut tree = super::custody::tree::Tree::new(&self.db);
@@ -266,14 +281,13 @@ impl Archive {
             let size = self.size(id)?;
             total = charge_member(total, size)?;
             if id.format().is_none() && size <= 32768 {
-                let bytes = self.resolve(&snapshot, id, "read")?;
+                let bytes = self.resolve(snapshot, id, "read")?;
                 if let Some(m) = super::Manifest::from_packet(id, &bytes) {
                     include(&m, &mut total)?;
                 }
             }
         }
-        snapshot.pages = proof;
-        Ok(snapshot)
+        Ok(proof)
     }
 
     pub fn released_member(&self, head: Id, id: Id) -> Result<Member> {
@@ -302,28 +316,27 @@ impl Archive {
     pub fn release(&self, head: Id) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let head = self.current_head_id(head)?;
-        let snapshot = self.release_manifest(head)?;
+        let snapshot = self.head(head)?;
         self.save(&snapshot)?;
         self.register_release(head, &snapshot)?;
         tx.commit()?;
         Ok(())
     }
 
-    // Called in the same write transaction as admission. The receiver resolves
-    // every ACL against its own archive, including existing local tombstones.
-    pub(super) fn index_release_members(&self, head: Id, s: &Snapshot) -> Result<()> {
-        if self.has_observed_release(head)? {
-            let mut insert = self
-                .db
-                .prepare_cached("INSERT OR IGNORE INTO archive_release_members VALUES(?,?)")?;
-            let head = head.to_string();
-            for id in &s.objects {
-                insert.execute(rusqlite::params![id.to_string(), head])?;
-            }
+    fn index_release_members(&self, head: Id, s: &Snapshot) -> Result<()> {
+        let mut insert = self
+            .db
+            .prepare_cached("INSERT OR IGNORE INTO archive_release_members VALUES(?,?)")?;
+        let head = head.to_string();
+        for id in &s.objects {
+            insert.execute(params![id.to_string(), head])?;
         }
         Ok(())
     }
+
+    // Both local publication and replica admission must be able to serve the complete cut.
     fn register_release(&self, head: Id, s: &Snapshot) -> Result<()> {
+        self.release_pages(head, s)?;
         for &id in &s.objects {
             let bytes = self.resolve(s, id, "read")?;
             if let Some(format) = id.format() {
@@ -350,6 +363,47 @@ impl Archive {
         self.index_release_members(head, s)?;
         Ok(())
     }
+
+    /// Carry historical observations forward under the current delivery limits.
+    pub(super) fn migrate_release(&self, old: Id, head: Id, s: &Snapshot) -> Result<()> {
+        let suspended: Option<bool> = self
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM suspended_releases WHERE head=?1)
+                 FROM releases WHERE head=?1",
+                [old.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(suspended) = suspended else {
+            return Ok(());
+        };
+        let suspend = suspended
+            || match self.release_pages(head, s) {
+                Ok(_) => false,
+                Err(err) if err.is::<ReleaseLimit>() => true,
+                Err(err)
+                    if matches!(
+                        err.downcast_ref::<rusqlite::Error>(),
+                        Some(rusqlite::Error::QueryReturnedNoRows)
+                    ) =>
+                {
+                    true
+                }
+                Err(err) => return Err(err),
+            };
+        self.db.execute(
+            "INSERT OR IGNORE INTO releases(head) VALUES(?)",
+            [head.to_string()],
+        )?;
+        if suspend {
+            self.db.execute(
+                "INSERT OR IGNORE INTO suspended_releases VALUES(?)",
+                [head.to_string()],
+            )?;
+        }
+        self.index_release_members(head, s)
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -369,22 +423,6 @@ impl Archive {
             .id()
     }
 
-    fn review_horizon(&self, mut parents: BTreeSet<Id>) -> Result<Id> {
-        // Compact each sorted layer without discarding the member sets or original heads.
-        while parents.len() > MAX_MANIFEST_PARENTS {
-            let layer: Vec<_> = parents.into_iter().collect();
-            parents = BTreeSet::new();
-            for group in layer.chunks(MAX_MANIFEST_PARENTS) {
-                let head = match group {
-                    [head] => *head,
-                    _ => self.seal_review_union(group.iter().copied().collect())?,
-                };
-                parents.insert(head);
-            }
-        }
-        self.seal_review_union(parents)
-    }
-
     /// Re-evaluate a local standing training request across its original
     /// inventory and the complete releases visible to this custodian.
     pub fn review_releases(
@@ -399,7 +437,8 @@ impl Archive {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let mut parents = self.observed_releases()?;
         parents.insert(request.label_head);
-        let horizon = self.review_horizon(parents)?;
+        let parents = bound_parents(parents, |group| self.seal_review_union(group))?;
+        let horizon = self.seal_review_union(parents)?;
         let mut review = request.clone();
         review.label_head = horizon;
         let extraction = self.training_manifest(&review, Format::A)?;

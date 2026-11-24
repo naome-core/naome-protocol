@@ -230,7 +230,8 @@ fn an_authentic_but_unadmitted_correction_does_not_change_the_judgment() -> Resu
     let case = fixture::seed(&source, Format::A)?;
     let notice = fixture::notice(&source, Format::A, case.calibration, 80, 9)?;
     let s = source.snapshot("other laboratory", [case.published].into())?;
-    replica(&source, &s)?.commit(&dest)?;
+    source.release(s.id()?)?;
+    replica(&source, &source.released_manifest(s.id()?)?)?.commit(&dest)?;
     let result = assess(&dest, &s, &case.queries[2])?;
     assert!(result.visible_notices.contains(&notice));
     assert!(!result.applicable_notices.contains(&notice));
@@ -369,6 +370,9 @@ fn publication_and_replication_charge_the_same_linked_witnesses() -> Result<()> 
     for &id in &sample.objects {
         used += source.resolve(&sample, id, "read")?.len();
     }
+    let mut mirror = Archive::memory()?;
+    mirror.import(&source.export(&linked, "read")?)?;
+
     let remaining = MAX_RELEASE_BYTES - used + 16;
     let exact = select(remaining)?.id()?;
     source.release(exact)?;
@@ -377,8 +381,45 @@ fn publication_and_replication_charge_the_same_linked_witnesses() -> Result<()> 
         receiver.accept(id, source.released_member(exact, id)?)?;
     }
     assert_eq!(receiver.commit(&Archive::memory()?)?, exact);
-    let over = select(remaining + 1)?.id()?;
-    assert!(source.release(over).is_err());
-    assert!(!source.has_observed_release(over)?);
+    let over = select(remaining + 1)?;
+    let over_id = over.id()?;
+    assert!(source.release(over_id).is_err());
+    assert!(!source.has_observed_release(over_id)?);
+    let err = replica(&source, &over)?.commit(&mirror).unwrap_err();
+    assert!(err.to_string().contains("network limit"), "{err}");
+    assert!(!mirror.has_observed_release(over_id)?);
+    assert!(mirror.head(over_id).is_err());
+
+    // A mirror can use verified witnesses already in its archive if they fit the same limit.
+    let exact_snapshot = source.head(exact)?;
+    assert_eq!(replica(&source, &exact_snapshot)?.commit(&mirror)?, exact);
+    assert_eq!(
+        serde_json::to_value(mirror.released_manifest(exact)?)?,
+        serde_json::to_value(source.released_manifest(exact)?)?,
+    );
+    Ok(())
+}
+
+#[test]
+fn replica_with_missing_linked_witnesses_rolls_back_and_can_retry() -> Result<()> {
+    let source = Archive::memory()?;
+    let receiver = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    source.blob(b"historical evidence", public)?;
+    let historical = source.snapshot("historical", Default::default())?;
+    let link = source.deposit_manifest(&historical)?;
+    let selected = source.selected_snapshot("release", Default::default(), [link].into())?;
+    let head = selected.id()?;
+    source.release(head)?;
+
+    let err = replica(&source, &selected)?.commit(&receiver).unwrap_err();
+    assert!(err.to_string().contains("missing inventory page"), "{err}");
+    assert!(!receiver.has_observed_release(head)?);
+    assert!(receiver.head(head).is_err());
+    assert!(receiver.resolve(&selected, link, "read").is_err());
+
+    let complete = source.released_manifest(head)?;
+    assert_eq!(replica(&source, &complete)?.commit(&receiver)?, head);
+    assert_eq!(receiver.released_manifest(head)?, complete);
     Ok(())
 }

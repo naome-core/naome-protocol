@@ -479,3 +479,181 @@ fn continuation_follows_a_rebuilt_full_seal_but_rejects_a_real_fork() -> Result<
     assert!(a.continue_snapshot("local").is_err());
     Ok(())
 }
+
+fn flat_archive(path: &std::path::Path) -> Result<Connection> {
+    let db = Connection::open(path)?;
+    db.execute_batch(
+        "CREATE TABLE objects(id TEXT PRIMARY KEY, data BLOB, access TEXT NOT NULL);
+         CREATE TABLE heads(id TEXT PRIMARY KEY, manifest BLOB NOT NULL);
+         CREATE TABLE releases(head TEXT PRIMARY KEY REFERENCES heads(id));
+         CREATE TABLE suspended_releases(head TEXT PRIMARY KEY REFERENCES releases(head));",
+    )?;
+    for bytes in [PUBLIC, READ_ONLY, naome_protocol::profile::PROFILE] {
+        db.execute(
+            "INSERT INTO objects VALUES(?,?,?)",
+            params![
+                Id::blob(bytes).to_string(),
+                bytes,
+                Id::blob(PUBLIC).to_string()
+            ],
+        )?;
+    }
+    Ok(db)
+}
+
+fn flat_head(
+    db: &Connection,
+    source: &str,
+    parents: &BTreeSet<Id>,
+    objects: &BTreeSet<Id>,
+) -> Result<(Id, Vec<u8>)> {
+    let bytes = format!(
+        r#"{{"version":1,"source":{},"parents":{},"objects":{}}}"#,
+        serde_json::to_string(source)?,
+        serde_json::to_string(parents)?,
+        serde_json::to_string(objects)?,
+    )
+    .into_bytes();
+    let id = Id::blob(&bytes);
+    db.execute(
+        "INSERT INTO heads VALUES(?,?)",
+        params![id.to_string(), &bytes],
+    )?;
+    Ok((id, bytes))
+}
+
+#[test]
+fn migration_preserves_a_flat_review_with_more_than_64_parents() -> Result<()> {
+    use naome_protocol::store::sharing::MAX_MANIFEST_PARENTS;
+
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join("v017.sqlite");
+    let target = dir.path().join("current.sqlite");
+    let old = flat_archive(&source)?;
+    let members = [Id::blob(PUBLIC)].into();
+    let mut parents = BTreeSet::new();
+    for n in 0..=MAX_MANIFEST_PARENTS {
+        let (parent, _) = flat_head(
+            &old,
+            &format!("review origin {n}"),
+            &BTreeSet::new(),
+            &members,
+        )?;
+        parents.insert(parent);
+    }
+    let (review, bytes) = flat_head(&old, "local replica review", &parents, &members)?;
+    drop(old);
+
+    Archive::migrate_archive_file(&source, &target)?;
+    let archive = Archive::open(&target)?;
+    let historical = archive.head(review)?;
+    assert_eq!(historical.parents, parents);
+    assert_eq!(historical.objects, members);
+    let pin = archive.deposit_manifest(&historical)?;
+    assert_eq!(pin, review);
+    let current = archive.current_head_id(review)?;
+    assert_ne!(current, review);
+    assert_eq!(archive.head(current)?.objects, members);
+    let mut origins = BTreeSet::new();
+    let mut pending = vec![current];
+    while let Some(head) = pending.pop() {
+        if parents.contains(&head) {
+            origins.insert(head);
+        } else {
+            let node = archive.head(head)?;
+            assert!((1..=MAX_MANIFEST_PARENTS).contains(&node.parents.len()));
+            pending.extend(&node.parents);
+        }
+    }
+    assert_eq!(origins, parents);
+    let sql = Connection::open(&target)?;
+    assert_eq!(
+        sql.query_row(
+            "SELECT manifest FROM archive_historical WHERE id=?",
+            [review.to_string()],
+            |r| r.get::<_, Vec<u8>>(0)
+        )?,
+        bytes
+    );
+    Ok(())
+}
+
+#[test]
+fn migration_keeps_legacy_release_history_and_catalogs_only_servable_heads() -> Result<()> {
+    use naome_protocol::store::sharing::{MAX_MEMBER_BYTES, MAX_RELEASE_BYTES};
+
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join("v017.sqlite");
+    let target = dir.path().join("current.sqlite");
+    let old = flat_archive(&source)?;
+    let public = Id::blob(PUBLIC);
+    let mut members = BTreeSet::from([public]);
+    let mut uncharged = MAX_RELEASE_BYTES - PUBLIC.len();
+    for n in 0_u8..16 {
+        let bytes = vec![n; uncharged.min(MAX_MEMBER_BYTES)];
+        let id = Id::blob(&bytes);
+        old.execute(
+            "INSERT INTO objects VALUES(?,?,?)",
+            params![id.to_string(), &bytes, public.to_string()],
+        )?;
+        uncharged -= bytes.len();
+        members.insert(id);
+    }
+    assert_eq!(uncharged, 0);
+    let (large, _) = flat_head(&old, "old release at the limit", &BTreeSet::new(), &members)?;
+    let (small, _) = flat_head(
+        &old,
+        "old release within the limit",
+        &BTreeSet::new(),
+        &[public].into(),
+    )?;
+    let withdrawn = Id::blob(b"withdrawn legacy member");
+    old.execute(
+        "INSERT INTO objects VALUES(?,NULL,?)",
+        params![withdrawn.to_string(), public.to_string()],
+    )?;
+    let (suspended, _) = flat_head(
+        &old,
+        "old suspended release",
+        &BTreeSet::new(),
+        &[public, withdrawn].into(),
+    )?;
+    for head in [large, small, suspended] {
+        old.execute("INSERT INTO releases VALUES(?)", [head.to_string()])?;
+    }
+    old.execute(
+        "INSERT INTO suspended_releases VALUES(?)",
+        [suspended.to_string()],
+    )?;
+    drop(old);
+
+    Archive::migrate_archive_file(&source, &target)?;
+    let archive = Archive::open(&target)?;
+    let current_large = archive.current_head_id(large)?;
+    let current_small = archive.current_head_id(small)?;
+    let current_suspended = archive.current_head_id(suspended)?;
+    assert_eq!(archive.head(large)?.objects, members);
+    assert_eq!(archive.head(current_large)?.objects, members);
+    assert_eq!(
+        archive.observed_releases()?,
+        [current_large, current_small, current_suspended].into()
+    );
+    assert_eq!(archive.releases()?, [current_small].into());
+    assert_eq!(archive.catalog_state()?.available, 1);
+    assert_eq!(archive.release_page(None)?.heads, vec![current_small]);
+    assert_eq!(
+        archive
+            .announcements_after(0)?
+            .into_iter()
+            .map(|(_, head)| head)
+            .collect::<Vec<_>>(),
+        vec![current_small]
+    );
+    assert_eq!(
+        archive.released_manifest(current_small)?.id()?,
+        current_small
+    );
+    assert!(archive.released_manifest(current_large).is_err());
+    assert!(archive.release(large).is_err());
+    Ok(())
+}

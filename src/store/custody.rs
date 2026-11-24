@@ -163,7 +163,7 @@ impl Archive {
                 && source.len() <= 256
                 && items.len() <= MEMBERS
                 && (!items.is_empty() || !bootstrap_members)
-                && origins.len() <= 64,
+                && origins.len() <= super::inventory::MAX_MANIFEST_PARENTS,
             "invalid source or batch size"
         );
         let previous = parent.map(|id| self.custody_head(id)).transpose()?;

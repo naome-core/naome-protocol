@@ -5,6 +5,27 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub const MAX_MANIFEST_PARENTS: usize = 64;
+
+/// Seal groups of declared parents until they fit in one manifest.
+pub(super) fn bound_parents(
+    mut parents: BTreeSet<Id>,
+    mut seal_group: impl FnMut(BTreeSet<Id>) -> Result<Id>,
+) -> Result<BTreeSet<Id>> {
+    while parents.len() > MAX_MANIFEST_PARENTS {
+        let layer: Vec<_> = parents.into_iter().collect();
+        parents = BTreeSet::new();
+        for group in layer.chunks(MAX_MANIFEST_PARENTS) {
+            let head = match group {
+                [head] => *head,
+                _ => seal_group(group.iter().copied().collect())?,
+            };
+            parents.insert(head);
+        }
+    }
+    Ok(parents)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -34,7 +55,7 @@ impl Manifest {
         ensure!(
             !self.source.is_empty()
                 && self.source.len() <= 256
-                && self.parents.len() <= 64
+                && self.parents.len() <= MAX_MANIFEST_PARENTS
                 && self.inventory.blob_digest().is_some()
                 && self.custody.blob_digest().is_some()
                 && self.id()? == id,
