@@ -124,13 +124,16 @@ fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
         &db,
         include_bytes!("../fixtures/search-upgrade-v0.1.2.sqlite"),
     )?;
-    let run = |args: &[&str]| -> Result<serde_json::Value> {
-        let output = Command::new(env!("CARGO_BIN_EXE_nao"))
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_nao"))
             .arg("--db")
             .arg(&db)
             .args(args)
             .env_remove("NAOME_SEARCH_MODEL")
-            .output()?;
+            .output()
+    };
+    let run = |args: &[&str]| -> Result<serde_json::Value> {
+        let output = invoke(args)?;
         anyhow::ensure!(
             output.status.success(),
             "{}",
@@ -138,13 +141,14 @@ fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
         );
         Ok(serde_json::from_slice(&output.stdout)?)
     };
+    let original = fs::read(&db)?;
+    let read = invoke(&["heads"])?;
+    assert!(!read.status.success());
+    assert!(String::from_utf8(read.stderr)?.contains("nao migrate-archive"));
+    assert_eq!(fs::read(&db)?, original);
+    run(&["init"])?;
     assert_eq!(run(&["heads"])?, json!([MIGRATED_V012_HEAD]));
-    let unsupported = Command::new(env!("CARGO_BIN_EXE_nao"))
-        .arg("--db")
-        .arg(&db)
-        .args(["find", "anything", "--mode", "hybrid"])
-        .env_remove("NAOME_SEARCH_MODEL")
-        .output()?;
+    let unsupported = invoke(&["find", "anything", "--mode", "hybrid"])?;
     assert!(!unsupported.status.success());
     let report = run(&["find", "interferometer drift"])?;
     assert_eq!(report["head"], MIGRATED_V012_HEAD);
