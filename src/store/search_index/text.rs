@@ -82,7 +82,9 @@ impl Archive {
     ) -> Result<(Vec<Passage>, usize, bool)> {
         let document = self.read(snapshot, object, "read")?;
         let end = (cursor + TEXT_WINDOW).min(length);
-        let bytes = chunk.read_span(self, snapshot, &document, cursor..end)?;
+        let bytes = chunk.read_span(&document, cursor..end, |id| {
+            self.resolve(snapshot, id, "read")
+        })?;
         let text = match std::str::from_utf8(&bytes) {
             Ok(text) => text,
             Err(error) if end < length && error.error_len().is_none() => {
@@ -121,10 +123,9 @@ impl VerifiedTextChunk {
     /// materialize. Resolve overlapping chunks on first use at this revision.
     pub(super) fn read_span(
         &mut self,
-        archive: &Archive,
-        snapshot: &Snapshot,
         document: &Document,
         range: Range<usize>,
+        mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
     ) -> Result<Vec<u8>> {
         ensure!(
             range.start < range.end && range.end as u64 <= document.field::<u64>("length")?,
@@ -144,7 +145,7 @@ impl VerifiedTextChunk {
             }
             if self.id != Some(link.target) {
                 *self = Self::default();
-                self.bytes = archive.resolve(snapshot, link.target, "read")?;
+                self.bytes = resolve(link.target)?;
                 self.id = Some(link.target);
             }
             let start = range.start.saturating_sub(offset);

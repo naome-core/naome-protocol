@@ -85,6 +85,38 @@ impl Head {
         })
     }
 }
+
+/// A verified inventory and its complete reverse index for declared record links.
+pub(crate) struct BacklinkIndex<'a> {
+    archive: &'a Archive,
+    manifest: super::Manifest,
+    root: Id,
+    tree: Tree<'a>,
+}
+
+impl BacklinkIndex<'_> {
+    pub(crate) fn candidates(&mut self, target: Id, limit: usize) -> Result<Vec<Id>> {
+        let mut found = Vec::new();
+        self.tree
+            .prefix(self.root, &format!("r/{target}/"), limit, &mut found)?;
+        Ok(found)
+    }
+
+    pub(crate) fn read(&mut self, id: Id) -> Result<Document> {
+        self.archive.read_with(id, |id| {
+            Ok(self
+                .archive
+                .resolve_member_in(&self.manifest, id, "read", &mut self.tree)?
+                .0)
+        })
+    }
+
+    pub(crate) fn readable(&mut self, id: Id) -> Result<()> {
+        self.archive.readable_with(id, |key| {
+            Ok(self.tree.get(self.manifest.inventory, &key.to_string())? == Some(key))
+        })
+    }
+}
 #[derive(Serialize)]
 pub struct Admission {
     pub head: Id,
@@ -120,6 +152,21 @@ impl Archive {
     pub fn custody_head(&self, id: Id) -> Result<Head> {
         self.custody_head_if_present(id)?
             .context("unadmitted paged head")
+    }
+
+    pub(crate) fn backlink_index(&self, head: Id) -> Result<Option<BacklinkIndex<'_>>> {
+        let Some(proof) = self
+            .custody_head_if_present(head)?
+            .filter(|proof| proof.opaque == 0)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(BacklinkIndex {
+            archive: self,
+            manifest: proof.manifest()?,
+            root: proof.tree,
+            tree: Tree::new(&self.db),
+        }))
     }
     pub(super) fn custody_head_if_present(&self, id: Id) -> Result<Option<Head>> {
         self.custody_head_data(id)?

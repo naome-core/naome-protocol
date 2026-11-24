@@ -239,7 +239,16 @@ impl Archive {
         id: Id,
         encoding: ManifestEncoding,
     ) -> Result<Snapshot> {
-        let mut s = encoding.decode(id, &self.resolve(view, id, "read")?)?;
+        self.load_snapshot_packet(id, &self.resolve(view, id, "read")?, encoding)
+    }
+
+    fn load_snapshot_packet(
+        &self,
+        id: Id,
+        bytes: &[u8],
+        encoding: ManifestEncoding,
+    ) -> Result<Snapshot> {
+        let mut s = encoding.decode(id, bytes)?;
         s.load_pages(&self.db)?;
         Ok(s)
     }
@@ -335,6 +344,11 @@ impl Archive {
     }
     /// Continue one explicitly requested full lineage. Resolve the tip and seal under one lock.
     pub fn continue_snapshot(&self, source: &str) -> Result<Id> {
+        self.continue_local_tip(Some(source))
+    }
+
+    /// Continue a full local tip, inferring the source when only one is eligible.
+    pub fn continue_local_tip(&self, source: Option<&str>) -> Result<Id> {
         let tx = rusqlite::Transaction::new_unchecked(
             &self.db,
             rusqlite::TransactionBehavior::Immediate,
@@ -342,22 +356,25 @@ impl Archive {
         // A withdrawal may rebuild the custody tree. Full seal parents still identify
         // the tips it continued even when the physical ancestry had to be rebuilt.
         let mut query = self.db.prepare(
-            "SELECT t.head,s.high_water,s.epoch FROM custody_tips t
+            "SELECT t.head,s.high_water,s.epoch,t.source FROM custody_tips t
              LEFT JOIN archive_seals s ON s.id=t.head
-             WHERE t.source=?1 AND t.head NOT IN (
+             WHERE (?1 IS NULL OR t.source=?1) AND t.head NOT IN (
                  SELECT p.value FROM archive_seals parent, json_each(parent.parents) p
-                 WHERE parent.source=?1
+                 WHERE parent.source=t.source
              )",
         )?;
         let mut rows = query.query([source])?;
         let mut full = None;
-        let ambiguity =
-            "continuation requires exactly one full local tip; select --parent explicitly";
+        let ambiguity = if source.is_some() {
+            "continuation requires exactly one full local tip; select --parent explicitly"
+        } else {
+            "continuation requires exactly one full local tip; specify the source or --parent"
+        };
         while let Some(row) = rows.next()? {
             let id: Id = row.get::<_, String>(0)?.parse()?;
             if let Some(water) = row.get::<_, Option<i64>>(1)? {
                 ensure!(full.is_none(), "{ambiguity}");
-                full = Some((id, water, row.get::<_, i64>(2)?));
+                full = Some((id, water, row.get::<_, i64>(2)?, row.get::<_, String>(3)?));
             } else {
                 let tip = self.custody_head(id)?;
                 // Selected cuts build a new tree. Explicit custody appends bootstrap a
@@ -370,11 +387,11 @@ impl Archive {
             }
         }
         drop(rows);
-        let (parent, water, epoch) = full.context(ambiguity)?;
+        let (parent, water, epoch, source) = full.context(ambiguity)?;
         let head = if (water, epoch) == self.archive_revision()? {
             parent
         } else {
-            self.snapshot_id(source, [parent].into())?
+            self.snapshot_id(&source, [parent].into())?
         };
         tx.commit()?;
         Ok(head)
@@ -697,5 +714,9 @@ impl Archive {
             "receipt inventory outside the selected horizon"
         );
         Ok(snapshot)
+    }
+
+    pub(crate) fn local_receipt_horizon(&self, id: Id) -> Result<Snapshot> {
+        self.load_snapshot_packet(id, &self.resolve_local(id)?, ManifestEncoding::Canonical)
     }
 }

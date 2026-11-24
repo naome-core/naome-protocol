@@ -335,10 +335,9 @@ impl Archive {
     }
 
     pub(super) fn search_snippet(
-        &self,
-        snapshot: &Snapshot,
         document: &Document,
         location: &SearchLocation,
+        resolve: impl FnMut(Id) -> Result<Vec<u8>>,
     ) -> Result<Option<String>> {
         Ok(match location {
             SearchLocation::Object | SearchLocation::Media { .. } => None,
@@ -354,12 +353,8 @@ impl Archive {
                     .and_then(|text| text.get(*start..*end).map(str::to_owned))
             }
             SearchLocation::Payload { start, end } => {
-                let bytes = VerifiedTextChunk::default().read_span(
-                    self,
-                    snapshot,
-                    document,
-                    *start..*end,
-                )?;
+                let bytes =
+                    VerifiedTextChunk::default().read_span(document, *start..*end, resolve)?;
                 Some(String::from_utf8(bytes)?)
             }
         })

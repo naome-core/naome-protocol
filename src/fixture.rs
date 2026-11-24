@@ -228,7 +228,7 @@ fn seed_measurements(store: &Archive, f: Format, legacy: bool) -> Result<Investi
     let mut labels = vec![];
     for q in &queries {
         let receipt = assess_for_evaluator(store, &s, q, FIXTURE_EVALUATOR_ID)?;
-        let id = deposit_receipt_for_evaluator(store, &s, q, &receipt, f, evaluator)?;
+        let id = deposit_receipt_for_evaluator(store, &s, q, &receipt, f, evaluator, None)?;
         sign(store, f, id, SCOPE, "assessor", 4)?;
         receipts.push(id);
         let receipt_head = store.snapshot("East receipts", [s0].into())?;
@@ -254,7 +254,7 @@ fn seed_measurements(store: &Archive, f: Format, legacy: bool) -> Result<Investi
         result.result == Some(Standing::Supported),
         "control readback mismatch"
     );
-    let id = deposit_receipt_for_evaluator(store, &s, &control_query, &result, f, evaluator)?;
+    let id = deposit_receipt_for_evaluator(store, &s, &control_query, &result, f, evaluator, None)?;
     let control_label = store.label(
         &store.snapshot("control readback", [s0].into())?,
         id,

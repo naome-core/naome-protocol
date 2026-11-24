@@ -24,7 +24,7 @@ pub struct QuestionArguments {
     /// Use this snapshot instead of the active search snapshot.
     #[arg(long)]
     pub(super) head: Option<Id>,
-    /// Maximum records to inspect for relationships, within the 64 MiB scan budget.
+    /// Maximum record and relationship candidates to inspect, within a 64 MiB read budget.
     #[arg(long, default_value_t = 1000)]
     pub(super) budget: usize,
 }
@@ -32,7 +32,7 @@ pub struct QuestionArguments {
 #[derive(Args)]
 pub struct ReplayArguments {
     pub(super) receipt: Id,
-    /// Search for the receipt in this snapshot. Defaults to the active search snapshot.
+    /// Restrict replay to this snapshot. By default, read the receipt directly from the archive.
     #[arg(long)]
     pub(super) head: Option<Id>,
 }

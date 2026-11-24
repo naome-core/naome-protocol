@@ -245,7 +245,6 @@ impl LocalSearch {
         if let Some(id) = input.exact_id() {
             return archive.find_id(args.head, id, options);
         }
-        let snapshot = archive.search_head(args.head)?;
         let model = if mode == SearchMode::Lexical {
             None
         } else {
@@ -262,7 +261,7 @@ impl LocalSearch {
         } else {
             IndexPreparation::Lexical
         };
-        archive.lookup_search(&snapshot, input, options, model, preparation)
+        archive.find_selected(args.head, input, options, model, preparation)
     }
 
     /// Serve one typed search request and response per JSON line.

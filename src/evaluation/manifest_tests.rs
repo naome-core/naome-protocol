@@ -60,7 +60,7 @@ fn record_budget_suffix_keeps_the_previous_receipt_replayable() -> Result<()> {
     q.budget = 2;
     let old = "rep-rust-rules-6";
     let transcript = assess_for_evaluator(&a, &s, &q, old)?;
-    let id = super::deposit_receipt_for_evaluator(&a, &s, &q, &transcript, Format::A, old)?;
+    let id = super::deposit_receipt_for_evaluator(&a, &s, &q, &transcript, Format::A, old, None)?;
     // Exact receipt returned by the preceding packaged executable, commit 3aabddd.
     assert_eq!(
         id.to_string(),

@@ -22,8 +22,11 @@ pub struct Migration {
 fn rewrite(mut r: Record, pairs: &BTreeMap<Id, Id>) -> Result<Record> {
     let doc = Document::decode(&r)?;
     for (e, l) in r.edges.iter_mut().zip(&doc.inputs) {
-        // Detached attestations and historic inventories continue to name the original bytes.
-        if doc.kind == Kind::Attestation && l.role == "signed-original" {
+        // Historical provenance continues to name the original bytes.
+        if matches!(
+            (doc.kind, l.role.as_str()),
+            (Kind::Attestation, "signed-original") | (Kind::Assessment, "reassessed-from")
+        ) {
             continue;
         }
         if let Some(id) = pairs.get(&e.target) {

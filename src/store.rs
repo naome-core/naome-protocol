@@ -223,6 +223,12 @@ impl Archive {
         self.resolve_with(s, id, |policy| allows(policy, purpose))
             .map(|(bytes, _)| bytes)
     }
+
+    pub(crate) fn resolve_local(&self, id: Id) -> Result<Vec<u8>> {
+        let (bytes, access) = self.raw(id)?.context("unavailable")?;
+        self.check_access(access, |policy| allows(policy, "read"))?;
+        Ok(bytes)
+    }
     pub(crate) fn resolve_for_training(
         &self,
         s: &Snapshot,
@@ -246,14 +252,18 @@ impl Archive {
     }
     /// Check presence and read permission without materializing the payload.
     pub(crate) fn readable(&self, s: &Snapshot, id: Id) -> Result<()> {
-        ensure!(s.objects.contains(&id), "outside snapshot");
+        self.readable_with(id, |key| Ok(s.objects.contains(&key)))
+    }
+
+    fn readable_with(&self, id: Id, mut contains: impl FnMut(Id) -> Result<bool>) -> Result<()> {
+        ensure!(contains(id)?, "outside snapshot");
         let acl: String = self.db.query_row(
             "SELECT access FROM objects WHERE id = ?1 AND data IS NOT NULL",
             [id.to_string()],
             |row| row.get(0),
         )?;
         let acl = acl.parse()?;
-        ensure!(s.objects.contains(&acl), "missing access descriptor");
+        ensure!(contains(acl)?, "missing access descriptor");
         self.check_access(acl, |policy| crate::profile::allows(policy, "read"))
     }
     pub(crate) fn check_access(&self, acl: Id, allows: impl FnOnce(&[u8]) -> bool) -> Result<()> {

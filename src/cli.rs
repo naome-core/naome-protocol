@@ -11,7 +11,7 @@ use crate::{
     store::{Archive, Bundle},
     wire::{Format, Id, MAX_BYTES, Record},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 use ed25519_dalek::SigningKey;
 use serde::{Serialize, de::DeserializeOwned};
@@ -109,10 +109,11 @@ pub enum ArchiveCommand {
     },
     /// Seal the local inventory, or the readable dependencies of selected roots.
     Snapshot {
-        source: String,
+        #[arg(required_unless_present = "continue_tip")]
+        source: Option<String>,
         #[arg(long)]
         parent: Vec<Id>,
-        /// Continue the sole full local tip for this source, retaining its history.
+        /// Continue the sole full local tip, inferring the source if omitted.
         #[arg(long = "continue", conflicts_with_all = ["parent", "root"])]
         continue_tip: bool,
         /// Select an object and its transitive inputs. Repeat for multiple roots.
@@ -136,7 +137,7 @@ pub enum ArchiveCommand {
         #[arg(long, default_value = "read")]
         purpose: String,
     },
-    /// Discover typed records within a bounded inventory page.
+    /// List typed records by kind, subject or scope within a bounded inventory page.
     #[command(visible_alias = "search")]
     Discover {
         head: Id,
@@ -151,7 +152,7 @@ pub enum ArchiveCommand {
         #[arg(long, default_value_t = 100)]
         budget: usize,
     },
-    /// Search authorized archive records and text passages by word or meaning.
+    /// Find authorized content by exact ID, words or meaning.
     Find(DeferredArgs<FindArguments>),
     /// Show or pin the active search snapshot.
     SearchHead {
@@ -523,12 +524,15 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             let db = open()?;
             let parents = parent.into_iter().collect();
             let head = if continue_tip {
-                db.continue_snapshot(&source)?
-            } else if root.is_empty() {
-                db.snapshot_id(&source, parents)?
+                db.continue_local_tip(source.as_deref())?
             } else {
-                db.selected_snapshot(&source, parents, root.into_iter().collect())?
-                    .id()?
+                let source = source.as_deref().context("snapshot source is required")?;
+                if root.is_empty() {
+                    db.snapshot_id(source, parents)?
+                } else {
+                    db.selected_snapshot(source, parents, root.into_iter().collect())?
+                        .id()?
+                }
             };
             print(head)
         }
@@ -541,7 +545,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             budget,
         })) => {
             let db = reader()?;
-            print(db.question_view(&db.search_head(head)?, id, budget)?)
+            print(db.question_at(head, id, budget)?)
         }
         ArchiveCommand::Resolve {
             head,
@@ -629,7 +633,10 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         }
         ArchiveCommand::Replay(DeferredArgs(research::ReplayArguments { receipt, head })) => {
             let db = reader()?;
-            print(db.replay_assessment(&db.search_head(head)?, receipt)?)
+            print(match head {
+                Some(head) => db.replay_assessment(&db.search_head(Some(head))?, receipt)?,
+                None => db.replay_local_assessment(receipt)?,
+            })
         }
         ArchiveCommand::Reassess(DeferredArgs(research::ReassessArguments {
             receipt,

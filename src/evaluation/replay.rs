@@ -1,6 +1,6 @@
 use super::{
     EVALUATOR_ID, Query, ReadInventory, Receipt, Standing, assess_with_inventory,
-    default_byte_limit, deposit_receipt, manifest_encoding, receipt_document,
+    default_byte_limit, deposit_receipt_for_evaluator, manifest_encoding, receipt_document,
 };
 use crate::{
     migration::Equivalence,
@@ -54,6 +54,7 @@ pub(crate) fn rebuild_receipt(
     pinned_head: Id,
     query: &Query,
     evaluator: &str,
+    recorded: &Document,
     inventory: &mut ReadInventory,
 ) -> Result<RebuiltReceipt> {
     ensure!(
@@ -65,8 +66,28 @@ pub(crate) fn rebuild_receipt(
         "receipt horizon differs from the pinned head"
     );
     let receipt = assess_with_inventory(store, historical, query, evaluator, inventory)?.receipt;
-    let expected = receipt_document(store, historical, pinned_head, query, &receipt, evaluator)?
-        .encode(Id::blob(PUBLIC))?;
+    let predecessor = recorded
+        .roles("reassessed-from")
+        .next()
+        .map(|_| recorded.one("reassessed-from"))
+        .transpose()?;
+    if let Some(predecessor) = predecessor {
+        let prior = saved_assessment(store, historical, predecessor)?;
+        ensure!(
+            prior.field::<Query>("original_query")?.target == query.target,
+            "reassessment predecessor covers another target"
+        );
+    }
+    let expected = receipt_document(
+        store,
+        historical,
+        pinned_head,
+        query,
+        &receipt,
+        evaluator,
+        predecessor,
+    )?
+    .encode(Id::blob(PUBLIC))?;
     let identities =
         [Format::A, Format::B].map(|format| Id::record(format, &expected.encode(format)));
     Ok(RebuiltReceipt {
@@ -76,7 +97,10 @@ pub(crate) fn rebuild_receipt(
 }
 
 fn saved_assessment(archive: &Archive, view: &Snapshot, receipt: Id) -> Result<Document> {
-    let document = archive.read(view, receipt, "read")?;
+    assessment_document(archive.read(view, receipt, "read")?)
+}
+
+fn assessment_document(document: Document) -> Result<Document> {
     ensure!(
         document.kind == Kind::Assessment,
         "expected an assessment receipt"
@@ -87,16 +111,31 @@ fn saved_assessment(archive: &Archive, view: &Snapshot, receipt: Id) -> Result<D
 impl Archive {
     /// Re-run the recorded evaluator on the original evidence horizon without storing anything.
     pub fn replay_assessment(&self, view: &Snapshot, id: Id) -> Result<ReceiptReplay> {
+        self.replay_receipt(Some(view), id)
+    }
+
+    /// Replay an authorized local receipt directly, including before the next snapshot.
+    pub fn replay_local_assessment(&self, id: Id) -> Result<ReceiptReplay> {
+        self.replay_receipt(None, id)
+    }
+
+    fn replay_receipt(&self, view: Option<&Snapshot>, id: Id) -> Result<ReceiptReplay> {
         self.with_read_view(|| {
-            let recorded = saved_assessment(self, view, id)?;
+            let recorded = match view {
+                Some(view) => saved_assessment(self, view, id)?,
+                None => assessment_document(self.read_with(id, |key| self.resolve_local(key))?)?,
+            };
             let evaluator: String = recorded.field("evaluator")?;
             let query = recorded.field("original_query")?;
             let head = recorded.one("snapshot")?;
-            let historical = self.receipt_horizon(view, head)?;
+            let historical = match view {
+                Some(view) => self.receipt_horizon(view, head)?,
+                None => self.local_receipt_horizon(head)?,
+            };
             let mut aliases = Equivalence::default();
             for mapping in recorded.roles("mapping") {
                 aliases.add(self.verify_mapping_with(
-                    view,
+                    view.unwrap_or(&historical),
                     mapping,
                     manifest_encoding(&evaluator)?,
                 )?);
@@ -107,6 +146,7 @@ impl Archive {
                 head,
                 &query,
                 &evaluator,
+                &recorded,
                 &mut ReadInventory::for_replay(),
             )?;
             Ok(ReceiptReplay {
@@ -139,12 +179,17 @@ impl Archive {
                 query.arguments.push(argument);
             }
         }
-        if !query.previous_receipts.contains(&previous) {
-            query.previous_receipts.push(previous);
-        }
         query.current_at = current_at.or(query.current_at);
         let receipt = super::assess_for_evaluator(self, &view, &query, EVALUATOR_ID)?;
-        let id = deposit_receipt(self, &view, &query, &receipt, format)?;
+        let id = deposit_receipt_for_evaluator(
+            self,
+            &view,
+            &query,
+            &receipt,
+            format,
+            EVALUATOR_ID,
+            Some(previous),
+        )?;
         let result = Reassessment {
             previous,
             previous_head: recorded.one("snapshot")?,

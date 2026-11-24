@@ -840,7 +840,7 @@ pub fn deposit_receipt(
     r: &Receipt,
     f: Format,
 ) -> Result<Id> {
-    deposit_receipt_for_evaluator(store, s, q, r, f, EVALUATOR_ID)
+    deposit_receipt_for_evaluator(store, s, q, r, f, EVALUATOR_ID, None)
 }
 pub(crate) fn deposit_receipt_for_evaluator(
     store: &Archive,
@@ -849,10 +849,11 @@ pub(crate) fn deposit_receipt_for_evaluator(
     r: &Receipt,
     f: Format,
     evaluator: &str,
+    predecessor: Option<Id>,
 ) -> Result<Id> {
     let snapshot_id = store.deposit_manifest(s)?;
     store.document(
-        &receipt_document(store, s, snapshot_id, q, r, evaluator)?,
+        &receipt_document(store, s, snapshot_id, q, r, evaluator, predecessor)?,
         f,
         Id::blob(PUBLIC),
     )
@@ -864,6 +865,7 @@ pub(crate) fn receipt_document(
     q: &Query,
     r: &Receipt,
     evaluator: &str,
+    predecessor: Option<Id>,
 ) -> Result<Document> {
     let mut edges = vec![
         link("claim", q.target),
@@ -885,6 +887,7 @@ pub(crate) fn receipt_document(
             .iter()
             .map(|id| link("previous-receipt", *id)),
     );
+    edges.extend(predecessor.map(|id| link("reassessed-from", id)));
     edges.extend(q.mappings.iter().map(|x| link("mapping", *x)));
     edges.extend(
         q.required_notices

@@ -349,6 +349,7 @@ impl TrainingReview<'_> {
             *historical_head,
             &original,
             &evaluator,
+            &receipt,
             inventory,
         )?;
         ensure!(

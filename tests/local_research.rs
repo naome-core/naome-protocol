@@ -27,7 +27,7 @@ fn run(archive: &Path, cwd: &Path, args: &[&str]) -> Result<Value> {
     let output = invoke(archive, cwd, args)?;
     ensure!(
         output.status.success(),
-        "{}",
+        "{args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(serde_json::from_slice(&output.stdout)?)
@@ -82,7 +82,7 @@ fn one_archive_reports_pending_work_and_continues_the_full_snapshot() -> Result<
         )?["hits"],
         json!([])
     );
-    let next = run(&archive, &other, &["snapshot", "research", "--continue"])?;
+    let next = run(&archive, &other, &["snapshot", "--continue"])?;
     assert_ne!(next, first);
     assert_eq!(
         run(&archive, &other, &["find", identifier(&revised)])?["hits"][0]["id"],
@@ -105,6 +105,17 @@ fn one_archive_reports_pending_work_and_continues_the_full_snapshot() -> Result<
     );
     assert_eq!(explicit_path.file_name().unwrap(), "other.sqlite");
     assert_eq!(explicit["archive"], Value::Null);
+    run(&archive, root, &["snapshot", "other research"])?;
+    let before = fs::read(&archive)?;
+    let ambiguous = invoke(&archive, root, &["snapshot", "--continue"])?;
+    assert!(!ambiguous.status.success());
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("exactly one full local tip"));
+    assert_eq!(fs::read(&archive)?, before);
+    assert_eq!(
+        run(&archive, root, &["snapshot", "research", "--continue"])?,
+        next
+    );
+    assert!(!invoke(&archive, root, &["snapshot"])?.status.success());
     Ok(())
 }
 
@@ -196,9 +207,23 @@ fn linked_capture_recovers_a_question_and_its_declared_evidence() -> Result<()> 
         root,
         &["assess", identifier(&first), "query.json"],
     )?;
+    let receipt = identifier(&assessment["id"]);
+    let before = fs::read(&archive)?;
+    assert_eq!(run(&archive, root, &["replay", receipt])?["matches"], true);
+    assert!(
+        !invoke(
+            &archive,
+            root,
+            &["replay", receipt, "--head", identifier(&first)]
+        )?
+        .status
+        .success()
+    );
+    assert_eq!(fs::read(&archive)?, before);
     let head = run(&archive, root, &["snapshot", "research", "--continue"])?;
 
-    let overview = run(&archive, root, &["question", identifier(&question)])?;
+    let question_args = ["question", identifier(&question), "--budget", "16"];
+    let overview = run(&archive, root, &question_args)?;
     assert_eq!(overview["head"], head);
     assert_eq!(overview["limited_coverage"], false);
     let records = overview["records"].as_array().unwrap();
@@ -219,7 +244,49 @@ fn linked_capture_recovers_a_question_and_its_declared_evidence() -> Result<()> 
         &["question", identifier(&question), "--budget", "1"],
     )?;
     assert_eq!(limited["limited_coverage"], true);
+    assert!(limited["unscanned_records_from"].is_null());
+
+    let store = Archive::open(&archive)?;
+    for index in 0..128 {
+        store.document(
+            &Document::new(
+                Kind::Question,
+                "unrelated",
+                "separate study",
+                json!({"statement":format!("Independent question {index}")}),
+                vec![],
+            )?,
+            Format::A,
+            Id::blob(PUBLIC),
+        )?;
+    }
+    drop(store);
+    let expanded = run(&archive, root, &["snapshot", "--continue"])?;
+    let expanded_overview = run(&archive, root, &question_args)?;
+    assert_eq!(expanded_overview["head"], expanded);
+    assert_eq!(expanded_overview["records"], overview["records"]);
+    assert_eq!(expanded_overview["limited_coverage"], false);
+
+    let store = Archive::open(&archive)?;
+    store.document(
+        &Document::new(
+            Kind::Mapping,
+            "unrelated mapping",
+            "separate study",
+            json!({}),
+            vec![],
+        )?,
+        Format::A,
+        Id::blob(PUBLIC),
+    )?;
+    drop(store);
+    run(&archive, root, &["snapshot", "--continue"])?;
+    let limited = run(&archive, root, &question_args)?;
+    assert_eq!(limited["limited_coverage"], true);
     assert!(limited["unscanned_records_from"].is_string());
+    let fallback = run(&archive, root, &["question", identifier(&question)])?;
+    assert_eq!(fallback["records"], overview["records"]);
+    assert_eq!(fallback["limited_coverage"], false);
 
     fs::write(root.join("failed.txt"), "Do not deposit this file")?;
     let before = fs::read(&archive)?;
@@ -315,6 +382,7 @@ fn replay_uses_the_saved_evaluator_and_reassessment_records_changed_standing() -
     let root = temporary.path();
     let path: PathBuf = root.join("archive.sqlite");
     let archive = Archive::open(&path)?;
+    let unrelated = archive.blob(b"unrelated observation", Id::blob(PUBLIC))?;
     let case = fixture::seed(&archive, Format::A)?;
     fixture::notice(&archive, Format::A, case.calibration, 80, 1)?;
     let corrected = archive.snapshot_id("local review", [case.published].into())?;
@@ -335,6 +403,10 @@ fn replay_uses_the_saved_evaluator_and_reassessment_records_changed_standing() -
     assert_eq!(changed["head"], corrected);
     assert_ne!(changed["id"], receipt);
     assert_eq!(
+        run(&path, root, &["replay", identifier(&changed["id"])])?["matches"],
+        true
+    );
+    assert_eq!(
         run(&path, root, &["reassess", &receipt, "--head", &corrected])?["id"],
         changed["id"]
     );
@@ -349,7 +421,7 @@ fn replay_uses_the_saved_evaluator_and_reassessment_records_changed_standing() -
             .as_array()
             .unwrap()
             .iter()
-            .any(|edge| edge["role"] == "previous-receipt" && edge["target"] == receipt)
+            .any(|edge| edge["role"] == "reassessed-from" && edge["target"] == receipt)
     );
     assert_eq!(
         run(
@@ -371,6 +443,86 @@ fn replay_uses_the_saved_evaluator_and_reassessment_records_changed_standing() -
             &["replay", &receipt, "--head", identifier(&head)]
         )?["matches"],
         true
+    );
+
+    let original = run(&path, root, &["show", identifier(&head), &receipt])?;
+    let mut comparisons = original["fields"]["original_query"].clone();
+    comparisons["previous_receipts"] = json!([receipt]);
+    fs::write(
+        root.join("comparisons.json"),
+        serde_json::to_vec(&comparisons)?,
+    )?;
+    let explicit = run(
+        &path,
+        root,
+        &["assess", identifier(&head), "comparisons.json"],
+    )?;
+    let mut previous = explicit["id"].clone();
+    let mut last_predecessor = previous.clone();
+    for _ in 0..5 {
+        let active = run(&path, root, &["snapshot", "local review", "--continue"])?;
+        let next = run(
+            &path,
+            root,
+            &[
+                "reassess",
+                identifier(&previous),
+                "--head",
+                identifier(&active),
+            ],
+        )?;
+        let with_receipt = run(&path, root, &["snapshot", "local review", "--continue"])?;
+        let record = run(
+            &path,
+            root,
+            &["show", identifier(&with_receipt), identifier(&next["id"])],
+        )?;
+        let links = |role: &str| -> Vec<Value> {
+            record["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|edge| edge["role"] == role)
+                .map(|edge| edge["target"].clone())
+                .collect()
+        };
+        assert_eq!(links("reassessed-from"), std::slice::from_ref(&previous));
+        assert_eq!(links("previous-receipt"), vec![json!(receipt)]);
+        assert_eq!(
+            run(&path, root, &["replay", identifier(&next["id"])])?["matches"],
+            true
+        );
+        last_predecessor = previous;
+        previous = next["id"].clone();
+    }
+
+    assert!(
+        invoke(&path, root, &["withdraw", &unrelated.to_string()])?
+            .status
+            .success()
+    );
+    let after_withdrawal = run(&path, root, &["snapshot", "local review", "--continue"])?;
+    assert!(
+        !invoke(
+            &path,
+            root,
+            &["replay", &receipt, "--head", identifier(&after_withdrawal)]
+        )?
+        .status
+        .success()
+    );
+    let default_replay = run(&path, root, &["replay", &receipt])?;
+    assert_eq!(default_replay, replay);
+
+    let archive = Archive::open(&path)?;
+    let snapshot = archive.head(identifier(&after_withdrawal).parse()?)?;
+    let migrated = archive.migrate(&snapshot, Format::B, "local review")?;
+    let migrated_receipt = migrated.pairs[&identifier(&previous).parse::<Id>()?];
+    assert_eq!(
+        archive
+            .read_head(migrated.native_head, migrated_receipt, "read")?
+            .one("reassessed-from")?,
+        identifier(&last_predecessor).parse::<Id>()?
     );
     Ok(())
 }

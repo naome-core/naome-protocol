@@ -8,7 +8,7 @@ mod vectors;
 mod visibility;
 
 use self::rank::{SemanticQuery, VectorWork, rank};
-use super::{Archive, Snapshot};
+use super::{Archive, Snapshot, custody::tree::Tree};
 use crate::{
     profile::Document,
     search::{
@@ -20,7 +20,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use cache::{INDEX_VERSION, coverage, prepared_cache_version};
 use rusqlite::{OptionalExtension, params};
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet};
 use vectors::{embed_query, missing_vectors};
 
 const MAX_QUERY_PASSAGES: usize = 24;
@@ -29,6 +29,40 @@ pub(crate) enum IndexPreparation {
     Existing,
     Lexical,
     Full { rebuild: bool },
+}
+
+enum SearchInventory<'a> {
+    Snapshot(&'a Snapshot),
+    #[cfg(feature = "cli")]
+    Selected(super::Manifest),
+}
+
+impl SearchInventory<'_> {
+    fn id(&self) -> Result<Id> {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.id(),
+            #[cfg(feature = "cli")]
+            Self::Selected(manifest) => manifest.id(),
+        }
+    }
+
+    fn load(&self, _archive: &Archive) -> Result<Cow<'_, Snapshot>> {
+        match self {
+            Self::Snapshot(snapshot) => Ok(Cow::Borrowed(snapshot)),
+            #[cfg(feature = "cli")]
+            Self::Selected(manifest) => Ok(Cow::Owned(_archive.head(manifest.id()?)?)),
+        }
+    }
+
+    fn resolve(&self, archive: &Archive, id: Id, _tree: &mut Tree<'_>) -> Result<Vec<u8>> {
+        match self {
+            Self::Snapshot(snapshot) => archive.resolve(snapshot, id, "read"),
+            #[cfg(feature = "cli")]
+            Self::Selected(manifest) => {
+                Ok(archive.resolve_member_in(manifest, id, "read", _tree)?.0)
+            }
+        }
+    }
 }
 
 struct Passage {
@@ -64,7 +98,7 @@ impl Archive {
         self.head(self.selected_search_id(head)?)
     }
 
-    fn selected_search_id(&self, head: Option<Id>) -> Result<Id> {
+    pub(crate) fn selected_search_id(&self, head: Option<Id>) -> Result<Id> {
         if let Some(head) = head {
             return self.current_head_id(head);
         }
@@ -194,7 +228,13 @@ impl Archive {
         } else {
             IndexPreparation::Full { rebuild: false }
         };
-        self.lookup_search(snapshot, input, options, model, preparation)
+        self.lookup_search(
+            SearchInventory::Snapshot(snapshot),
+            input,
+            options,
+            model,
+            preparation,
+        )
     }
 
     /// Query the prepared lexical and embedding cache.
@@ -205,7 +245,13 @@ impl Archive {
         options: SearchOptions<'_>,
         model: Option<&mut dyn Embedder>,
     ) -> Result<SearchReport> {
-        self.lookup_search(snapshot, input, options, model, IndexPreparation::Existing)
+        self.lookup_search(
+            SearchInventory::Snapshot(snapshot),
+            input,
+            options,
+            model,
+            IndexPreparation::Existing,
+        )
     }
 
     /// Prepare a bounded slice independently of any query.
@@ -259,9 +305,28 @@ impl Archive {
         })
     }
 
-    pub(crate) fn lookup_search(
+    #[cfg(feature = "cli")]
+    pub(crate) fn find_selected(
         &self,
-        snapshot: &Snapshot,
+        head: Option<Id>,
+        input: SearchInput<'_>,
+        options: SearchOptions<'_>,
+        model: Option<&mut dyn Embedder>,
+        preparation: IndexPreparation,
+    ) -> Result<SearchReport> {
+        let manifest = self.active_manifest(self.selected_search_id(head)?)?;
+        self.lookup_search(
+            SearchInventory::Selected(manifest),
+            input,
+            options,
+            model,
+            preparation,
+        )
+    }
+
+    fn lookup_search(
+        &self,
+        inventory: SearchInventory<'_>,
         input: SearchInput<'_>,
         options: SearchOptions<'_>,
         model: Option<&mut dyn Embedder>,
@@ -302,14 +367,12 @@ impl Archive {
                 (Vec::new(), Some(media), false)
             }
         };
-        let mut report = SearchReport::start(snapshot.id()?, options, limited)?;
+        let mut report = SearchReport::start(inventory.id()?, options, limited)?;
         let head = report.head;
+        let mut tree = Tree::new(&self.db);
+        let mut resolve = |id| inventory.resolve(self, id, &mut tree);
         if let Some(id) = input.exact_id() {
-            return self.with_read_view(|| {
-                Self::exact_report(report, id, options, |key| {
-                    self.resolve(snapshot, key, "read")
-                })
-            });
+            return self.with_read_view(|| Self::exact_report(report, id, options, resolve));
         }
 
         let mode = options.mode;
@@ -343,12 +406,17 @@ impl Archive {
         match preparation {
             IndexPreparation::Existing => {}
             IndexPreparation::Lexical => {
-                self.prepare_lexical_index(snapshot, &head, options.index_budget, false)?;
+                self.init_search()?;
+                if !coverage(&self.db, &head)?.0 {
+                    let snapshot = inventory.load(self)?;
+                    self.refresh_search(&snapshot, &head, options.index_budget)?;
+                }
             }
             IndexPreparation::Full { rebuild } => {
-                self.prepare_lexical_index(snapshot, &head, options.index_budget, rebuild)?;
+                let snapshot = inventory.load(self)?;
+                self.prepare_lexical_index(&snapshot, &head, options.index_budget, rebuild)?;
                 if let Some(model) = model {
-                    self.refresh_search_vectors(snapshot, &head, model, options.index_budget)?;
+                    self.refresh_search_vectors(&snapshot, &head, model, options.index_budget)?;
                 }
             }
         }
@@ -393,7 +461,7 @@ impl Archive {
         report.vector_rows_examined = work.rows_examined;
         report.vector_rows_loaded = work.vectors_loaded;
         for candidate in candidates {
-            let Ok(document) = self.read(snapshot, candidate.id, "read") else {
+            let Ok(document) = self.read_with(candidate.id, &mut resolve) else {
                 report.limited_coverage = true;
                 continue;
             };
@@ -418,8 +486,7 @@ impl Archive {
                 *span = serde_json::from_str(&encoded)?;
                 None
             } else {
-                let Some(snippet) = self
-                    .search_snippet(snapshot, &document, &location)
+                let Some(snippet) = Self::search_snippet(&document, &location, &mut resolve)
                     .ok()
                     .flatten()
                 else {
@@ -429,7 +496,7 @@ impl Archive {
                 Some(snippet)
             };
             let mut hit = Self::search_hit(
-                |key| self.resolve(snapshot, key, "read").is_ok(),
+                |key| resolve(key).is_ok(),
                 candidate.id,
                 Some(&document),
                 location,
