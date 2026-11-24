@@ -41,56 +41,66 @@ def sample(binary, directory, size, phase):
     return row
 
 
-def verify(report):
-    if report.get("archive_format") == "manifest":
-        return verify_manifest(report)
-    reference = json.loads((ROOT / "spec/scale/full-page-samples.json").read_text())
-    baseline = {(r["phase"], r["size"]): r for r in reference["samples"]}
-    def check(original, measured):
-        for name, value in original.items():
-            if isinstance(value, dict):
-                check(value, measured[name])
-            elif name not in {"elapsed_ms", "queue_full_events", "writer_finish_us", "receiver_growth"}:
-                assert measured[name] == value, (name, measured[name], value)
-        if "reads" in original:
-            assert measured["reads"] <= measured["backing_reads"] <= 5 * measured["reads"]
-    for row in report["samples"]:
-        other = baseline[row["phase"], row["size"]]
-        check(other["result"], row["result"])
-        if row["phase"] == "first" and row["size"] == 12800 and report["platform"] == reference["platform"]:
-            assert row["database_growth"] < other["database_growth"]
-    print(f"Verified logical identities, work and transfer fields for {len(report['samples'])} observations.")
+# The earlier writer produced these roots from generated IDs without storing payloads.
+INVENTORY_ROOTS = {
+    100: "1:1:099a070fe4dbf60cec1a0cce433c011d4a8455bd11bfd605c1f2d282f6eeaa50",
+    10000: "1:1:1e0ddde841382f83eb81de6ef24dc93b323d88d16d953326408816131306e205",
+    1000000: "1:1:61e7c7c285c4af1abf86c2e700ee97c0a1799f04ba2f6ab4af839104e8207ab7",
+}
+PAYLOAD_BYTES = {128: 17298, 1024: 139178, 12800: 1755290}
+WORKLOADS = [
+    (["mixed"], [24]),
+    (["inventory"], list(INVENTORY_ROOTS)),
+    (["first", "pull-first", "delta", "pull-delta"], list(PAYLOAD_BYTES)),
+]
 
 
-def verify_manifest(report):
-    """Check invariant outcomes and within-format determinism; timings are observations."""
-    reference = json.loads((ROOT / "spec/scale/local-samples.json").read_text())
-    old = {(r["phase"], r["size"]): r["result"] for r in reference["samples"]}
-    first = {}
-    def stable(data):
-        if isinstance(data, dict):
-            if "reads" in data:
-                assert data["reads"] <= data["backing_reads"] <= 5 * data["reads"]
-            return {k: stable(v) for k, v in data.items()
-                    if k not in {"elapsed_ms", "writer_finish_us", "queue_full_events", "receiver_growth"}}
+def deterministic_fields(data):
+    if not isinstance(data, dict):
         return data
-    for row in report["samples"]:
-        key = row["phase"], row["size"]
+    if "reads" in data:
+        assert data["reads"] <= data["backing_reads"] <= 5 * data["reads"]
+    variable = {"elapsed_ms", "writer_finish_us", "queue_full_events", "receiver_growth"}
+    return {k: deterministic_fields(v) for k, v in data.items() if k not in variable}
+
+
+def verify(report):
+    if report.get("archive_format") != "manifest":
+        raise ValueError("use the qualification driver from the measured revision for older layouts")
+    samples = report["samples"]
+    by_trial = {}
+    first = {}
+    full = {(p, n) for phases, sizes in WORKLOADS for p in phases for n in sizes}
+    quick = {(p, sizes[0]) for phases, sizes in WORKLOADS for p in phases}
+    for row in samples:
+        phase, size = key = row["phase"], row["size"]
+        seen = by_trial.setdefault(row["repetition"], set())
+        assert key in full and key not in seen, key
+        seen.add(key)
         result = row["result"]
-        original = old[key]
-        for field in ("payload_bytes", "batches", "duplicate_deliveries", "review_standing", "queue_capacity"):
-            if field in original:
-                assert result[field] == original[field], (key, field)
-        if key[0] == "inventory":
-            assert result["root"] == original["root"]
+        if phase == "inventory":
+            assert result["root"] == INVENTORY_ROOTS[size]
             assert result["delta_io"]["reads"] <= result["height"]
             assert result["delta_io"]["writes"] <= 2 * result["height"] + 1
-        if key[0] == "pull-delta":
-            assert result["batches"] == 1 and result["payload_bytes"] == 203
-            assert result["descriptor_bytes"] <= 32 * 1024
-        observed = stable(result)
+        elif phase == "mixed":
+            assert result["writers"] == len(set(result["federated_tips"])) == 2
+            assert result["batches"] == result["receiver_reopens"] == size
+            assert result["payload_bytes"] == 1595726 and result["queue_capacity"] == 2
+            assert result["duplicate_deliveries"] == 8 and result["review_standing"] == "review"
+        elif phase in {"first", "pull-first"}:
+            assert result["payload_bytes"] == PAYLOAD_BYTES[size]
+            if phase == "pull-first":
+                assert result["batches"] == size // 64
+        else:
+            assert result["payload_bytes"] == 203
+            if phase == "pull-delta":
+                assert result["batches"] == 1 and result["descriptor_bytes"] <= 32 * 1024
+        observed = deterministic_fields(result)
         assert observed == first.setdefault(key, observed), key
-    print(f"Verified archive workloads and deterministic observations in {len(report['samples'])} samples.")
+    assert by_trial and set(by_trial) == set(range(1, len(by_trial) + 1))
+    expected = full if set(first) == full else quick
+    assert all(seen == expected for seen in by_trial.values()), "incomplete workload"
+    print(f"Verified archive workloads and deterministic observations in {len(samples)} samples.")
 
 
 def main():
@@ -107,11 +117,7 @@ def main():
         parser.error("expected positive repetition count")
     binary = build()
     rows = []
-    for phases, sizes in [
-        (["mixed"], [24]),
-        (["inventory"], [100, 10000, 1000000]),
-        (["first", "pull-first", "delta", "pull-delta"], [128, 1024, 12800]),
-    ]:
+    for phases, sizes in WORKLOADS:
         for size in sizes[:1] if args.quick else sizes:
             for trial in range(1, args.repetitions + 1):
                 with tempfile.TemporaryDirectory() as directory:

@@ -98,7 +98,8 @@ def package(target, model):
     if host != target:
         raise ValueError(f"expected a native {target} runner, found {host}")
     with (ROOT / "Cargo.toml").open("rb") as manifest:
-        version = tomllib.load(manifest)["package"]["version"]
+        metadata = tomllib.load(manifest)["package"]
+    version = metadata["version"]
     name = "nao.exe" if os.name == "nt" else "nao"
     archive_format = "zip" if os.name == "nt" else "gztar"
     target_directory = ROOT / "target"
@@ -112,7 +113,12 @@ def package(target, model):
         shutil.copy2(build_directory / "release" / name, staging)
         for path in [ROOT / "LICENSE", ROOT / "README.md", *ROOT.glob("requirements-search*.txt")]:
             shutil.copy2(path, staging)
-        shutil.copytree(ROOT / "spec", staging / "spec")
+        for pattern in metadata["include"]:
+            if pattern.startswith("spec/"):
+                for path in ROOT.glob(pattern):
+                    destination = staging / path.relative_to(ROOT)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, destination)
 
         package_path = Path(shutil.make_archive(
             str(root / f"nao-v{version}-{target}"), archive_format, root_dir=staging

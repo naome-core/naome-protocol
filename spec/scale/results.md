@@ -4,13 +4,13 @@
 
 The workload and per-tree bounds were frozen at `12f572a`. The active manifest adds a separate authenticated membership root and registers scientific and custody heads in the same local catalog. Its identities and frame bytes change. The earlier splice-layout measurements below remain historical observations at `78419e5`.
 
-Reproduce the current run with an optimized Rust build on macOS or Linux.
+Run the workload on macOS or Linux. Cargo builds an optimized test binary. The driver writes the raw observations to the chosen output path. The migration integration tests are available in the Git checkout.
 
     cargo test --locked --test archive_migration
-    python3 tools/scale/qualify.py new-samples.json
-    python3 tools/scale/qualify.py spec/scale/manifest-samples.json --verify-saved
+    python3 tools/scale/qualify.py target/new-samples.json
+    python3 tools/scale/qualify.py target/new-samples.json --verify-saved
 
-The measured implementation is `2936850510c9b23dcb634c68609553f0fb231cb1`. The 48 observations in `manifest-samples.json` include three fresh processes per workload and size. Verification checks the invariant inputs, shared virtual root, bounded page work, single-delta byte count, fork behavior, and deterministic results within each workload. The same 203-byte claim was admitted through the laboratory API and transferred to an independent SQLite recipient. Time includes process startup, admission, scoped lookup and reverse query in the delta phase. RSS is the OS process high-water value. These experiments used real small files and a simulated million-ID payload inventory.
+The measured implementation is `2936850510c9b23dcb634c68609553f0fb231cb1`. The 48 original observations include three fresh processes per workload and size. Verification checks the invariant inputs, shared virtual root, bounded page work, single-delta byte count, fork behavior, and deterministic results within each workload. The same 203-byte claim was admitted through the laboratory API and transferred to an independent SQLite recipient. Time includes process startup, admission, scoped lookup and reverse query in the delta phase. RSS is the OS process high-water value. These experiments used real small files and a simulated million-ID payload inventory. [Original measurements](https://github.com/naome-core/naome-protocol/blob/ca16f6fa652cd6462dbea4c95b5c738e6fb6e699/spec/scale/manifest-samples.json)
 
 | Prior records | Pages read | Pages created | Backing reads | Frame bytes | Median RSS, MiB | Median delta, ms | Median receiver, ms |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -24,7 +24,7 @@ The ordinary full-snapshot command also has a catalog watermark. A separate regr
 
 ## Historical physical-page comparison
 
-Acceptance criteria were committed at `12f572a`. The full-page implementation, observations and follow-up physical-storage criteria were committed at `f2ecdfb`. The difference-based storage at `78419e5` preserved that prototype's logical heads and transfer format. Its saved observations can be checked with `python3 tools/scale/qualify.py spec/scale/local-samples.json --verify-saved`.
+Acceptance criteria were committed at `12f572a`. The full-page implementation, observations and follow-up physical-storage criteria were committed at `f2ecdfb`. The difference-based storage at `78419e5` preserved that prototype's logical heads and transfer format. To verify the historical comparison, check out `78419e5` and run `python3 tools/scale/qualify.py spec/scale/local-samples.json --verify-saved` there. [Full-page observations](https://github.com/naome-core/naome-protocol/blob/f2ecdfb58076d63922d0c592f68ce1eb40e82ff9/spec/scale/full-page-samples.json) · [Splice observations](https://github.com/naome-core/naome-protocol/blob/78419e5b47e5318e5e867923585f1e709b597b65/spec/scale/local-samples.json)
 
 The driver compiles an optimized Rust library test and measures each phase in a fresh process with wait4 on macOS or Linux. Each trial uses fresh on-disk SQLite files. Seed, first pull, one-record delta and delta pull run in order. Each layout has three repetitions of each configuration and 48 observations. The comparison checks head IDs, logical counters, receipt sizes, transfer bytes, fork IDs and deterministic results. Both layouts ran sequentially on one macOS 27.3 arm64 host using rustc 1.97.1. OS caches were uncontrolled. Ranges below are the observed minimum and maximum. Logical reads are B+ tree reads. Backing reads are SQLite row fetches for reconstructing pages. Physical device reads were unmeasured. Wire bytes include all actual frame lengths and ancestry proofs.
 

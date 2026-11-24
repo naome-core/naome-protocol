@@ -66,7 +66,7 @@ Let H be the tree height, S the number of commits on a selected lineage, k the n
 - Cold admission must verify every new member and derive its index. For independent batches with k_i derived keys the retained page work is O(sum k_i H_i), plus payload bytes and ancestry metadata. Immutable snapshots retain old paths. No constant storage-amplification bound relative to raw scientific payload size is asserted. Small records with a long retained history can incur substantial overhead. A cold pull replays the selected ancestry, including the portable proof for each step.
 - Each physical shard has one local SQLite writer. Independent shards avoid a shared payload transaction. Coordination costs grow with pinned tips; the implemented view limit is 64. A reverse membership index suspends bounded published releases affected by withdrawal. Disk capacity, backup, compaction, remote authorization and high-load service capacity need deployment-specific qualification.
 
-The frozen acceptance method and measurements are in `qualification.md`, `local-samples.json` and `results.md` in this directory. The repository and Cargo source package include the reproduction driver.
+The [qualification method](qualification.md) and [results](results.md) describe the workload and link to the original measurements. The repository and Cargo source package include the reproduction driver.
 
 ## Interchange and resource limits
 

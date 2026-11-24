@@ -793,9 +793,9 @@ fn withdrawals_leave_historic_proofs_and_unaffected_arguments_available() -> Res
 
 #[test]
 fn legacy_calibration_fixture_retains_its_published_identity() -> Result<()> {
-    // Produced by the pre-migration reference writer at 78419e5 with fixture::seed_legacy.
+    // Original manifest, receipt, and access descriptor from the writer at 78419e5.
     let bundle = naome_protocol::store::Bundle::read(
-        &include_bytes!("fixtures/published-calibration.json")[..],
+        &include_bytes!("fixtures/legacy-calibration-receipt.json")[..],
     )?;
     let mut archive = Archive::memory()?;
     let active = archive.import(&bundle)?;
@@ -806,9 +806,8 @@ fn legacy_calibration_fixture_retains_its_published_identity() -> Result<()> {
     assert_eq!(bundle.head, original);
     assert_eq!(archive.head(original)?.id()?, original);
     assert_ne!(active, original);
-    assert_eq!(
-        archive.resolve(&archive.head(original)?, receipt, "read")?,
-        archive.resolve(&archive.head(active)?, receipt, "read")?
-    );
+    for head in [original, active] {
+        receipt.verify(&archive.resolve(&archive.head(head)?, receipt, "read")?)?;
+    }
     Ok(())
 }
