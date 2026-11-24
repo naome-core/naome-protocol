@@ -607,3 +607,57 @@ fn indexed_input_review_stays_inside_the_candidate_budget() -> Result<()> {
     assert!(!offline.impact(&s, notice, &[], 16)?.frontier.is_empty());
     Ok(())
 }
+
+#[test]
+fn compact_explanation_pages_can_match_notices_to_other_pages_dependencies() -> Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let a = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let claim = a.blob(b"claim", public)?;
+    let premise = a.blob(b"premise", public)?;
+    let unrelated = a.blob(b"unrelated", public)?;
+    let first = Study {
+        archive: &a,
+        format: Format::A,
+    };
+    first.record(
+        Kind::Argument,
+        json!({}),
+        vec![link("claim", claim), link("premise", premise)],
+    )?;
+    for n in 0..7 {
+        first.record(Kind::Occurrence, json!({"index": n}), vec![])?;
+    }
+    let second = Study {
+        archive: &a,
+        format: Format::B,
+    };
+    let notice = second.record(Kind::Notice, json!({}), vec![link("target", premise)])?;
+    second.record(Kind::Notice, json!({}), vec![link("target", unrelated)])?;
+    let snapshot = a.snapshot("study", Default::default())?;
+    let full = a.argument_graph(&snapshot, claim, "read", 100, 48)?;
+    assert_eq!(full["candidate_notices"], json!([notice]));
+    let mut visited = BTreeSet::<Id>::new();
+    let mut links = BTreeMap::<Id, BTreeSet<Id>>::new();
+    let mut after = None;
+    loop {
+        let page = a.argument_graph_page(&snapshot, claim, "read", 8, 48, after)?;
+        visited.extend(serde_json::from_value::<Vec<Id>>(
+            page["dependencies"]["visited"].clone(),
+        )?);
+        links.extend(serde_json::from_value::<BTreeMap<Id, BTreeSet<Id>>>(
+            page["notice_targets"].clone(),
+        )?);
+        if page["unscanned"].is_null() {
+            break;
+        }
+        after = serde_json::from_value(page["unscanned"]["after"].clone())?;
+    }
+    let matches: Vec<_> = links
+        .iter()
+        .filter(|(_, targets)| !targets.is_disjoint(&visited))
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(json!(matches), full["candidate_notices"]);
+    Ok(())
+}

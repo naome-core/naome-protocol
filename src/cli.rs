@@ -170,7 +170,8 @@ pub enum ArchiveCommand {
     Explain {
         head: Id,
         id: Id,
-        /// Return the unscanned records as a resumable range.
+        /// Return a resumable record range. To combine pages, collect dependencies.visited
+        /// across the scan and select each notice whose notice_targets intersect that set.
         #[arg(long)]
         compact: bool,
         /// Resume the compact record scan at the same snapshot.

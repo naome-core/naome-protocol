@@ -939,3 +939,53 @@ fn historical_extraction_reads_mapping_manifests_under_the_receipts_rules() -> R
     assert!(archive.training_manifest(&request, format).is_err());
     Ok(())
 }
+
+#[test]
+fn replica_review_preserves_all_origins_beyond_one_manifest() -> Result<()> {
+    use naome_protocol::store::sharing::MAX_MANIFEST_PARENTS;
+    let a = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let policy = fixture::policy(&a, Format::A)?;
+    let labels = a.snapshot("labels", Default::default())?;
+    let mut origins = BTreeSet::from([labels.id()?]);
+    let mut members = labels.objects.clone();
+    for n in 0..MAX_MANIFEST_PARENTS {
+        let member = a.blob(&n.to_be_bytes(), public)?;
+        let release = a.selected_snapshot("peer", Default::default(), [member].into())?;
+        a.release(release.id()?)?;
+        origins.insert(release.id()?);
+        members.insert(member);
+        if n == 0 {
+            a.withdraw(member)?;
+        }
+    }
+    let request = TrainingRequest {
+        policy,
+        feature_cutoff: labels.id()?,
+        label_head: labels.id()?,
+        forecast_plan: None,
+        standing: Default::default(),
+        mappings: vec![],
+        project: None,
+        examples: vec![],
+        independent_roles: Default::default(),
+        binary: false,
+    };
+    let horizon = a.review_releases(&request)?.review_horizon;
+    assert_eq!(a.review_releases(&request)?.review_horizon, horizon);
+    let view = a.head(horizon)?;
+    assert_eq!(view.objects, members);
+    let mut leaves = BTreeSet::new();
+    let mut pending = vec![horizon];
+    while let Some(head) = pending.pop() {
+        if origins.contains(&head) {
+            leaves.insert(head);
+        } else {
+            let node = a.head(head)?;
+            assert!((1..=MAX_MANIFEST_PARENTS).contains(&node.parents.len()));
+            pending.extend(&node.parents);
+        }
+    }
+    assert_eq!(leaves, origins);
+    Ok(())
+}

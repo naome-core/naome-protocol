@@ -334,15 +334,16 @@ impl Archive {
         let mut roots = arguments.clone();
         roots.push(target);
         let graph = self.explain(snapshot, &roots, purpose, budget, depth);
+        let notice_targets = |id: &Id| {
+            inventory.documents[id]
+                .inputs
+                .iter()
+                .map(|edge| edge.target)
+        };
         let contrary: Vec<_> = inventory
             .notices
             .iter()
-            .filter(|id| {
-                inventory.documents[id]
-                    .inputs
-                    .iter()
-                    .any(|edge| graph.visited.contains(&edge.target))
-            })
+            .filter(|id| notice_targets(id).any(|target| graph.visited.contains(&target)))
             .collect();
         let mut report = json!({
             "snapshot": snapshot.id()?,
@@ -355,6 +356,14 @@ impl Archive {
             "budget_per_phase": budget,
         });
         if matches!(scan, GraphScan::Compact { .. }) {
+            // A notice and the argument exposing its premise may fall on different pages.
+            // Keep the endpoints of every readable notice for the cross-page join.
+            let targets: BTreeMap<_, BTreeSet<_>> = inventory
+                .notices
+                .iter()
+                .map(|id| (id, notice_targets(id).collect()))
+                .collect();
+            report["notice_targets"] = json!(targets);
             report["unscanned"] = json!(unscanned);
         }
         Ok(report)

@@ -454,3 +454,28 @@ fn bounded_discovery_matches_the_materialized_inventory_at_every_cursor() -> Res
     }
     Ok(())
 }
+
+#[test]
+fn continuation_follows_a_rebuilt_full_seal_but_rejects_a_real_fork() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("archive.sqlite");
+    let a = Archive::open(&file)?;
+    let public = Id::blob(PUBLIC);
+    let removed = a.blob(b"removed", public)?;
+    let old = a.snapshot_id("local", Default::default())?;
+    a.withdraw(removed)?;
+    let rebuilt = a.continue_snapshot("local")?;
+    assert_eq!(a.custody_head(rebuilt)?.parent, None);
+    assert_eq!(a.head(rebuilt)?.parents, [old].into());
+    assert!(!a.head(rebuilt)?.objects.contains(&removed));
+    drop(a);
+    let a = Archive::open(&file)?;
+    assert_eq!(a.continue_snapshot("local")?, rebuilt);
+    let added = a.blob(b"next", public)?;
+    let next = a.continue_snapshot("local")?;
+    assert_eq!(a.custody_head(next)?.parent, Some(rebuilt));
+    assert_eq!(a.resolve_head(next, added, "read")?, b"next");
+    a.snapshot_id("local", [old].into())?;
+    assert!(a.continue_snapshot("local").is_err());
+    Ok(())
+}

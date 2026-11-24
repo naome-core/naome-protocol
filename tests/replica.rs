@@ -287,3 +287,98 @@ fn replicated_releases_do_not_replace_the_local_search_head() -> Result<()> {
     assert_eq!(target.search_head(Some(peer_id))?.id()?, peer_id);
     Ok(())
 }
+
+#[test]
+fn selected_records_can_be_transferred_before_their_access_descriptor() -> Result<()> {
+    use naome_protocol::store::custody::MEMBERS;
+    use std::collections::BTreeSet;
+    let source = Archive::memory()?;
+    let mut records = BTreeSet::new();
+    for n in 0..MEMBERS {
+        let doc = profile::Document::new(
+            profile::Kind::Occurrence,
+            "sample",
+            "bench",
+            serde_json::json!({"index": n}),
+            vec![],
+        )?;
+        records.insert(source.document(&doc, Format::A, Id::blob(PUBLIC))?);
+    }
+    let selected = source.selected_snapshot("selected", Default::default(), records.clone())?;
+    let target = selected.id()?;
+    source.custody_share(target, true)?;
+    let direct = Archive::memory()?;
+    let portable = Archive::memory()?;
+    let first = direct.custody_pull(&source, target, 1)?;
+    assert!(!first.complete);
+    assert_eq!(direct.head(first.cursor)?.objects, records);
+    let mut frame = Vec::new();
+    source.custody_export_step(target, None, &mut frame)?;
+    let prefix = portable.custody_import_step(target, frame.as_slice())?.head;
+    assert_eq!(prefix, first.cursor);
+    source.custody_share(target, false)?;
+    assert!(direct.custody_pull(&source, target, 1).is_err());
+    assert!(
+        source
+            .custody_export_step(target, Some(prefix), Vec::new())
+            .is_err()
+    );
+    source.custody_share(target, true)?;
+    assert!(direct.custody_pull(&source, target, 1)?.complete);
+    frame.clear();
+    source.custody_export_step(target, Some(prefix), &mut frame)?;
+    assert_eq!(
+        portable.custody_import_step(target, frame.as_slice())?.head,
+        target
+    );
+    assert_eq!(direct.head(target)?, selected);
+    assert_eq!(portable.head(target)?, selected);
+    Ok(())
+}
+
+#[test]
+fn publication_and_replication_charge_the_same_linked_witnesses() -> Result<()> {
+    use naome_protocol::store::sharing::MAX_RELEASE_BYTES;
+    use std::collections::BTreeSet;
+
+    let source = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    for n in 0..24 {
+        source.blob(&[n], public)?;
+    }
+    let linked = source.snapshot("linked", Default::default())?;
+    let link = source.deposit_manifest(&linked)?;
+    let mut roots = BTreeSet::from([link]);
+    for n in 0..15 {
+        roots.insert(source.blob(&vec![n; MAX_MEMBER_BYTES], public)?);
+    }
+    let select = |size| -> Result<Snapshot> {
+        let mut members = roots.clone();
+        members.insert(source.blob(&vec![0xff; size], public)?);
+        source.selected_snapshot("release", Default::default(), members)
+    };
+    // All main inventory keys have fixed width and fit in a single leaf.
+    let sample = select(16)?;
+    source.release(sample.id()?)?;
+    let packet = serde_json::to_value(source.released_manifest(sample.id()?)?)?;
+    let mut used = 0;
+    for page in packet["pages"].as_object().unwrap().values() {
+        used += serde_json::to_vec(page)?.len();
+    }
+    assert!(packet["pages"].as_object().unwrap().len() > 1);
+    for &id in &sample.objects {
+        used += source.resolve(&sample, id, "read")?.len();
+    }
+    let remaining = MAX_RELEASE_BYTES - used + 16;
+    let exact = select(remaining)?.id()?;
+    source.release(exact)?;
+    let mut receiver = Replica::new(exact, source.released_manifest(exact)?)?;
+    while let Some(id) = receiver.next_member() {
+        receiver.accept(id, source.released_member(exact, id)?)?;
+    }
+    assert_eq!(receiver.commit(&Archive::memory()?)?, exact);
+    let over = select(remaining + 1)?.id()?;
+    assert!(source.release(over).is_err());
+    assert!(!source.has_observed_release(over)?);
+    Ok(())
+}

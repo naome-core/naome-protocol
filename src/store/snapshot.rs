@@ -344,7 +344,21 @@ impl Archive {
             &self.db,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        let tips = self.custody_tips(source, None, 2)?;
+        let mut tips = self.custody_tips(source, None, 2)?;
+        if tips.len() > 1 {
+            // A full rebuild can start a new custody chain after a withdrawal. Its
+            // recorded seal parents still identify the branches it continued.
+            let mut query = self.db.prepare(
+                "SELECT head FROM custody_tips WHERE source=?1
+                 EXCEPT SELECT p.value FROM archive_seals s, json_each(s.parents) p
+                        WHERE s.source=?1
+                 LIMIT 2",
+            )?;
+            tips = query
+                .query_map([source], |r| r.get::<_, String>(0))?
+                .map(|r| r?.parse())
+                .collect::<Result<_>>()?;
+        }
         let [parent] = tips.as_slice() else {
             anyhow::bail!("continuation requires exactly one tip; select --parent explicitly");
         };

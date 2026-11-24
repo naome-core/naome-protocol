@@ -1,5 +1,9 @@
 //! Complete inventories explicitly released to a configured replication group.
-use super::{Archive, Snapshot, insert, snapshot::save_imported_head};
+use super::{
+    Archive, Snapshot, insert,
+    inventory::{Page, Pages},
+    snapshot::save_imported_head,
+};
 use crate::{
     profile::{Document, Kind, PROFILE, verify_attestation},
     wire::{Id, Record},
@@ -13,6 +17,22 @@ pub const CATALOG_PAGE_SIZE: usize = 32;
 pub const MAX_MEMBERS: usize = 512;
 pub const MAX_MEMBER_BYTES: usize = 1024 * 1024;
 pub const MAX_RELEASE_BYTES: usize = 16 * 1024 * 1024;
+
+fn charge_page(total: usize, page: &Page) -> Result<usize> {
+    let total = total + serde_json::to_vec(page)?.len();
+    ensure!(
+        total <= MAX_RELEASE_BYTES,
+        "release witnesses exceed network limit"
+    );
+    Ok(total)
+}
+
+fn charge_member(total: usize, size: usize) -> Result<usize> {
+    ensure!(size <= MAX_MEMBER_BYTES, "object exceeds network limit");
+    let total = total + size;
+    ensure!(total <= MAX_RELEASE_BYTES, "release exceeds network limit");
+    Ok(total)
+}
 
 fn check_manifest(head: Id, snapshot: &Snapshot) -> Result<()> {
     ensure!(
@@ -61,14 +81,7 @@ pub struct Replica {
 impl Replica {
     pub fn new(head: Id, snapshot: Snapshot) -> Result<Self> {
         check_manifest(head, &snapshot)?;
-        let mut proof_bytes = 0usize;
-        for page in snapshot.pages.values() {
-            proof_bytes += serde_json::to_vec(page)?.len();
-            ensure!(
-                proof_bytes <= MAX_RELEASE_BYTES,
-                "release witnesses exceed network limit"
-            );
-        }
+        let proof_bytes = snapshot.pages.values().try_fold(0, charge_page)?;
         Ok(Self {
             head,
             missing: snapshot.objects.clone(),
@@ -88,14 +101,7 @@ impl Replica {
             "unsolicited object"
         );
         let bytes = member.bytes;
-        ensure!(
-            bytes.len() <= MAX_MEMBER_BYTES,
-            "object exceeds network limit"
-        );
-        ensure!(
-            self.bytes + bytes.len() <= MAX_RELEASE_BYTES,
-            "release exceeds network limit"
-        );
+        let total = charge_member(self.bytes, bytes.len())?;
         expected.verify(&bytes)?;
         let access = match (expected.format(), member.blob_access) {
             (Some(format), None) => Record::decode(&bytes, format)?.access,
@@ -106,7 +112,7 @@ impl Replica {
             access.format().is_none() && self.snapshot.objects.contains(&access),
             "access descriptor outside release"
         );
-        self.bytes += bytes.len();
+        self.bytes = total;
         self.members.insert(expected, (access, bytes));
         self.missing.remove(&expected);
         Ok(())
@@ -232,39 +238,42 @@ impl Archive {
     pub fn released_manifest(&self, head: Id) -> Result<Snapshot> {
         self.with_read_view(|| {
             self.ensure_released(head)?;
-            let mut snapshot = self.head(head)?;
-            let mut size = 0;
-            let mut proof = super::inventory::Pages::new();
-            let mut tree = super::custody::tree::Tree::new(&self.db);
-            let mut include = |m: &super::Manifest| {
-                m.walk(
-                    |id| {
-                        let page = tree.read(id)?;
-                        if let std::collections::btree_map::Entry::Vacant(entry) = proof.entry(id) {
-                            size += serde_json::to_vec(&page)?.len();
-                            ensure!(
-                                size <= MAX_RELEASE_BYTES,
-                                "release witnesses exceed network limit"
-                            );
-                            entry.insert(page.clone());
-                        }
-                        Ok(page)
-                    },
-                    |_| Ok(()),
-                )
-            };
-            include(snapshot.manifest()?)?;
-            for &id in &snapshot.objects {
-                if id.format().is_none() && self.size(id)? <= 32768 {
-                    let bytes = self.resolve(&snapshot, id, "read")?;
-                    if let Some(m) = super::Manifest::from_packet(id, &bytes) {
-                        include(&m)?;
+            self.release_manifest(head)
+        })
+    }
+
+    fn release_manifest(&self, head: Id) -> Result<Snapshot> {
+        let mut snapshot = self.head(head)?;
+        check_manifest(head, &snapshot)?;
+        let mut total = 0;
+        let mut proof = Pages::new();
+        let mut tree = super::custody::tree::Tree::new(&self.db);
+        let mut include = |m: &super::Manifest, total: &mut usize| {
+            m.walk(
+                |id| {
+                    let page = tree.read(id)?;
+                    if let std::collections::btree_map::Entry::Vacant(entry) = proof.entry(id) {
+                        *total = charge_page(*total, &page)?;
+                        entry.insert(page.clone());
                     }
+                    Ok(page)
+                },
+                |_| Ok(()),
+            )
+        };
+        include(snapshot.manifest()?, &mut total)?;
+        for &id in &snapshot.objects {
+            let size = self.size(id)?;
+            total = charge_member(total, size)?;
+            if id.format().is_none() && size <= 32768 {
+                let bytes = self.resolve(&snapshot, id, "read")?;
+                if let Some(m) = super::Manifest::from_packet(id, &bytes) {
+                    include(&m, &mut total)?;
                 }
             }
-            snapshot.pages = proof;
-            Ok(snapshot)
-        })
+        }
+        snapshot.pages = proof;
+        Ok(snapshot)
     }
 
     pub fn released_member(&self, head: Id, id: Id) -> Result<Member> {
@@ -293,20 +302,10 @@ impl Archive {
     pub fn release(&self, head: Id) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let head = self.current_head_id(head)?;
-        let snapshot = self.head(head)?;
+        let snapshot = self.release_manifest(head)?;
         self.save(&snapshot)?;
         self.register_release(head, &snapshot)?;
         tx.commit()?;
-        Ok(())
-    }
-
-    fn account_member(&self, id: Id, total: &mut usize) -> Result<()> {
-        let size = self.size(id)?;
-        *total += size;
-        ensure!(
-            size <= MAX_MEMBER_BYTES && *total <= MAX_RELEASE_BYTES,
-            "release exceeds network limit"
-        );
         Ok(())
     }
 
@@ -325,10 +324,7 @@ impl Archive {
         Ok(())
     }
     fn register_release(&self, head: Id, s: &Snapshot) -> Result<()> {
-        check_manifest(head, s)?;
-        let mut total = 0;
         for &id in &s.objects {
-            self.account_member(id, &mut total)?;
             let bytes = self.resolve(s, id, "read")?;
             if let Some(format) = id.format() {
                 let record = Record::decode(&bytes, format)?;
@@ -364,6 +360,31 @@ pub struct ReplicaReview {
 }
 
 impl Archive {
+    fn seal_review_union(&self, parents: BTreeSet<Id>) -> Result<Id> {
+        let mut objects = BTreeSet::new();
+        for &head in &parents {
+            objects.extend(&self.head(head)?.objects);
+        }
+        self.seal_members("local replica review", parents, objects)?
+            .id()
+    }
+
+    fn review_horizon(&self, mut parents: BTreeSet<Id>) -> Result<Id> {
+        // Compact each sorted layer without discarding the member sets or original heads.
+        while parents.len() > MAX_MANIFEST_PARENTS {
+            let layer: Vec<_> = parents.into_iter().collect();
+            parents = BTreeSet::new();
+            for group in layer.chunks(MAX_MANIFEST_PARENTS) {
+                let head = match group {
+                    [head] => *head,
+                    _ => self.seal_review_union(group.iter().copied().collect())?,
+                };
+                parents.insert(head);
+            }
+        }
+        self.seal_review_union(parents)
+    }
+
     /// Re-evaluate a local standing training request across its original
     /// inventory and the complete releases visible to this custodian.
     pub fn review_releases(
@@ -378,13 +399,7 @@ impl Archive {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let mut parents = self.observed_releases()?;
         parents.insert(request.label_head);
-        let mut objects = BTreeSet::new();
-        for &head in &parents {
-            objects.extend(&self.head(head)?.objects);
-        }
-        let horizon = self
-            .seal_members("local replica review", parents, objects)?
-            .id()?;
+        let horizon = self.review_horizon(parents)?;
         let mut review = request.clone();
         review.label_head = horizon;
         let extraction = self.training_manifest(&review, Format::A)?;

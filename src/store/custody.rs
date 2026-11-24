@@ -416,11 +416,22 @@ impl Archive {
         id: Id,
         purpose: &str,
     ) -> Result<(Vec<u8>, Id)> {
+        self.read_member_under(tree, h, h.tree, id, purpose)
+    }
+
+    fn read_member_under(
+        &self,
+        tree: &mut Tree<'_>,
+        inventory: &Head,
+        policy_root: Id,
+        id: Id,
+        purpose: &str,
+    ) -> Result<(Vec<u8>, Id)> {
         let access = tree
-            .get(h.tree, &object(id))?
+            .get(inventory.tree, &object(id))?
             .context("outside inventory")?;
         ensure!(
-            tree.get(h.tree, &object(access))? == Some(Id::blob(PUBLIC)),
+            tree.get(policy_root, &object(access))? == Some(Id::blob(PUBLIC)),
             "missing access descriptor"
         );
         self.check_access(access, |p| allows(p, purpose))?;

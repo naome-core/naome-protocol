@@ -137,6 +137,7 @@ impl Archive {
             out.write_all(MAGIC)?;
             put(&mut out, &serde_json::to_vec(&delta)?)?;
             let mut remaining = distance;
+            let policy_root = tip.tree;
             let mut current = tip;
             while remaining > 0 {
                 let power = level(remaining);
@@ -148,8 +149,10 @@ impl Archive {
             }
             let mut tree = Tree::new(&self.db);
             let mut count = 0;
+            // The authenticated delta selects the members. The granted tip supplies their ACLs.
             for m in &delta.delta {
-                let (data, _) = self.read_member(&mut tree, &delta, m.id, "read")?;
+                let (data, _) =
+                    self.read_member_under(&mut tree, &delta, policy_root, m.id, "read")?;
                 count += data.len();
                 put(&mut out, &data)?;
             }
@@ -242,7 +245,8 @@ impl Archive {
             let mut payload = 0usize;
             let mut items = Vec::with_capacity(delta.delta.len());
             for member in &delta.delta {
-                let (bytes, _) = origin.read_member(&mut tree, &delta, member.id, "read")?;
+                let (bytes, _) =
+                    origin.read_member_under(&mut tree, &delta, tip.tree, member.id, "read")?;
                 payload = payload
                     .checked_add(bytes.len())
                     .context("payload overflow")?;
