@@ -73,6 +73,17 @@ use std::collections::BTreeMap;
 
 pub type Pages = BTreeMap<Id, Page>;
 
+#[derive(Debug)]
+pub(super) struct InvalidInventory(&'static str);
+
+impl std::fmt::Display for InvalidInventory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for InvalidInventory {}
+
 fn visit(
     id: Id,
     depth: usize,
@@ -82,7 +93,7 @@ fn visit(
     page: &mut impl FnMut(Id) -> Result<Page>,
     member: &mut impl FnMut(Id) -> Result<bool>,
 ) -> Result<bool> {
-    ensure!(depth <= 32, "inventory depth limit");
+    ensure!(depth <= 32, InvalidInventory("inventory depth limit"));
     let node = page(id)?;
     let (leaf, entries) = match &node {
         Page::Leaf(v) => (true, v),
@@ -90,19 +101,19 @@ fn visit(
     };
     ensure!(
         entries.len() <= 32 && (!entries.is_empty() || leaf && depth == 0),
-        "invalid inventory page size"
+        InvalidInventory("invalid inventory page size")
     );
     ensure!(
         entries.windows(2).all(|w| w[0].0 < w[1].0)
             && lower.is_none_or(|low| entries.first().is_some_and(|(k, _)| k == low))
             && upper.is_none_or(|high| entries.last().is_none_or(|(k, _)| k.as_str() < high)),
-        "invalid inventory key bounds"
+        InvalidInventory("invalid inventory key bounds")
     );
     for (i, (key, value)) in entries.iter().enumerate() {
         if leaf {
             ensure!(
                 key == &value.to_string(),
-                "invalid or repeated inventory member"
+                InvalidInventory("invalid or repeated inventory member")
             );
             if after.is_none_or(|cursor| key.as_str() > cursor) && !member(*value)? {
                 return Ok(false);
@@ -171,13 +182,19 @@ impl Manifest {
                 Ok(p)
             },
             &mut |id| {
-                ensure!(count < self.count, "inventory exceeds declared size");
+                ensure!(
+                    count < self.count,
+                    InvalidInventory("inventory exceeds declared size")
+                );
                 count += 1;
                 member(id)?;
                 Ok(true)
             },
         )?;
-        ensure!(count == self.count, "inventory count mismatch");
+        ensure!(
+            count == self.count,
+            InvalidInventory("inventory count mismatch")
+        );
         Ok(())
     }
     fn members(&self, page: impl FnMut(Id) -> Result<Page>) -> Result<BTreeSet<Id>> {

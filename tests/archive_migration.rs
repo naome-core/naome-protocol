@@ -554,6 +554,13 @@ fn migration_preserves_a_flat_review_with_more_than_64_parents() -> Result<()> {
     let current = archive.current_head_id(review)?;
     assert_ne!(current, review);
     assert_eq!(archive.head(current)?.objects, members);
+    let internal = archive
+        .head(current)?
+        .parents
+        .difference(&parents)
+        .copied()
+        .next()
+        .expect("a bounded ancestry group");
     let mut origins = BTreeSet::new();
     let mut pending = vec![current];
     while let Some(head) = pending.pop() {
@@ -566,6 +573,11 @@ fn migration_preserves_a_flat_review_with_more_than_64_parents() -> Result<()> {
         }
     }
     assert_eq!(origins, parents);
+    let lab = "legacy snapshot ancestry";
+    assert!(archive.custody_tips(lab, None, 10)?.is_empty());
+    let seal = archive.snapshot_id(lab, Default::default())?;
+    assert_eq!(archive.custody_tips(lab, None, 10)?, vec![seal]);
+    assert_eq!(archive.continue_snapshot(lab)?, seal);
     let sql = Connection::open(&target)?;
     assert_eq!(
         sql.query_row(
@@ -575,6 +587,18 @@ fn migration_preserves_a_flat_review_with_more_than_64_parents() -> Result<()> {
         )?,
         bytes
     );
+
+    // A draft migration could leave an index row for an otherwise addressable group.
+    sql.execute(
+        "INSERT INTO custody_tips VALUES(?,?)",
+        params![lab, internal.to_string()],
+    )?;
+    drop(sql);
+    drop(archive);
+    let archive = Archive::open(&target)?;
+    assert_eq!(archive.custody_tips(lab, None, 10)?, vec![seal]);
+    assert_eq!(archive.continue_snapshot(lab)?, seal);
+    assert_eq!(archive.head(internal)?.id()?, internal);
     Ok(())
 }
 
@@ -655,5 +679,51 @@ fn migration_keeps_legacy_release_history_and_catalogs_only_servable_heads() -> 
     );
     assert!(archive.released_manifest(current_large).is_err());
     assert!(archive.release(large).is_err());
+    Ok(())
+}
+
+#[test]
+fn migration_suspends_a_release_with_an_invalid_linked_inventory() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join("v017.sqlite");
+    let target = dir.path().join("current.sqlite");
+    let old = flat_archive(&source)?;
+    let public = Id::blob(PUBLIC);
+    let (healthy, _) = flat_head(&old, "one member", &BTreeSet::new(), &[public].into())?;
+    let scratch = Archive::memory()?;
+    let single = scratch.seal_members("one member", BTreeSet::new(), [public].into())?;
+    let mut invalid = single.manifest()?.clone();
+    invalid.count += 1;
+    let bytes = invalid.bytes()?;
+    let link = Id::blob(&bytes);
+    old.execute(
+        "INSERT INTO objects VALUES(?,?,?)",
+        params![link.to_string(), &bytes, public.to_string()],
+    )?;
+    let members = [link, public].into();
+    let (broken, _) = flat_head(&old, "legacy release", &BTreeSet::new(), &members)?;
+    for head in [healthy, broken] {
+        old.execute("INSERT INTO releases VALUES(?)", [head.to_string()])?;
+    }
+    drop(old);
+
+    Archive::migrate_archive_file(&source, &target)?;
+    let archive = Archive::open(&target)?;
+    let available = archive.current_head_id(healthy)?;
+    let suspended = archive.current_head_id(broken)?;
+    let historical = archive.head(broken)?;
+    assert_eq!(historical.objects, members);
+    assert_eq!(archive.resolve(&historical, link, "read")?, bytes);
+    assert_eq!(archive.head(suspended)?.objects, members);
+    assert_eq!(archive.observed_releases()?, [available, suspended].into());
+    assert_eq!(archive.releases()?, [available].into());
+    assert_eq!(archive.release_page(None)?.heads, vec![available]);
+    assert_eq!(archive.released_manifest(available)?.id()?, available);
+    assert!(archive.released_manifest(suspended).is_err());
+    let error = archive.release(suspended).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("inventory count mismatch"),
+        "{error:#}"
+    );
     Ok(())
 }

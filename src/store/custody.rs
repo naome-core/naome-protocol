@@ -158,6 +158,25 @@ impl Archive {
         origins: &BTreeSet<Id>,
         bootstrap_members: bool,
     ) -> Result<Admission> {
+        self.admit_custody_head(source, parent, items, origins, bootstrap_members, true)
+    }
+
+    /// A historical ancestry group is addressable by its head but has no live branch.
+    pub(super) fn seal_ancestry_group(&self, source: &str, origins: &BTreeSet<Id>) -> Result<Id> {
+        Ok(self
+            .admit_custody_head(source, None, &[], origins, false, false)?
+            .head)
+    }
+
+    fn admit_custody_head(
+        &self,
+        source: &str,
+        parent: Option<Id>,
+        items: &[Item],
+        origins: &BTreeSet<Id>,
+        bootstrap_members: bool,
+        track_tip: bool,
+    ) -> Result<Admission> {
         ensure!(
             !source.is_empty()
                 && source.len() <= 256
@@ -383,15 +402,17 @@ impl Archive {
             params![id.to_string(), bytes],
         )? != 0
         {
-            self.db.execute(
-                "INSERT INTO custody_tips VALUES(?,?)",
-                params![source, id.to_string()],
-            )?;
-            if let Some(p) = parent {
+            if track_tip {
                 self.db.execute(
-                    "DELETE FROM custody_tips WHERE source=? AND head=?",
-                    params![source, p.to_string()],
+                    "INSERT INTO custody_tips VALUES(?,?)",
+                    params![source, id.to_string()],
                 )?;
+                if let Some(p) = parent {
+                    self.db.execute(
+                        "DELETE FROM custody_tips WHERE source=? AND head=?",
+                        params![source, p.to_string()],
+                    )?;
+                }
             }
             for (level, ancestor) in head.ancestors.iter().enumerate() {
                 self.db

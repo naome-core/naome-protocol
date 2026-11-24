@@ -1,7 +1,7 @@
 //! Complete inventories explicitly released to a configured replication group.
 use super::{
     Archive, Snapshot, insert,
-    inventory::{Page, Pages, bound_parents},
+    inventory::{InvalidInventory, Page, Pages, bound_parents},
     snapshot::save_imported_head,
 };
 use crate::{
@@ -19,31 +19,31 @@ pub const MAX_MEMBER_BYTES: usize = 1024 * 1024;
 pub const MAX_RELEASE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]
-struct ReleaseLimit(&'static str);
+struct ReleaseUnavailable(&'static str);
 
-impl std::fmt::Display for ReleaseLimit {
+impl std::fmt::Display for ReleaseUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0)
     }
 }
 
-impl std::error::Error for ReleaseLimit {}
+impl std::error::Error for ReleaseUnavailable {}
 
 fn charge_page(total: usize, page: &Page) -> Result<usize> {
     let total = total + serde_json::to_vec(page)?.len();
     if total > MAX_RELEASE_BYTES {
-        return Err(ReleaseLimit("release witnesses exceed network limit").into());
+        return Err(ReleaseUnavailable("release witnesses exceed network limit").into());
     }
     Ok(total)
 }
 
 fn charge_member(total: usize, size: usize) -> Result<usize> {
     if size > MAX_MEMBER_BYTES {
-        return Err(ReleaseLimit("object exceeds network limit").into());
+        return Err(ReleaseUnavailable("object exceeds network limit").into());
     }
     let total = total + size;
     if total > MAX_RELEASE_BYTES {
-        return Err(ReleaseLimit("release exceeds network limit").into());
+        return Err(ReleaseUnavailable("release exceeds network limit").into());
     }
     Ok(total)
 }
@@ -283,7 +283,18 @@ impl Archive {
             if id.format().is_none() && size <= 32768 {
                 let bytes = self.resolve(snapshot, id, "read")?;
                 if let Some(m) = super::Manifest::from_packet(id, &bytes) {
-                    include(&m, &mut total)?;
+                    include(&m, &mut total).map_err(|err| {
+                        if err.is::<InvalidInventory>() {
+                            err.context(ReleaseUnavailable("invalid linked inventory witness"))
+                        } else if matches!(
+                            err.downcast_ref::<rusqlite::Error>(),
+                            Some(rusqlite::Error::QueryReturnedNoRows)
+                        ) {
+                            err.context(ReleaseUnavailable("missing inventory page"))
+                        } else {
+                            err
+                        }
+                    })?;
                 }
             }
         }
@@ -381,15 +392,7 @@ impl Archive {
         let suspend = suspended
             || match self.release_pages(head, s) {
                 Ok(_) => false,
-                Err(err) if err.is::<ReleaseLimit>() => true,
-                Err(err)
-                    if matches!(
-                        err.downcast_ref::<rusqlite::Error>(),
-                        Some(rusqlite::Error::QueryReturnedNoRows)
-                    ) =>
-                {
-                    true
-                }
+                Err(err) if err.is::<ReleaseUnavailable>() => true,
                 Err(err) => return Err(err),
             };
         self.db.execute(

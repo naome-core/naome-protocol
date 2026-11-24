@@ -6,6 +6,8 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 #[cfg(feature = "cli")]
 use std::path::Path;
 
+const LEGACY_ANCESTRY_SOURCE: &str = "legacy snapshot ancestry";
+
 impl Archive {
     /// Upgrade a consistent SQLite image at a new destination. Source and existing destinations are preserved.
     #[cfg(feature = "cli")]
@@ -67,6 +69,12 @@ impl Archive {
                     r.get(0)
                 })?;
         if done {
+            // Draft migrations registered internal groups as tips without sealing them as snapshots.
+            self.db.execute(
+                "DELETE FROM custody_tips WHERE source=?
+                 AND NOT EXISTS(SELECT 1 FROM heads WHERE id=custody_tips.head)",
+                [LEGACY_ANCESTRY_SOURCE],
+            )?;
             return Ok(());
         }
         let tx = &self.db;
@@ -162,9 +170,7 @@ impl Archive {
         let parents = bound_parents(s.parents.clone(), |group| {
             // Legacy parents can be external pins. Group them without loading their payloads
             // or adding synthetic inventories to the local search catalog.
-            Ok(self
-                .admit_batch("legacy snapshot ancestry", None, &[], &group, false)?
-                .head)
+            self.seal_ancestry_group(LEGACY_ANCESTRY_SOURCE, &group)
         })?;
         let next = self.seal_members(&s.source, parents, s.objects.clone())?;
         let current = next.id()?;
