@@ -11,7 +11,7 @@ readme = "README.md"
 include = [
     "src/**", "spec/kits/*", "spec/examples/exchange.json",
     "spec/research-evidence-protocol.tex", "spec/research-evidence-protocol.pdf",
-    "spec/scale/paged-custody.md", "tools/scale/qualify.py",
+    "tools/scale/qualify.py",
     "README.md", "LICENSE", "requirements-search*.txt",
 ]
 

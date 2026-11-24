@@ -709,6 +709,30 @@ For a tree of height $H$, a key lookup reads at most $H$ logical pages. Insertin
 \topic{Proposed independent scaling study}
 Hold a small edit fixed while increasing the prior inventory. Compare first admission, incremental transfer and historical lookup. Use mixed record and raw-stream sizes, concurrent writers, an interrupted receiver and repeated delivery. Measure pages, retained bytes, peak memory, transfer volume and elapsed time. Verify the same content identifiers and historical reads across implementations. Report generated identifiers, locally stored payloads and transfers between physical laboratories as separate workloads.
 
+\clearpage
+\pdfbookmark[2]{Archive transfer formats}{archivetransfer}
+\subsection*{Archive transfer formats}
+Use the compact JSON and blob identifier rules from page~\pageref{sec:exchangefile}. A canonical tree page is a JSON object with a single field, \texttt{Leaf} or \texttt{Branch}, containing at most 32 key--identifier pairs in ascending ASCII key order. Only an empty root leaf has zero pairs. Each page is at most 16 KiB. Admission partitions overflowing entries into $\lceil n/32\rceil$ contiguous groups, assigning $\lceil\text{remaining entries}/\text{remaining groups}\rceil$ to each successive group. Apply the same rule upwards to obtain one root.
+
+\topic{Portable custody deltas}
+The custody descriptor commits the fields in this order.
+\begin{small}
+\begin{verbatim}
+origins, inventory, count, bootstrap, source, parent, ancestors,
+sequence, tree, delta, missing, unresolved, opaque, restricted
+\end{verbatim}
+\end{small}
+\texttt{origins} matches the manifest parents. The physical parent is the previous batch on the source lineage, or null at sequence one. Ancestor $i$ names the head $2^i$ physical parent steps back. A delta member contains \texttt{id}, \texttt{access}, \texttt{position} and an \texttt{absent} field only when true. Position is null or an object with \texttt{stream} and unsigned \texttt{block}.
+
+The frame begins with the ASCII octets \texttt{NAOF}. Each following field begins with its unsigned 32-bit big-endian byte length. The first field holds the proposed delta descriptor. If its head differs from the independently pinned target, subsequent fields prove ancestry from the target. Each proof step selects the largest power-of-two jump that does not pass the proposed sequence. Verify every head identifier, source and sequence distance. The frame then carries the exact member bytes in delta order. Reject extra or incomplete fields. Require the admitted parent and derive the trees, coverage and head before committing.
+
+\topic{Paged and selective disclosure}
+The \texttt{naome-inventory-page-1} response binds \texttt{manifest}, \texttt{head}, \texttt{after}, \texttt{examined}, \texttt{complete}, \texttt{pages}, \texttt{packets} and \texttt{last}. The proof covers a consecutive range after the cursor, including the first unexamined member if present. Withheld members count as examined. Register the manifest after the verified prefix reaches the end and agrees with its count.
+
+A selective proof carries \texttt{version}, a custody \texttt{descriptor}, \texttt{pages}, \texttt{packets} and the requested \texttt{member} in version one or ordered \texttt{members} in version two. Verify the custody commitment against an external head pin and authenticate each member's inventory and access paths. The disclosure establishes read scope for the supplied members.
+
+A whole release counts member bytes and the canonical bytes of distinct required inventory pages, including linked witnesses, against a shared 16 MiB limit. Publication and replication require an inventory that can be delivered under this limit. Migration preserves the historical membership of previously observed releases. The active catalog excludes releases that exceed the current limit or lack valid linked inventory witnesses.
+
 \partpage{Sources and design lineage}
 \small
 The linked sources establish the disciplinary practices and interoperability precedents discussed in the paper. The proposed record types, decision rules, examples and acceptance criteria are the design presented here. Bracketed references in the text link to this catalogue.
