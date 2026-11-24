@@ -1,5 +1,6 @@
 use super::{
     Dependencies, IndexedRecord, IndexedSection, Passage,
+    lexical::{has_oversized_word, ranges},
     text::{MAX_TEXT_BYTES, Utf8Check, VerifiedTextChunk, payload_passages},
 };
 use crate::{
@@ -9,78 +10,13 @@ use crate::{
     wire::Id,
 };
 use anyhow::Result;
-use caseless::Caseless;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
-use std::{collections::BTreeSet, ops::Range};
-use unicode_normalization::UnicodeNormalization;
-use unicode_segmentation::UnicodeSegmentation;
+use std::collections::BTreeSet;
 
 const MAX_PAYLOAD: u64 = 256 * 1024;
 const MAX_FIELDS: usize = 64;
 const MAX_FIELD_BYTES: usize = 4096;
-pub(super) const PASSAGE_BYTES: usize = 768;
-
-pub(super) fn normalize(text: &str) -> String {
-    text.nfkc().default_case_fold().nfkc().collect()
-}
-
-pub(super) fn terms(normalized: &str) -> BTreeSet<&str> {
-    // UAX #29 retains scripts that do not use whitespace. Add adjacent Han
-    // tokens as an extra signal so a common single character cannot dominate.
-    let words: Vec<_> = normalized.unicode_word_indices().collect();
-    let mut result: BTreeSet<_> = words.iter().map(|&(_, word)| word).collect();
-    for pair in words.windows(2) {
-        let [(start, first), (next, second)] = pair else {
-            continue;
-        };
-        if start + first.len() == *next {
-            result.insert(&normalized[*start..next + second.len()]);
-        }
-    }
-    result
-}
-
-pub(super) fn ranges(text: &str) -> impl Iterator<Item = Range<usize>> {
-    let mut start = 0;
-    std::iter::from_fn(move || {
-        let remaining = text.get(start..)?.trim_start();
-        if remaining.is_empty() {
-            return None;
-        }
-        start = text.len() - remaining.len();
-        let mut width = remaining.len().min(PASSAGE_BYTES);
-        while !remaining.is_char_boundary(width) {
-            width -= 1;
-        }
-        if width < remaining.len() {
-            if let Some(boundary) = remaining[..width].rfind(char::is_whitespace)
-                && boundary >= width / 2
-            {
-                width = boundary;
-            } else {
-                // Compact data may have no whitespace between words. Look
-                // past the cut to find a word boundary before splitting.
-                let mut lookahead = (width + PASSAGE_BYTES).min(remaining.len());
-                while !remaining.is_char_boundary(lookahead) {
-                    lookahead -= 1;
-                }
-                width = remaining[..lookahead]
-                    .split_word_bound_indices()
-                    .map(|(offset, _)| offset)
-                    .take_while(|&offset| offset <= width)
-                    .last()
-                    .filter(|&offset| offset > 0)
-                    .unwrap_or(width);
-            }
-        }
-        let end = start + remaining[..width].trim_end().len();
-        let range = start..end;
-        start += width;
-        Some(range)
-    })
-}
-
 fn add_field(
     passages: &mut Vec<Passage>,
     pointer: &str,
@@ -231,7 +167,10 @@ impl Archive {
             let media = &document.subject;
             if text_media(media) {
                 match self.search_text(snapshot, &document, &mut dependencies) {
-                    Ok(section) => sections.push(section),
+                    Ok((section, incomplete)) => {
+                        sections.push(section);
+                        limited |= incomplete;
+                    }
                     Err(_) => {
                         limited = true;
                         cacheable = false;
@@ -276,27 +215,32 @@ impl Archive {
         snapshot: &Snapshot,
         document: &Document,
         dependencies: &mut Dependencies,
-    ) -> Result<IndexedSection> {
+    ) -> Result<(IndexedSection, bool)> {
         let length: u64 = document.field("length")?;
         let mut resolve = |id| self.search_source(snapshot, id, dependencies);
-        let (passages, pending_text) = if length <= MAX_PAYLOAD {
+        let (passages, pending_text, limited) = if length <= MAX_PAYLOAD {
             let mut bytes = Vec::new();
             document.materialize(MAX_PAYLOAD, &mut bytes, &mut resolve)?;
+            let text = std::str::from_utf8(&bytes)?;
             (
-                payload_passages(std::str::from_utf8(&bytes)?, 0).collect(),
+                payload_passages(text, 0).collect(),
                 None,
+                has_oversized_word(text),
             )
         } else {
             let mut utf8 = Utf8Check::default();
             document.materialize(MAX_TEXT_BYTES, &mut utf8, &mut resolve)?;
             utf8.finish()?;
-            (Vec::new(), Some(length))
+            (Vec::new(), Some(length), false)
         };
-        Ok(IndexedSection {
-            sources: dependencies.available.clone(),
-            passages,
-            pending_text,
-        })
+        Ok((
+            IndexedSection {
+                sources: dependencies.available.clone(),
+                passages,
+                pending_text,
+            },
+            limited,
+        ))
     }
 
     fn media_dependencies(

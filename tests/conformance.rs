@@ -32,6 +32,46 @@ fn help_uses_nao_with_an_exe_filename() -> Result<()> {
 }
 
 #[test]
+fn standalone_commands_leave_the_default_archive_absent() -> Result<()> {
+    let directory = tempdir()?;
+    let root = directory.path();
+    std::fs::write(root.join("kit.json"), include_bytes!("../spec/kits/A.json"))?;
+    std::fs::write(
+        root.join("model.json"),
+        br#"{"losses":[[1]],"joint_masses":[[1]],"loss_unit":"tick","acquisition_cost":0}"#,
+    )?;
+    let run = |args: &[&str]| -> Result<Vec<u8>> {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
+            .current_dir(root)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!root.join("evidence.sqlite").exists(), "{args:?}");
+        Ok(output.stdout)
+    };
+    run(&["capabilities"])?;
+    run(&["kit", "kit.json", &naome_protocol::kit::pin(Format::A)])?;
+    run(&["keygen", "seed"])?;
+    run(&["value", "model.json"])?;
+    run(&["trial", "trial"])?;
+    let submission = run(&["suite", "trial/conformance"])?;
+    std::fs::write(root.join("submission.json"), submission)?;
+    run(&["grade", "trial/conformance/answers.json", "submission.json"])?;
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
+        .current_dir(root)
+        .arg("init")
+        .output()?;
+    assert!(output.status.success());
+    assert!(root.join("evidence.sqlite").is_file());
+    Ok(())
+}
+
+#[test]
 fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
         .arg("capabilities")
@@ -69,9 +109,11 @@ fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
         let after = archive.snapshot("correction receipt", [head.id()?].into())?;
         let stored = archive.read(&after, id, "read")?;
         assert_eq!(capabilities[capability], stored.fields["evaluator"]);
-        assert_eq!(capabilities[capability], "rep-rust-rules-5");
+        assert_eq!(capabilities[capability], "rep-rust-rules-7");
     }
     let expected = [
+        "rep-rust-rules-7",
+        "rep-rust-rules-6",
         "rep-rust-rules-5",
         "rep-rust-rules-4",
         "rep-rust-rules-3",
@@ -86,6 +128,33 @@ fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
     .map(String::from)
     .into();
     assert_eq!(replay, expected);
+    Ok(())
+}
+
+#[test]
+fn projection_uses_only_the_selected_receipt_horizon() -> Result<()> {
+    for format in [Format::A, Format::B] {
+        let archive = Archive::memory()?;
+        let case = fixture::seed(&archive, format)?;
+        let full = archive.head(case.published)?;
+        let receipt = case.receipts[0];
+        let original = archive.read(&full, receipt, "read")?;
+        let snapshot_id = original.one("snapshot")?;
+        let historical = archive.head(snapshot_id)?;
+        let project = |view: &naome_protocol::store::Snapshot| {
+            archive.project_hull(view, receipt, &fixture::fixture_key(3), format)
+        };
+        project(&full)?;
+        let mut members = full.objects.clone();
+        members.remove(&snapshot_id);
+        let without_manifest = archive.seal_members(&full.source, full.parents.clone(), members)?;
+        assert!(project(&without_manifest).is_err());
+        let mut members = full.objects.clone();
+        assert!(historical.objects.contains(&case.policy));
+        members.remove(&case.policy);
+        let without_policy = archive.seal_members(&full.source, full.parents.clone(), members)?;
+        assert!(project(&without_policy).is_err());
+    }
     Ok(())
 }
 
@@ -542,6 +611,27 @@ fn controlled_test_exemptions_require_witness_and_a_scientific_pass() -> Result<
 }
 
 #[test]
+fn trial_rejects_an_existing_conformance_directory_before_creating_archives() -> Result<()> {
+    let directory = tempdir()?;
+    let cases = directory.path().join("conformance");
+    std::fs::create_dir(&cases)?;
+    let marker = cases.join("existing.json");
+    std::fs::write(&marker, b"existing result")?;
+
+    let trial = std::process::Command::new(env!("CARGO_BIN_EXE_nao"))
+        .arg("trial")
+        .arg(directory.path())
+        .output()?;
+    assert!(!trial.status.success());
+    let error = String::from_utf8(trial.stderr)?;
+    assert!(error.contains("fresh conformance directory"), "{error}");
+    assert_eq!(std::fs::read(&marker)?, b"existing result");
+    let remaining = std::fs::read_dir(directory.path())?.collect::<std::io::Result<Vec<_>>>()?;
+    assert_eq!(remaining.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn public_interchange_runs_through_cli_and_grades_external_output() -> Result<()> {
     use std::process::Command;
     let dir = tempdir()?;
@@ -580,6 +670,30 @@ fn public_interchange_runs_through_cli_and_grades_external_output() -> Result<()
     assert!(!bad.status.success());
     let score: Value = serde_json::from_slice(&bad.stdout)?;
     assert_eq!(score["incorrect_acceptance"], 1);
+
+    let cases_path = cases.join("cases.json");
+    let original: Value = serde_json::from_slice(&std::fs::read(&cases_path)?)?;
+    let full = &original["corrected/score-above"];
+    let mut record_limited = full.clone();
+    record_limited["query"]["budget"] = json!(1);
+    let mut byte_limited = full.clone();
+    byte_limited["query"]["byte_limit"] = json!(1);
+    let mixed = json!({
+        "a-record-limit": record_limited,
+        "b-full": full,
+        "c-byte-limit": byte_limited,
+    });
+    std::fs::write(cases_path, serde_json::to_vec(&mixed)?)?;
+    let run = Command::new(nao).arg("suite").arg(cases).output()?;
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&run.stdout)?,
+        json!({"a-record-limit": "unknown", "b-full": "fail", "c-byte-limit": "unknown"})
+    );
     Ok(())
 }
 
@@ -680,15 +794,21 @@ fn withdrawals_leave_historic_proofs_and_unaffected_arguments_available() -> Res
 
 #[test]
 fn legacy_calibration_fixture_retains_its_published_identity() -> Result<()> {
-    let archive = Archive::memory()?;
-    let case = fixture::seed_legacy(&archive, Format::A)?;
-    assert_eq!(
-        case.published.to_string(),
-        "1:1:b7826ed27f6f1fdc30fad29e48727cc2fef11b9c7316669f3fef7018700ef0a9"
-    );
-    assert_eq!(
-        case.receipts[2].to_string(),
-        "1:0:ee829956a6e4e9a2469d51ed8385c85b493ca9f286c6ea132d85fa05c16bded4"
-    );
+    // Original manifest, receipt, and access descriptor from the writer at 78419e5.
+    let bundle = naome_protocol::store::Bundle::read(
+        &include_bytes!("fixtures/legacy-calibration-receipt.json")[..],
+    )?;
+    let mut archive = Archive::memory()?;
+    let active = archive.import(&bundle)?;
+    let original: Id =
+        "1:1:b7826ed27f6f1fdc30fad29e48727cc2fef11b9c7316669f3fef7018700ef0a9".parse()?;
+    let receipt: Id =
+        "1:0:ee829956a6e4e9a2469d51ed8385c85b493ca9f286c6ea132d85fa05c16bded4".parse()?;
+    assert_eq!(bundle.head, original);
+    assert_eq!(archive.head(original)?.id()?, original);
+    assert_ne!(active, original);
+    for head in [original, active] {
+        receipt.verify(&archive.resolve(&archive.head(head)?, receipt, "read")?)?;
+    }
     Ok(())
 }

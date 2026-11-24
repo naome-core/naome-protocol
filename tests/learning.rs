@@ -154,7 +154,12 @@ fn released_v012_receipt_replays_with_its_original_withdrawal_semantics() -> Res
         serde_json::from_str(include_str!("fixtures/v0.1.2-required-withdrawal.json"))?;
     let mut archive = Archive::memory()?;
     let head = archive.import(&vector.bundle)?;
-    assert_eq!(head, vector.request.label_head);
+    assert_ne!(head, vector.request.label_head);
+    assert_eq!(archive.current_head_id(vector.request.label_head)?, head);
+    assert_eq!(
+        archive.head(vector.request.label_head)?.id()?,
+        vector.request.label_head
+    );
     let label = vector.request.examples[0].label;
     let view = archive.head(head)?;
     let receipt = archive.read(&view, vector.receipt, "read")?;
@@ -209,6 +214,49 @@ fn released_v012_receipt_replays_with_its_original_withdrawal_semantics() -> Res
 }
 
 #[test]
+fn rules_5_receipt_replays_with_its_original_record_budget() -> Result<()> {
+    // Deposited by the evaluator at release PR #22 commit 2add0aae.
+    #[derive(serde::Deserialize)]
+    struct Vector {
+        bundle: naome_protocol::store::Bundle,
+        receipt: Id,
+        request: TrainingRequest,
+        expected_manifest: Id,
+    }
+
+    let vector: Vector = serde_json::from_str(include_str!("fixtures/rules-5-record-budget.json"))?;
+    let mut archive = Archive::memory()?;
+    let head = archive.import(&vector.bundle)?;
+    assert_ne!(head, vector.request.label_head);
+    assert_eq!(archive.current_head_id(vector.request.label_head)?, head);
+    assert_eq!(
+        archive.head(vector.request.label_head)?.id()?,
+        vector.request.label_head
+    );
+    let snapshot = archive.head(head)?;
+    let receipt = archive.read(&snapshot, vector.receipt, "read")?;
+    assert_eq!(receipt.fields["evaluator"], "rep-rust-rules-5");
+    let original: evaluation::Receipt = receipt.field("original_transcript")?;
+    assert!(original.horizon_complete);
+    assert_eq!(original.result, Some(Standing::Supported));
+
+    let horizon = archive.head(receipt.one("snapshot")?)?;
+    let query: Query = receipt.field("original_query")?;
+    let records = horizon
+        .objects
+        .iter()
+        .filter(|id| id.format().is_some())
+        .count();
+    assert!(records <= query.budget && query.budget < horizon.objects.len());
+
+    let replay = archive.training_manifest(&vector.request, Format::A)?;
+    assert_eq!(replay.included, [vector.request.examples[0].label]);
+    assert!(replay.withheld.is_empty(), "{:?}", replay.withheld);
+    assert_eq!(replay.manifest, vector.expected_manifest);
+    Ok(())
+}
+
+#[test]
 fn training_reuses_inventories_without_widening_query_budgets() -> Result<()> {
     let archive = Archive::memory()?;
     let format = Format::A;
@@ -234,13 +282,21 @@ fn training_reuses_inventories_without_widening_query_budgets() -> Result<()> {
             ..query.clone()
         },
     ];
+    // Alternate between two immutable horizons, returning to the first for the byte-budget replay.
+    let second = archive.seal_members(
+        "same evidence",
+        [evidence.id()?].into(),
+        evidence.objects.clone(),
+    )?;
     let receipts = queries
         .iter()
-        .map(|query| -> Result<Id> {
-            let receipt = evaluation::assess(&archive, &evidence, query)?;
+        .enumerate()
+        .map(|(index, query)| -> Result<Id> {
+            let horizon = if index == 1 { &second } else { &evidence };
+            let receipt = evaluation::assess(&archive, horizon, query)?;
             assert!(receipt.horizon_complete);
             assert_eq!(receipt.result, Some(Standing::Supported));
-            evaluation::deposit_receipt(&archive, &evidence, query, &receipt, format)
+            evaluation::deposit_receipt(&archive, horizon, query, &receipt, format)
         })
         .collect::<Result<Vec<_>>>()?;
     let assessed = archive.snapshot("assessed", [case.published].into())?;
@@ -289,7 +345,6 @@ fn adoption_compares_frozen_arms_and_rejects_exposure() -> Result<()> {
     use naome_protocol::adoption::Adoption;
     let a = Archive::memory()?;
     let f = Format::B;
-    let public = Id::blob(PUBLIC);
     let put = |k, body, edges| fixture::put(&a, f, k, "successor", "held-out trial", body, edges);
     let task = put(Kind::Question, json!({"question":"finite task"}), vec![])?;
     let protected = put(
@@ -314,7 +369,7 @@ fn adoption_compares_frozen_arms_and_rejects_exposure() -> Result<()> {
         ],
     )?;
     let sealed = a.snapshot("precommit", BTreeSet::new())?;
-    let sealed_head = a.blob(&serde_json::to_vec(&sealed)?, public)?;
+    let sealed_head = a.deposit_manifest(&sealed)?;
     for exposures in [0, 1] {
         let observation = put(
             Kind::Occurrence,
@@ -428,6 +483,119 @@ fn training_rejects_duplicate_targets_false_origins_and_superseded_labels() -> R
     Ok(())
 }
 
+fn check_outcome_cutoff(format: Format, early: bool, use_raw: bool, chunked: bool) -> Result<()> {
+    let archive = Archive::memory()?;
+    let data = fixture::seed(&archive, format)?;
+    let old = archive.head(data.s0)?;
+    let mut q = data.queries[2].clone();
+    let mut argument = archive.read(&old, q.arguments[0], "read")?;
+    let plan = argument.one("plan")?;
+    let existing_outcome = argument.roles("reading").next().unwrap();
+    let mut outcome = archive.read(&old, existing_outcome, "read")?;
+    let raw = serde_json::to_vec(&outcome.fields)?;
+    let exact_observation = archive.blob(&raw, Id::blob(PUBLIC))?;
+    let recorded_payload = if chunked {
+        let bytes = [raw.as_slice(), b"\n"].concat();
+        archive.capture(
+            bytes.as_slice(),
+            "application/json",
+            raw.len(),
+            Id::blob(PUBLIC),
+            format,
+        )?
+    } else {
+        exact_observation
+    };
+    let baseline = archive.blob(b"shared pre-outcome baseline", Id::blob(PUBLIC))?;
+    let before = archive.head(data.feature_cutoff)?;
+    let mut members = before.objects.clone();
+    members.insert(baseline);
+    if early {
+        members.insert(exact_observation);
+    }
+    let before = archive.seal_members(
+        "synthetic prospective cutoff",
+        before.parents.clone(),
+        members,
+    )?;
+    let cutoff = archive.deposit_manifest(&before)?;
+    outcome.inputs.push(link("outcome-input", recorded_payload));
+    outcome.inputs.push(link("baseline", baseline));
+    let outcome_id = archive.document(&outcome, format, Id::blob(PUBLIC))?;
+    let mut release = archive.read(&old, argument.one("release")?, "read")?;
+    release.inputs.retain(|e| e.role != "feature-cutoff");
+    release.inputs.push(link("feature-cutoff", cutoff));
+    release
+        .fields
+        .insert("source".into(), json!("synthetic prospective review"));
+    let witness = archive.document(&release, format, Id::blob(PUBLIC))?;
+    fixture::sign(&archive, format, witness, &release.scope, "release", 6)?;
+    for edge in &mut argument.inputs {
+        if edge.role == "release" {
+            edge.target = witness;
+        }
+        if edge.role == "reading" && edge.target == existing_outcome {
+            edge.target = outcome_id;
+        }
+    }
+    let revised = archive.document(&argument, format, Id::blob(PUBLIC))?;
+    fixture::sign(&archive, format, revised, &release.scope, "data-origin", 7)?;
+    q.arguments = vec![revised];
+    let horizon = archive.snapshot("assessment", [data.s0].into())?;
+    let receipt = evaluation::assess(&archive, &horizon, &q)?;
+    assert_eq!(receipt.result, Some(Standing::Supported));
+    let receipt_id = evaluation::deposit_receipt(&archive, &horizon, &q, &receipt, format)?;
+    let receipts = archive.snapshot("receipts", [horizon.id()?].into())?;
+    let label = archive.label(&receipts, receipt_id, "synthetic", None, None, format)?;
+    let labeled = archive.snapshot("labeled", [receipts.id()?].into())?;
+    let result = archive.training_manifest(
+        &TrainingRequest {
+            feature_cutoff: cutoff,
+            label_head: labeled.id()?,
+            policy: data.policy,
+            standing: Default::default(),
+            forecast_plan: Some(plan),
+            mappings: vec![],
+            project: None,
+            independent_roles: Default::default(),
+            binary: true,
+            examples: vec![Example {
+                features: vec![if use_raw { exact_observation } else { baseline }],
+                label,
+                partition: "test".into(),
+            }],
+        },
+        format,
+    )?;
+    if early || use_raw {
+        assert!(result.included.is_empty());
+        assert_eq!(
+            result.withheld[&label],
+            if early {
+                "outcome evidence visible at the feature cutoff"
+            } else {
+                "unavailable, late, or prohibited training input"
+            }
+        );
+    } else {
+        assert_eq!(result.included, [label]);
+    }
+    Ok(())
+}
+
+#[test]
+fn forecasts_check_declared_outcome_lineage_and_accept_shared_baselines() -> Result<()> {
+    for format in [Format::A, Format::B] {
+        for chunked in [false, true] {
+            check_outcome_cutoff(format, false, false, chunked)?;
+            check_outcome_cutoff(format, false, true, chunked)?;
+            check_outcome_cutoff(format, true, true, chunked)?;
+            check_outcome_cutoff(format, true, false, chunked)?;
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn prospective_training_requires_an_admitted_witness_and_concealed_outcomes() -> Result<()> {
     let f = Format::A;
@@ -441,7 +609,7 @@ fn prospective_training_requires_an_admitted_witness_and_concealed_outcomes() ->
         let outcome = arg.roles("reading").next().unwrap();
         let mut release = a.read(&old, arg.one("release")?, "read")?;
         let cutoff = if signed {
-            a.blob(&serde_json::to_vec(&old)?, Id::blob(PUBLIC))?
+            a.deposit_manifest(&old)?
         } else {
             i.feature_cutoff
         };
@@ -533,7 +701,7 @@ fn signed_disciplinary_targets_survive_exchange_and_enforce_use_scope() -> Resul
         vec![],
     )?;
     let ready = a.snapshot("features", BTreeSet::new())?;
-    let before = a.blob(&serde_json::to_vec(&ready)?, unrestricted)?;
+    let before = a.blob(&ready.manifest()?.bytes()?, unrestricted)?;
     let cases = [
         (
             "clinical",
@@ -704,5 +872,120 @@ fn signed_disciplinary_targets_survive_exchange_and_enforce_use_scope() -> Resul
             .contains("interval interpretation differs from profile")
     );
 
+    Ok(())
+}
+
+#[test]
+fn historical_extraction_reads_mapping_manifests_under_the_receipts_rules() -> Result<()> {
+    use naome_protocol::learning::LabelStanding;
+    let archive = Archive::memory()?;
+    let format = Format::A;
+    let case = fixture::seed(&archive, format)?;
+    let head = archive.head(case.s0)?;
+    let query = &case.queries[2];
+    let plan = archive
+        .read(&head, query.arguments[0], "read")?
+        .one("plan")?;
+    let receipt = evaluation::assess(&archive, &head, query)?;
+    let receipt_id = evaluation::deposit_receipt(&archive, &head, query, &receipt, format)?;
+    let signed = archive.snapshot("current receipt", Default::default())?;
+    let current = archive.label(&signed, receipt_id, "synthetic", None, None, format)?;
+
+    // Both encodings identify the same historical inventory contents.
+    let migration = archive.migrate(&head, Format::B, "lab")?;
+    let exchange = archive.head(migration.exchange_head)?;
+    let mut mapping = archive.read(&exchange, migration.mapping, "read")?;
+    let pretty = archive.blob(
+        &serde_json::to_vec_pretty(head.manifest()?)?,
+        Id::blob(PUBLIC),
+    )?;
+    mapping
+        .inputs
+        .iter_mut()
+        .find(|edge| edge.role == "source-inventory")
+        .unwrap()
+        .target = pretty;
+    let previous_mapping = archive.document(&mapping, format, Id::blob(PUBLIC))?;
+    let horizon = archive.snapshot("two receipt versions", Default::default())?;
+    let mut request = TrainingRequest {
+        feature_cutoff: case.feature_cutoff,
+        forecast_plan: None,
+        mappings: vec![migration.mapping],
+        label_head: horizon.id()?,
+        policy: case.policy,
+        standing: LabelStanding::Historical,
+        project: None,
+        examples: [case.labels[2], current]
+            .into_iter()
+            .map(|label| Example {
+                features: vec![plan],
+                label,
+                partition: "train".into(),
+            })
+            .collect(),
+        independent_roles: Default::default(),
+        binary: true,
+    };
+    let control = archive.training_manifest(&request, format)?;
+    assert_eq!(control.included, [case.labels[2], current]);
+    request.mappings = vec![previous_mapping];
+    let historical = archive.training_manifest(&request, format)?;
+    assert_eq!(historical.included, [case.labels[2]]);
+    assert_eq!(
+        historical.withheld[&current],
+        "current receipt requires canonical mapping inventories"
+    );
+    request.standing = LabelStanding::Current;
+    assert!(archive.training_manifest(&request, format).is_err());
+    Ok(())
+}
+
+#[test]
+fn replica_review_preserves_all_origins_beyond_one_manifest() -> Result<()> {
+    use naome_protocol::store::sharing::MAX_MANIFEST_PARENTS;
+    let a = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let policy = fixture::policy(&a, Format::A)?;
+    let labels = a.snapshot("labels", Default::default())?;
+    let mut origins = BTreeSet::from([labels.id()?]);
+    let mut members = labels.objects.clone();
+    for n in 0..MAX_MANIFEST_PARENTS {
+        let member = a.blob(&n.to_be_bytes(), public)?;
+        let release = a.selected_snapshot("peer", Default::default(), [member].into())?;
+        a.release(release.id()?)?;
+        origins.insert(release.id()?);
+        members.insert(member);
+        if n == 0 {
+            a.withdraw(member)?;
+        }
+    }
+    let request = TrainingRequest {
+        policy,
+        feature_cutoff: labels.id()?,
+        label_head: labels.id()?,
+        forecast_plan: None,
+        standing: Default::default(),
+        mappings: vec![],
+        project: None,
+        examples: vec![],
+        independent_roles: Default::default(),
+        binary: false,
+    };
+    let horizon = a.review_releases(&request)?.review_horizon;
+    assert_eq!(a.review_releases(&request)?.review_horizon, horizon);
+    let view = a.head(horizon)?;
+    assert_eq!(view.objects, members);
+    let mut leaves = BTreeSet::new();
+    let mut pending = vec![horizon];
+    while let Some(head) = pending.pop() {
+        if origins.contains(&head) {
+            leaves.insert(head);
+        } else {
+            let node = a.head(head)?;
+            assert!((1..=MAX_MANIFEST_PARENTS).contains(&node.parents.len()));
+            pending.extend(&node.parents);
+        }
+    }
+    assert_eq!(leaves, origins);
     Ok(())
 }

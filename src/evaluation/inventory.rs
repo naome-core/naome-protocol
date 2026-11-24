@@ -6,10 +6,12 @@ use crate::{
     wire::Id,
 };
 use anyhow::{Result, ensure};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Readable records and their indexes for one snapshot in the current archive transaction.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub(crate) struct ReadInventory {
     pub(crate) documents: BTreeMap<Id, Document>,
     pub(crate) notices: BTreeSet<Id>,
@@ -20,6 +22,13 @@ pub(crate) struct ReadInventory {
     skipped_identity_checks: bool,
     sizes: BTreeMap<Id, usize>,
     complete_scan: Option<(usize, usize)>,
+}
+
+/// A suffix of the record order in the report's immutable snapshot.
+#[derive(Clone, Copy, Serialize)]
+pub(super) struct UnscannedRecords {
+    after: Option<Id>,
+    next: Id,
 }
 
 impl ReadInventory {
@@ -46,6 +55,27 @@ impl ReadInventory {
             inventory.read(store, snapshot, id, retain);
         }
         Ok(inventory)
+    }
+
+    pub(super) fn bounded(
+        store: &Archive,
+        snapshot: &Snapshot,
+        purpose: &str,
+        budget: usize,
+        mut after: Option<Id>,
+        retain: impl Fn(&Document) -> bool,
+    ) -> (Self, BTreeSet<Id>, Option<UnscannedRecords>) {
+        let mut records = snapshot.records_after(after);
+        let mut inventory = Self::default();
+        let mut frontier = BTreeSet::new();
+        for id in records.by_ref().take(budget) {
+            after = Some(id);
+            if !inventory.read_for(store, snapshot, id, purpose, &retain) {
+                frontier.insert(id);
+            }
+        }
+        let unscanned = records.next().map(|next| UnscannedRecords { after, next });
+        (inventory, frontier, unscanned)
     }
 
     pub(crate) fn notice_search_complete(&self) -> bool {
@@ -95,8 +125,20 @@ impl ReadInventory {
         id: Id,
         retain: bool,
     ) -> bool {
-        let hidden = match store.read(snapshot, id, "read") {
+        self.read_for(store, snapshot, id, "read", |_| retain)
+    }
+
+    fn read_for(
+        &mut self,
+        store: &Archive,
+        snapshot: &Snapshot,
+        id: Id,
+        purpose: &str,
+        retain: impl FnOnce(&Document) -> bool,
+    ) -> bool {
+        let hidden = match store.read(snapshot, id, purpose) {
             Ok(document) => {
+                let retain = retain(&document);
                 match document.kind {
                     Kind::Notice => {
                         self.notices.insert(id);
@@ -130,7 +172,7 @@ impl ReadInventory {
                 self.inspected.insert(id, false);
                 return true;
             }
-            Err(_) => store.may_be_notice(snapshot, id),
+            Err(_) => store.may_be_notice(snapshot, id, purpose),
         };
         self.inspected.insert(id, hidden);
         false
@@ -142,8 +184,9 @@ impl ReadInventory {
         snapshot: &Snapshot,
         query: &Query,
         out: &mut Receipt,
-        records_only: bool,
+        budget_rule: &super::NoticeBudget,
     ) -> Result<()> {
+        let records_only = !matches!(budget_rule, super::NoticeBudget::Objects);
         if let Some((records, bytes)) = self.complete_scan
             && (if records_only {
                 records
@@ -159,12 +202,21 @@ impl ReadInventory {
         let mut hidden = false;
         let mut bytes_left = query.byte_limit;
         let mut records = 0;
-        let objects = snapshot
-            .objects
-            .iter()
-            .copied()
-            .filter(|id| !records_only || id.format().is_some());
+        let mut all_objects = snapshot.objects.iter().copied();
+        let mut records_in_order = snapshot.records();
+        let objects: &mut dyn Iterator<Item = Id> = if records_only {
+            &mut records_in_order
+        } else {
+            &mut all_objects
+        };
         for (index, id) in objects.enumerate() {
+            if matches!(budget_rule, super::NoticeBudget::CompactRecords)
+                && (index >= query.budget || bytes_left == 0)
+            {
+                out.unscanned_records_from = Some(id);
+                out.frontier.insert(id);
+                break;
+            }
             if index >= query.budget {
                 out.frontier.insert(id);
                 continue;
@@ -202,6 +254,122 @@ impl ReadInventory {
     }
 }
 
+impl UnscannedRecords {
+    pub(super) fn expand(self, snapshot: &Snapshot, frontier: &mut BTreeSet<Id>) {
+        frontier.extend(snapshot.records_after(self.after));
+    }
+}
+
+enum GraphScan {
+    Legacy,
+    Compact { after: Option<Id> },
+}
+
+impl Archive {
+    /// Include arguments citing the target and candidate defeaters in the declared inventory.
+    pub fn argument_graph(
+        &self,
+        snapshot: &Snapshot,
+        target: Id,
+        purpose: &str,
+        budget: usize,
+        depth: usize,
+    ) -> Result<Value> {
+        self.argument_graph_report(snapshot, target, purpose, budget, depth, GraphScan::Legacy)
+    }
+
+    /// Use a compact record frontier. The returned cursor can resume the scan at the same snapshot.
+    pub fn argument_graph_page(
+        &self,
+        snapshot: &Snapshot,
+        target: Id,
+        purpose: &str,
+        budget: usize,
+        depth: usize,
+        after: Option<Id>,
+    ) -> Result<Value> {
+        ensure!(
+            after.is_none_or(|id| id.format().is_some() && snapshot.objects.contains(&id)),
+            "scan cursor is outside the snapshot record inventory"
+        );
+        self.argument_graph_report(
+            snapshot,
+            target,
+            purpose,
+            budget,
+            depth,
+            GraphScan::Compact { after },
+        )
+    }
+
+    fn argument_graph_report(
+        &self,
+        snapshot: &Snapshot,
+        target: Id,
+        purpose: &str,
+        budget: usize,
+        depth: usize,
+        scan: GraphScan,
+    ) -> Result<Value> {
+        let after = match scan {
+            GraphScan::Legacy => None,
+            GraphScan::Compact { after } => after,
+        };
+        let keep_argument = |doc: &Document| {
+            doc.kind == Kind::Argument && doc.roles("claim").any(|id| id == target)
+        };
+        let (inventory, mut unsearched, unscanned) =
+            ReadInventory::bounded(self, snapshot, purpose, budget, after, keep_argument);
+        if matches!(scan, GraphScan::Legacy)
+            && let Some(tail) = unscanned
+        {
+            tail.expand(snapshot, &mut unsearched);
+        }
+        let arguments: Vec<_> = inventory
+            .documents
+            .iter()
+            .filter(|(_, doc)| doc.kind == Kind::Argument)
+            .map(|(&id, _)| id)
+            .collect();
+        let mut roots = arguments.clone();
+        roots.push(target);
+        let graph = self.explain(snapshot, &roots, purpose, budget, depth);
+        let notice_targets = |id: &Id| {
+            inventory.documents[id]
+                .inputs
+                .iter()
+                .map(|edge| edge.target)
+        };
+        let contrary: Vec<_> = inventory
+            .notices
+            .iter()
+            .filter(|id| notice_targets(id).any(|target| graph.visited.contains(&target)))
+            .collect();
+        let mut report = json!({
+            "snapshot": snapshot.id()?,
+            "source": snapshot.source,
+            "target": target,
+            "arguments": arguments,
+            "dependencies": graph,
+            "candidate_notices": contrary,
+            "unsearched": unsearched,
+            "budget_per_phase": budget,
+        });
+        if matches!(scan, GraphScan::Compact { .. }) {
+            // A notice and the argument exposing its premise may fall on different pages.
+            // Keep the endpoints of every readable notice for the cross-page join.
+            let targets: BTreeMap<_, BTreeSet<_>> = inventory
+                .notices
+                .iter()
+                .map(|id| (id, notice_targets(id).collect()))
+                .collect();
+            report["notice_targets"] = json!(targets);
+            report["unscanned"] = json!(unscanned);
+        }
+        Ok(report)
+    }
+}
+
 pub(crate) struct EvidenceView<'a> {
     pub store: &'a Archive,
     pub snapshot: &'a Snapshot,
@@ -217,7 +385,7 @@ impl EvidenceView<'_> {
         role: &str,
         trusted: &BTreeSet<String>,
     ) -> Option<Id> {
-        for endpoint in self.aliases.endpoints(id) {
+        for endpoint in self.aliases.members(id) {
             if self.store.resolve(self.snapshot, endpoint, "read").is_err() {
                 continue;
             }

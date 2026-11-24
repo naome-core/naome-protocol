@@ -1,19 +1,24 @@
 [package]
 name = "naome-protocol"
 default-run = "nao"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/naome-core/naome-protocol"
 description = "An offline, content-addressed research evidence archive and evaluator"
 readme = "README.md"
-include = ["src/**", "spec/**", "tests/**", "README.md", "LICENSE", "requirements-search*.txt"]
+include = [
+    "src/**", "spec/kits/*", "spec/examples/exchange.json",
+    "spec/research-evidence-protocol.tex", "spec/research-evidence-protocol.pdf",
+    "tools/scale/qualify.py",
+    "README.md", "LICENSE", "requirements-search*.txt",
+]
 
 [features]
 default = ["cli", "semantic-search"]
 semantic-search = ["dep:base64"]
-cli = ["dep:clap", "dep:getrandom", "dep:tempfile"]
+cli = ["dep:clap", "dep:getrandom", "dep:tempfile", "dep:windows-sys"]
 
 [[bin]]
 name = "nao"
@@ -28,6 +33,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 ed25519-dalek = "2"
 getrandom = { version = "0.3", optional = true }
 hex = "0.4"
+miniz_oxide = "0.8.9"
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,3 +41,12 @@ sha2 = "0.10"
 tempfile = { version = "3", optional = true }
 unicode-normalization = "0.1"
 unicode-segmentation = "1.12"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices", "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"

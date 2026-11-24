@@ -241,6 +241,10 @@ fn run_profile(
     )?;
     assert!(!amended_head.objects.contains(&missing));
     let impact = archive.impact_with_policy(&amended_head, admitted, &[], 1000, Some(policy))?;
+    assert_eq!(
+        archive.impact_head(amended_head.id()?, admitted, &[], 1000, Some(policy), false)?,
+        serde_json::to_value(&impact)?
+    );
     assert!(impact.frontier.is_empty());
     assert_eq!(impact.correction_authority, Some(authority));
     assert_eq!(impact.by_kind["assessment"], [historical].into());
@@ -467,17 +471,21 @@ fn missing_provenance_record_keeps_possible_correction_exposure_open() -> Result
         220,
         vec![],
     )?;
-    let mut before = archive.snapshot(
+    let before = archive.snapshot(
         "raw value without its provenance record",
         Default::default(),
     )?;
-    assert!(before.objects.remove(&derivation));
+    let mut members = before.objects.clone();
+    assert!(members.remove(&derivation));
+    let before = archive.seal_members(&before.source, before.parents.clone(), members)?;
     let original = assess(&archive, &before, &query)?;
     assert_eq!(original.result, Some(Standing::Supported));
 
     let (notice, _) = study.notice(old, &coverage, evidence, ISSUER)?;
-    let mut after = archive.snapshot("after input correction", [archive.save(&before)?].into())?;
-    assert!(after.objects.remove(&derivation));
+    let after = archive.snapshot("after input correction", [archive.save(&before)?].into())?;
+    let mut members = after.objects.clone();
+    assert!(members.remove(&derivation));
+    let after = archive.seal_members(&after.source, after.parents.clone(), members)?;
     let current = assess(&archive, &after, &query)?;
     assert_eq!(current.result, Some(Standing::Unresolved));
     assert!(current.frontier.contains(&derivation));
@@ -545,5 +553,111 @@ fn unrelated_payloads_do_not_spend_the_notice_and_impact_record_budget() -> Resu
     assert!(!limited.horizon_complete);
     assert_eq!(limited.frontier.len(), 1);
     assert!(limited.frontier.iter().all(|id| id.format().is_some()));
+    let next = *limited.frontier.first().unwrap();
+    let compact = archive.impact_compact(&larger, notice, &[], query.budget, Some(query.policy))?;
+    assert_eq!(compact["snapshot"], json!(larger.id()?));
+    assert_eq!(compact["unscanned"]["next"], json!(next));
+    assert!(compact.get("outside_scope").is_none());
+    assert!(compact.get("correction_authority").is_none());
+
+    let page =
+        archive.argument_graph_page(&larger, query.target, "read", query.budget, 48, None)?;
+    assert_eq!(page["unsearched"], json!([]));
+    assert_eq!(page["unscanned"]["next"], json!(next));
+    let after = serde_json::from_value(page["unscanned"]["after"].clone())?;
+    let rest = archive.argument_graph_page(&larger, query.target, "read", 1, 48, Some(after))?;
+    assert_eq!(rest["unsearched"], json!([]));
+    assert!(rest["unscanned"].is_null());
+    let graph = archive.argument_graph(&larger, query.target, "read", query.budget, 48)?;
+    assert_eq!(graph["unsearched"], json!([next]));
+    Ok(())
+}
+
+#[test]
+fn indexed_input_review_stays_inside_the_candidate_budget() -> Result<()> {
+    let a = Archive::memory()?;
+    let study = Study {
+        archive: &a,
+        format: Format::A,
+    };
+    let version = a.blob(b"input version", Id::blob(PUBLIC))?;
+    let evidence = a.blob(b"source revision", Id::blob(PUBLIC))?;
+    let scope = json!({"profile":"table-rows-1","selector":{"ranges":[[1,3]],"columns":["x"]}});
+    let read = study.record(
+        Kind::Occurrence,
+        json!({}),
+        vec![study.use_source(version, &scope)],
+    )?;
+    let (notice, _) = study.notice(version, &scope, evidence, ISSUER)?;
+    for n in 0..100 {
+        study.record(Kind::Claim, json!({"independent":n}), vec![])?;
+    }
+    let s = a.snapshot("bounded routing", Default::default())?;
+    let mut offline = Archive::memory()?;
+    offline.import(&a.export(&s, "read")?)?;
+    assert!(offline.custody_head(s.id()?).is_err());
+    let expected = offline.impact(&s, notice, &[], 1000)?;
+    assert!(expected.by_kind["occurrence"].contains(&read));
+    let routed = a.impact_head(s.id()?, notice, &[], 16, None, false)?;
+    assert_eq!(routed, serde_json::to_value(&expected)?);
+    assert_eq!(
+        routed,
+        serde_json::to_value(a.impact(&s, notice, &[], 16)?)?
+    );
+    assert!(!offline.impact(&s, notice, &[], 16)?.frontier.is_empty());
+    Ok(())
+}
+
+#[test]
+fn compact_explanation_pages_can_match_notices_to_other_pages_dependencies() -> Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let a = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let claim = a.blob(b"claim", public)?;
+    let premise = a.blob(b"premise", public)?;
+    let unrelated = a.blob(b"unrelated", public)?;
+    let first = Study {
+        archive: &a,
+        format: Format::A,
+    };
+    first.record(
+        Kind::Argument,
+        json!({}),
+        vec![link("claim", claim), link("premise", premise)],
+    )?;
+    for n in 0..7 {
+        first.record(Kind::Occurrence, json!({"index": n}), vec![])?;
+    }
+    let second = Study {
+        archive: &a,
+        format: Format::B,
+    };
+    let notice = second.record(Kind::Notice, json!({}), vec![link("target", premise)])?;
+    second.record(Kind::Notice, json!({}), vec![link("target", unrelated)])?;
+    let snapshot = a.snapshot("study", Default::default())?;
+    let full = a.argument_graph(&snapshot, claim, "read", 100, 48)?;
+    assert_eq!(full["candidate_notices"], json!([notice]));
+    let mut visited = BTreeSet::<Id>::new();
+    let mut links = BTreeMap::<Id, BTreeSet<Id>>::new();
+    let mut after = None;
+    loop {
+        let page = a.argument_graph_page(&snapshot, claim, "read", 8, 48, after)?;
+        visited.extend(serde_json::from_value::<Vec<Id>>(
+            page["dependencies"]["visited"].clone(),
+        )?);
+        links.extend(serde_json::from_value::<BTreeMap<Id, BTreeSet<Id>>>(
+            page["notice_targets"].clone(),
+        )?);
+        if page["unscanned"].is_null() {
+            break;
+        }
+        after = serde_json::from_value(page["unscanned"]["after"].clone())?;
+    }
+    let matches: Vec<_> = links
+        .iter()
+        .filter(|(_, targets)| !targets.is_disjoint(&visited))
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(json!(matches), full["candidate_notices"]);
     Ok(())
 }

@@ -51,6 +51,7 @@ pub enum EmbeddingInput {
 
 /// Maximum encoded media size per archive descriptor or query file.
 pub const MAX_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const MAX_TEXT_QUERY_BYTES: usize = 4096;
 
 #[derive(Clone, Copy)]
 pub enum SearchInput<'a> {
@@ -212,6 +213,8 @@ pub struct SearchHit {
 #[derive(Debug, Serialize)]
 pub struct SearchPreparation {
     pub head: Id,
+    /// Whether unfiltered sparse vector comparisons can seek directly to sample positions.
+    pub sample_positions_ready: Option<bool>,
     pub index_complete: bool,
     pub semantic_index_complete: Option<bool>,
     pub limited_coverage: bool,

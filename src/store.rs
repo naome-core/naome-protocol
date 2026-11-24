@@ -1,9 +1,17 @@
 mod exchange;
+mod extents;
+mod inventory;
+mod upgrade;
+pub use inventory::Manifest;
+pub mod custody;
 mod search_index;
 pub mod sharing;
-pub use exchange::{Bundle, Packet};
+mod snapshot;
+pub use exchange::{Bundle, ExchangePage, ExchangeProgress, MemberProof, Packet};
 #[cfg(feature = "cli")]
 pub(crate) use search_index::IndexPreparation;
+pub(crate) use snapshot::ManifestEncoding;
+pub use snapshot::Snapshot;
 
 use crate::profile::TrainingAccess;
 use crate::{
@@ -22,26 +30,6 @@ use std::{
     time::Duration,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Snapshot {
-    pub version: u8,
-    pub source: String,
-    pub parents: BTreeSet<Id>,
-    pub objects: BTreeSet<Id>,
-}
-impl Snapshot {
-    pub fn id(&self) -> Result<Id> {
-        Ok(Id::blob(&serde_json::to_vec(self)?))
-    }
-
-    pub(crate) fn records(&self) -> impl Iterator<Item = Id> + '_ {
-        self.objects
-            .iter()
-            .copied()
-            .filter(|id| id.format().is_some())
-    }
-}
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Closure {
     pub visited: BTreeSet<Id>,
@@ -60,19 +48,6 @@ pub struct Page {
 pub struct Archive {
     pub(crate) db: Connection,
 }
-// A caller owns the write transaction. A previously known head retains its local status.
-fn save_imported_head(db: &Connection, head: Id, snapshot: &Snapshot) -> Result<()> {
-    let id = head.to_string();
-    if db.execute(
-        "INSERT OR IGNORE INTO heads VALUES(?,?)",
-        params![id, serde_json::to_vec(snapshot)?],
-    )? != 0
-    {
-        db.execute("INSERT INTO rep_imported_heads VALUES(?)", [&id])?;
-    }
-    Ok(())
-}
-
 impl Archive {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -92,13 +67,40 @@ impl Archive {
         }
         Self::init(Connection::open(path)?)
     }
+    /// Open a current archive without taking a writer lock. Older or new archives still
+    /// initialize through the transactional upgrade path.
+    pub fn open_for_read(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if path.is_file() {
+            let reader = Self::custody_reader(path)?;
+            let current: bool = reader.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='archive_member_access' AND type='table')",
+                [], |r| r.get(0),
+            )?;
+            if current
+                && reader
+                    .db
+                    .query_row("SELECT EXISTS(SELECT 1 FROM archive_layout)", [], |r| {
+                        r.get::<_, bool>(0)
+                    })?
+            {
+                return Ok(reader);
+            }
+        }
+        Self::open(path)
+    }
     pub fn memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }
     fn init(db: Connection) -> Result<Self> {
         db.busy_timeout(Duration::from_secs(10))?;
-        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;
-        CREATE TABLE IF NOT EXISTS objects(id TEXT PRIMARY KEY, data BLOB, access TEXT NOT NULL);
+        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;")?;
+        let archive = Self { db };
+        let tx = rusqlite::Transaction::new_unchecked(
+            &archive.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS objects(id TEXT PRIMARY KEY, data BLOB, access TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS heads(id TEXT PRIMARY KEY, manifest BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS rep_imported_heads(head TEXT PRIMARY KEY REFERENCES heads(id));
         CREATE TABLE IF NOT EXISTS rep_search_selection(singleton INTEGER PRIMARY KEY CHECK(singleton=1), head TEXT NOT NULL);
@@ -108,12 +110,25 @@ impl Archive {
         CREATE TABLE IF NOT EXISTS limits(resource TEXT PRIMARY KEY, capacity INTEGER NOT NULL CHECK(capacity>=0));
         CREATE TABLE IF NOT EXISTS revocations(authority TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, request BLOB NOT NULL, state TEXT NOT NULL, witness TEXT);")?;
-        let archive = Self { db };
+        archive.init_custody()?;
         for bytes in [PUBLIC, READ_ONLY, PROFILE] {
             archive.blob(bytes, Id::blob(PUBLIC))?;
         }
+        archive.upgrade_catalog()?;
+        tx.commit()?;
         Ok(archive)
     }
+    /// All reads observe one custody state, including when called inside an existing transaction.
+    pub(crate) fn with_read_view<T>(&self, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        if !self.db.is_autocommit() {
+            return read();
+        }
+        let transaction = self.db.unchecked_transaction()?;
+        let result = read()?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
     pub fn blob(&self, bytes: &[u8], access: Id) -> Result<Id> {
         self.store_blob(bytes, access).map(|(id, _)| id)
     }
@@ -155,34 +170,39 @@ impl Archive {
             tx.execute("UPDATE objects SET data=NULL WHERE id=?", [id.to_string()])? == 1,
             "unknown payload"
         );
-        for head in self.releases()? {
-            if self.head(head)?.objects.contains(&id) {
-                tx.execute(
-                    "INSERT INTO suspended_releases(head) VALUES(?)",
-                    [head.to_string()],
-                )?;
-            }
-        }
+        tx.execute(
+            "DELETE FROM archive_extent_blocks WHERE id=?",
+            [id.to_string()],
+        )?;
+        tx.execute("INSERT OR IGNORE INTO suspended_releases SELECT head FROM archive_release_members WHERE member=?",[id.to_string()])?;
         tx.commit()?;
         Ok(())
     }
     pub(crate) fn size(&self, id: Id) -> Result<usize> {
         Ok(usize::try_from(
             self.db
-                .prepare_cached("SELECT coalesce(length(data),0) FROM objects WHERE id=?")?
+                .prepare_cached("SELECT CASE WHEN o.data IS NULL THEN 0 ELSE coalesce(r.length,e.length,length(o.data),0) END FROM objects o LEFT JOIN custody_records r ON o.id=r.id
+                   LEFT JOIN archive_extents e ON e.id=o.id WHERE o.id=?")?
                 .query_row([id.to_string()], |r| r.get::<_, i64>(0))
                 .optional()?
                 .unwrap_or(0),
         )?)
     }
     pub(crate) fn raw(&self, id: Id) -> Result<Option<(Vec<u8>, Id)>> {
-        let item: Option<(Vec<u8>, String)> = self
+        let item: Option<(Vec<u8>, String,Option<i64>)> = self
             .db
-            .prepare_cached("SELECT data,access FROM objects WHERE id=? AND data IS NOT NULL")?
-            .query_row([id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+            .prepare_cached("SELECT CASE WHEN r.id IS NULL THEN o.data ELSE substr(p.data,r.start+1,r.length) END,o.access,e.length FROM objects o LEFT JOIN custody_records r ON o.id=r.id
+                   LEFT JOIN custody_packs p ON p.id=r.pack
+                   LEFT JOIN archive_extents e ON e.id=o.id WHERE o.id=? AND o.data IS NOT NULL")?
+            .query_row([id.to_string()], |r| Ok((r.get(0)?, r.get(1)?,r.get(2)?)))
             .optional()?;
-        item.map(|(b, a)| {
-            id.verify(&b)?;
+        item.map(|(b, a, length)| {
+            let b = if let Some(n) = length {
+                extents::get(&self.db, id, usize::try_from(n)?)?
+            } else {
+                id.verify(&b)?;
+                b
+            };
             Ok((b, a.parse()?))
         })
         .transpose()
@@ -232,9 +252,9 @@ impl Archive {
         );
         Ok(())
     }
-    pub(crate) fn may_be_notice(&self, s: &Snapshot, id: Id) -> bool {
+    pub(crate) fn may_be_notice(&self, s: &Snapshot, id: Id, purpose: &str) -> bool {
         id.format().is_some_and(|format| {
-            self.resolve(s, id, "read")
+            self.resolve(s, id, purpose)
                 .ok()
                 .and_then(|bytes| Record::decode(&bytes, format).ok())
                 .is_none_or(|record| {
@@ -292,95 +312,6 @@ impl Archive {
             .collect()
     }
 
-    pub fn snapshot(&self, source: &str, parents: BTreeSet<Id>) -> Result<Snapshot> {
-        let s = Snapshot {
-            version: 1,
-            source: source.into(),
-            parents,
-            objects: self.id_set("SELECT id FROM objects WHERE data IS NOT NULL")?,
-        };
-        self.save(&s)?;
-        Ok(s)
-    }
-    /// Seal the readable forward dependency closure of explicitly selected objects.
-    pub fn selected_snapshot(
-        &self,
-        source: &str,
-        parents: BTreeSet<Id>,
-        roots: BTreeSet<Id>,
-    ) -> Result<Snapshot> {
-        ensure!(!roots.is_empty(), "no snapshot roots selected");
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.db,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
-        let mut pending: Vec<_> = roots.iter().copied().collect();
-        let mut objects = roots;
-        while let Some(id) = pending.pop() {
-            let (bytes, access) = self
-                .raw(id)?
-                .context("selected object or dependency is unavailable")?;
-            self.check_access(access, |policy| crate::profile::allows(policy, "read"))?;
-            let record = id
-                .format()
-                .map(|format| Record::decode(&bytes, format))
-                .transpose()?;
-            // Blob access is custody metadata outside the hashed payload. Record
-            // inputs also carry the profile and each ordered evidence reference.
-            for dependency in std::iter::once(access).chain(record.iter().flat_map(Record::inputs))
-            {
-                if objects.insert(dependency) {
-                    pending.push(dependency);
-                }
-            }
-        }
-        let snapshot = Snapshot {
-            version: 1,
-            source: source.into(),
-            parents,
-            objects,
-        };
-        self.save(&snapshot)?;
-        tx.commit()?;
-        Ok(snapshot)
-    }
-
-    pub fn save(&self, s: &Snapshot) -> Result<Id> {
-        ensure!(s.version == 1 && !s.source.is_empty(), "invalid snapshot");
-        let bytes = serde_json::to_vec(s)?;
-        let id = Id::blob(&bytes);
-        self.db.execute(
-            "INSERT OR IGNORE INTO heads VALUES(?,?)",
-            params![id.to_string(), bytes],
-        )?;
-        Ok(id)
-    }
-    pub fn head(&self, id: Id) -> Result<Snapshot> {
-        let b: Option<Vec<u8>> = self
-            .db
-            .query_row(
-                "SELECT manifest FROM heads WHERE id=?",
-                [id.to_string()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let b = match b {
-            Some(b) => b,
-            None => {
-                self.raw(id)?
-                    .filter(|(_, acl)| *acl == Id::blob(PUBLIC))
-                    .context("unknown snapshot")?
-                    .0
-            }
-        };
-        id.verify(&b)?;
-        let s: Snapshot = serde_json::from_slice(&b)?;
-        ensure!(
-            s.version == 1 && !s.source.is_empty() && s.id()? == id,
-            "invalid snapshot manifest"
-        );
-        Ok(s)
-    }
     pub fn explain(
         &self,
         s: &Snapshot,
@@ -460,53 +391,6 @@ impl Archive {
         }
         result
     }
-    /// Include arguments citing the target and candidate defeaters in the declared inventory.
-    pub fn argument_graph(
-        &self,
-        s: &Snapshot,
-        id: Id,
-        purpose: &str,
-        budget: usize,
-        depth: usize,
-    ) -> Result<serde_json::Value> {
-        let mut arguments = vec![];
-        let mut notices = BTreeMap::new();
-        let mut unsearched = BTreeSet::new();
-        for (n, object) in s.records().enumerate() {
-            if n >= budget {
-                unsearched.insert(object);
-                continue;
-            }
-            let Ok(d) = self.read(s, object, purpose) else {
-                unsearched.insert(object);
-                continue;
-            };
-            if d.kind == Kind::Argument && d.roles("claim").any(|c| c == id) {
-                arguments.push(object);
-            }
-            if d.kind == Kind::Notice {
-                notices.insert(object, d.inputs);
-            }
-        }
-        let mut roots = arguments.clone();
-        roots.push(id);
-        let graph = self.explain(s, &roots, purpose, budget, depth);
-        let contrary: Vec<_> = notices
-            .iter()
-            .filter(|(_, edges)| edges.iter().any(|e| graph.visited.contains(&e.target)))
-            .map(|(notice, _)| notice)
-            .collect();
-        Ok(serde_json::json!({
-            "snapshot": s.id()?,
-            "source": s.source,
-            "target": id,
-            "arguments": arguments,
-            "dependencies": graph,
-            "candidate_notices": contrary,
-            "unsearched": unsearched,
-            "budget_per_phase": budget,
-        }))
-    }
     #[allow(clippy::too_many_arguments)]
     pub fn discover(
         &self,
@@ -518,46 +402,111 @@ impl Archive {
         budget: usize,
         after: Option<Id>,
     ) -> Result<Page> {
-        ensure!(budget > 0, "positive page budget required");
-        let mut ids = Vec::new();
-        let mut examined = 0;
-        let mut excluded = 0;
-        let mut last = None;
-        let mut more = false;
+        let mut page = Page::start(s.id()?, &s.source, budget)?;
         let bound = after.map_or(Unbounded, Excluded);
-        for &id in s.objects.range((bound, Unbounded)) {
-            if examined == budget {
-                more = true;
-                break;
-            }
-            examined += 1;
-            last = Some(id);
-            if id.format().is_none() {
-                continue;
-            }
-            match self.read(s, id, purpose) {
+        let finished = s.objects.range((bound, Unbounded)).all(|&id| {
+            page.examine(
+                id,
+                budget,
+                || self.read(s, id, purpose),
+                kind,
+                subject,
+                scope,
+            )
+        });
+        Ok(page.finish(finished))
+    }
+
+    /// Enumerate the requested part of the authenticated inventory without hydrating the cut.
+    #[allow(clippy::too_many_arguments)]
+    pub fn discover_head(
+        &self,
+        head: Id,
+        kind: Option<Kind>,
+        subject: Option<&str>,
+        scope: Option<&str>,
+        purpose: &str,
+        budget: usize,
+        after: Option<Id>,
+    ) -> Result<Page> {
+        self.with_read_view(|| {
+            let manifest = self.active_manifest(head)?;
+            let mut page = Page::start(manifest.id()?, &manifest.source, budget)?;
+            let mut tree = custody::tree::Tree::new(&self.db);
+            let finished = manifest.scan_after(&self.db, after, |id| {
+                Ok(page.examine(
+                    id,
+                    budget,
+                    || {
+                        let format = id.format().context("expected record")?;
+                        let (bytes, _) =
+                            self.resolve_inventory_member(&manifest, id, purpose, &mut tree)?;
+                        Self::decode_document(format, &bytes, |profile| {
+                            Ok(self
+                                .resolve_member_in(&manifest, profile, purpose, &mut tree)?
+                                .0)
+                        })
+                    },
+                    kind,
+                    subject,
+                    scope,
+                ))
+            })?;
+            Ok(page.finish(finished))
+        })
+    }
+}
+
+impl Page {
+    fn start(head: Id, source: &str, budget: usize) -> Result<Self> {
+        ensure!(budget > 0, "positive page budget required");
+        Ok(Self {
+            head,
+            ids: Vec::new(),
+            after: None,
+            examined: 0,
+            excluded: 0,
+            ranking: "ascending content identifier",
+            source: source.to_owned(),
+        })
+    }
+    fn examine(
+        &mut self,
+        id: Id,
+        budget: usize,
+        read: impl FnOnce() -> Result<Document>,
+        kind: Option<Kind>,
+        subject: Option<&str>,
+        scope: Option<&str>,
+    ) -> bool {
+        if self.examined == budget {
+            return false;
+        }
+        self.examined += 1;
+        self.after = Some(id);
+        if id.format().is_some() {
+            match read() {
                 Ok(d)
                     if kind.is_none_or(|k| k == d.kind)
                         && subject.is_none_or(|t| t == d.subject)
                         && scope.is_none_or(|t| t == d.scope) =>
                 {
-                    ids.push(id)
+                    self.ids.push(id)
                 }
-                Err(_) => excluded += 1,
-                _ => (),
+                Err(_) => self.excluded += 1,
+                _ => {}
             }
         }
-        Ok(Page {
-            head: s.id()?,
-            ids,
-            after: if more { last } else { None },
-            examined,
-            excluded,
-            ranking: "ascending content identifier",
-            source: s.source.clone(),
-        })
+        true
+    }
+    fn finish(mut self, complete: bool) -> Self {
+        if complete {
+            self.after = None;
+        }
+        self
     }
 }
+
 fn check_object_bounds(bytes: &[u8], access: Id) -> Result<()> {
     ensure!(
         bytes.len() <= MAX_BYTES && access.format().is_none(),
@@ -565,13 +514,15 @@ fn check_object_bounds(bytes: &[u8], access: Id) -> Result<()> {
     );
     Ok(())
 }
-fn validate(id: Id, b: &[u8], access: Id) -> Result<()> {
+fn validate(id: Id, b: &[u8], access: Id) -> Result<Option<Record>> {
     check_object_bounds(b, access)?;
     id.verify(b)?;
     if let Some(f) = id.format() {
-        ensure!(Record::decode(b, f)?.access == access, "access mismatch")
+        let record = Record::decode(b, f)?;
+        ensure!(record.access == access, "access mismatch");
+        return Ok(Some(record));
     }
-    Ok(())
+    Ok(None)
 }
 #[derive(PartialEq, Eq)]
 pub(crate) enum ObjectAvailability {
@@ -580,6 +531,18 @@ pub(crate) enum ObjectAvailability {
 }
 
 fn insert(db: &Connection, id: Id, b: &[u8], access: Id) -> Result<ObjectAvailability> {
+    if id.format().is_some()
+        && db
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM custody_records WHERE id=? AND access=?)")?
+            .query_row(params![id.to_string(), access.to_string()], |r| {
+                r.get::<_, bool>(0)
+            })?
+    {
+        return Ok(ObjectAvailability::Available);
+    }
+    if id.format().is_none() && b.len() > custody::BLOCK {
+        return extents::put(db, id, b, access);
+    }
     let added = db.execute(
         "INSERT OR IGNORE INTO objects VALUES(?,?,?)",
         params![id.to_string(), b, access.to_string()],

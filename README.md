@@ -1,58 +1,28 @@
-# nao
+# NAOME Research Evidence Protocol
 
-`nao` is the command-line tool in the `naome-protocol` Rust package. It stores, exchanges, and evaluates research evidence. It uses local SQLite archives. Object identifiers are derived from content. Evaluation uses the selected snapshot and the supplied policy.
+NAOME Protocol records the evidence and assumptions behind scientific claims. A recipient can assess a claim against a specific archive snapshot and revisit that assessment when a premise changes. The Rust library and its command-line tool, `nao`, store and exchange content-addressed records.
 
 ## Install
 
-Download the archive for Windows x64, Apple silicon macOS, or Linux x64 (glibc 2.35 or later) from [Releases](https://github.com/naome-core/naome-protocol/releases). Verify it using the matching SHA-256 file, then extract it. Run the executable by its path or add its directory to your PATH. On Windows, use `.\nao.exe` from the extracted directory.
+Download the archive and matching SHA-256 file for your platform from [Releases](https://github.com/naome-core/naome-protocol/releases). Verify the checksum, extract the archive and add its directory to your PATH. To install from a source checkout, run `cargo install --locked --path .` with Rust and a C toolchain available.
 
-To build from a checkout, run `cargo install --locked --path .` with Rust and a C toolchain for SQLite. For Rust library use, set `default-features = false` to omit the CLI and the bundled model integration.
+## Exchange a reading
 
-## Use an archive
-
-In a new directory, create a file named `reading.txt` containing the word `reading`, then run these commands.
+In an empty directory, create a text file named `reading.txt` containing the word `reading`. Capture it in a local archive and take a snapshot.
 
 ```sh
 nao capture reading.txt text/plain
 nao snapshot readings
-nao find reading
 ```
 
-The default database is `evidence.sqlite`. Use `--db FILE` to choose another file. Existing archives and exchange files can be used directly. `nao snapshot` prints the snapshot ID. Use that ID to export the snapshot, then import it into another archive.
+Replace `SNAPSHOT_ID` below with the identifier printed by the second command. Export the snapshot, import it into a separate archive and search the received evidence.
 
 ```sh
 nao export SNAPSHOT_ID exchange.json
 nao --db receiver.sqlite import exchange.json
+nao --db receiver.sqlite find reading --head SNAPSHOT_ID
 ```
 
-Add `--stream` to both commands for streaming exchange. Use `nao --help` and `nao COMMAND --help` for command options. Keep archive files and signing keys in a private directory.
+The search result names the snapshot and the captured record. Run `nao --help` to list commands or `nao COMMAND --help` for a command’s options.
 
-Import keeps the current search context. Use `nao find QUERY --head SNAPSHOT_ID` for a one-off search in a received snapshot, or `nao search-head SNAPSHOT_ID` to pin it. Without a pin, the newest local snapshot is the default. An archive containing only received snapshots starts with the first one it received. On upgrade, existing snapshots keep their prior ordering because older archives did not record how each snapshot arrived.
-
-## Search with a local model
-
-Keyword search runs in the CLI. Semantic and hybrid search use a local EmbeddingGemma 2 checkpoint and Python 3.12. Activate a Python 3.12 virtual environment before running these commands. On Windows and Linux, install the CPU PyTorch packages first.
-
-```sh
-python -m pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-search-torch.txt
-```
-
-Then run the following on all three platforms.
-
-```sh
-python -m pip install -r requirements-search.txt
-hf download google/embeddinggemma-2 --revision f9972ac22e696a105c482202646979e33e4b5a1e --local-dir model
-nao find reading --prepare --model model --python python
-```
-
-Once set up, inference runs offline. Use `--input FILE` for a query from a supported media or text file.
-
-After a search index upgrade, the first keyword search or `nao prepare-search` starts rebuilding the index from the archive. Repeat preparation if the report shows incomplete coverage. For an exact object ID, use `nao find ID` and prepare the index separately.
-
-## Protocol reference
-
-`nao capabilities` reports the supported formats and bootstrap digests. The notice and impact scan budgets count records. Checks that follow a dependency still account for the objects they need, including payload blocks.
-
-- [Whitepaper](spec/research-evidence-protocol.pdf)
-- [Bootstrap kit A](spec/kits/A.json) and [bootstrap kit B](spec/kits/B.json)
-- [Example exchange file](spec/examples/exchange-v1.json)
+The [whitepaper](spec/research-evidence-protocol.pdf) describes the scientific model, its assumptions and worked examples. A [complete exchange file](spec/examples/exchange.json) and [format A](spec/kits/A.json) and [format B](spec/kits/B.json) bootstrap kits provide machine-readable examples.

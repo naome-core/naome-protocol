@@ -1,7 +1,7 @@
 use super::SemanticQuery;
 use crate::{search::SearchOptions, wire::Id};
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, Row, Statement, params};
+use rusqlite::{Connection, OptionalExtension, Row, Statement, params};
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BTreeMap, BinaryHeap},
@@ -17,7 +17,7 @@ pub(in super::super) struct VectorWork {
 }
 
 fn scope_sql(vector_index: &str) -> String {
-    format!("FROM rep_search_visibility visible INDEXED BY rep_search_visibility_order
+    format!("FROM rep_search_visible visible
         CROSS JOIN rep_search_entries e ON e.id=visible.entry
         CROSS JOIN rep_search_passages p INDEXED BY rep_search_passages_entry ON p.entry=e.id
         CROSS JOIN rep_search_vectors v {vector_index} ON v.passage=p.id AND v.model=?2
@@ -33,6 +33,7 @@ struct Scope<'a> {
     head: &'a str,
     options: SearchOptions<'a>,
     model: &'a str,
+    positions: Option<(i64, i64)>,
 }
 
 type Match = (Id, i64, i64, f32);
@@ -86,6 +87,13 @@ pub(super) fn semantic_passages(
         head,
         options,
         model: semantic.model,
+        positions: if options.kind.is_none() && options.subject.is_none() && options.scope.is_none()
+        {
+            db.prepare_cached("SELECT id,count FROM rep_search_samples WHERE head=? AND model=? AND complete AND NOT invalid")?
+                .query_row(params![head,semantic.model],|r|Ok((r.get(0)?,r.get(1)?))).optional()?
+        } else {
+            None
+        },
     };
     let count = scope.count()?;
     work.bounded = query_count < semantic.vectors.len() || count > budget / exact_cost;
@@ -208,6 +216,9 @@ fn shortlist(
 
 impl Scope<'_> {
     fn count(&self) -> Result<usize> {
+        if let Some((_, count)) = self.positions {
+            return Ok(usize::try_from(count)?);
+        }
         let sql = format!("SELECT count(*) {}", scope_sql(COVERING_VECTORS));
         let count: i64 = self.db.prepare_cached(&sql)?.query_row(
             params![
@@ -237,6 +248,23 @@ impl Scope<'_> {
         // only for sampled rows, even when the eligible inventory is large.
         let sparse = samples < count;
         let width = (width * 4) as i64;
+        if sparse && let Some((sample, _)) = self.positions {
+            let mut lookup=self.db.prepare_cached("SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?4)
+                FROM rep_search_positions s CROSS JOIN rep_search_vectors v ON v.model=?3 AND v.passage=s.passage AND v.part=s.part
+                CROSS JOIN rep_search_passages p ON p.id=v.passage CROSS JOIN rep_search_entries e ON e.id=p.entry
+                WHERE s.sample=?1 AND s.ordinal=?2")?;
+            for visited in 0..samples {
+                let ordinal = midpoint(visited, count, samples) as i64;
+                let mut rows = lookup.query(params![sample, ordinal, self.model, width])?;
+                let row = rows
+                    .next()?
+                    .ok_or_else(|| anyhow::anyhow!("missing prepared sample position"))?;
+                visit(row)?;
+                work.rows_examined += 1;
+                work.vectors_loaded += 1;
+            }
+            return Ok(());
+        }
         let (columns, index) = if sparse {
             ("p.id,v.part", COVERING_VECTORS)
         } else {
@@ -271,9 +299,7 @@ impl Scope<'_> {
         let mut visited = 0;
         while let Some(row) = rows.next()? {
             work.rows_examined += 1;
-            if available
-                == (((2 * visited as u128 + 1) * count as u128) / (2 * samples as u128)) as usize
-            {
+            if available == midpoint(visited, count, samples) {
                 if sparse {
                     keys.push((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?));
                     if keys.len() == SAMPLE_BATCH {
@@ -298,6 +324,10 @@ impl Scope<'_> {
         }
         Ok(())
     }
+}
+
+fn midpoint(index: usize, count: usize, samples: usize) -> usize {
+    (((2 * index as u128 + 1) * count as u128) / (2 * samples as u128)) as usize
 }
 
 fn visit_samples(

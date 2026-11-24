@@ -51,16 +51,23 @@ impl DependencyCorrection {
             .any(|&id| store.readable(snapshot, id).is_ok());
         let evidence_readable = notice.one("evidence").is_ok_and(|id| {
             aliases
-                .endpoints(id)
-                .iter()
-                .any(|&id| store.readable(snapshot, id).is_ok())
+                .members(id)
+                .any(|id| store.readable(snapshot, id).is_ok())
         });
-        let scope = if !mixed_notice && source_readable && evidence_readable {
+        Ok(Self::from_evidence(
+            notice,
+            source,
+            source_readable && evidence_readable,
+        ))
+    }
+
+    pub(super) fn from_evidence(notice: &Document, source: BTreeSet<Id>, readable: bool) -> Self {
+        let scope = if readable && notice.roles("calibration").next().is_none() {
             notice.field("coverage").ok()
         } else {
             None
         };
-        Ok(Self { source, scope })
+        Self { source, scope }
     }
 
     fn source_version(&self, id: Id) -> bool {
@@ -68,22 +75,11 @@ impl DependencyCorrection {
     }
 
     fn dependency_edge(document: &Document, edge: &Link) -> bool {
-        // These roles preserve audit history. They do not supply a premise for the revision.
-        let audit_link = matches!(
-            edge.role.as_str(),
-            "correction" | "previous-result" | "previous-version"
-        );
-        let receipt_metadata = document.kind == Kind::Assessment
-            && document.fields.contains_key("original_transcript")
+        document.kind != Kind::Notice
             && matches!(
-                edge.role.as_str(),
-                "dependency"
-                    | "visible-notice"
-                    | "required-notice"
-                    | "previous-receipt"
-                    | "mapping"
-            );
-        document.kind != Kind::Notice && !audit_link && !receipt_metadata
+                document.dependency_role(edge),
+                crate::profile::DependencyRole::Evidence | crate::profile::DependencyRole::Outcome
+            )
     }
 
     fn edge_impact(&self, edge: &Link) -> Option<CorrectionImpact> {
@@ -105,10 +101,27 @@ impl DependencyCorrection {
         inventory: &ReadInventory,
         frontier: &mut BTreeSet<Id>,
     ) -> BTreeMap<Id, CorrectionImpact> {
+        self.trace_documents(&inventory.documents, frontier, |id| {
+            if id.format().is_some() {
+                inventory.documents.contains_key(&id)
+            } else {
+                store.readable(snapshot, id).is_ok()
+            }
+        })
+    }
+
+    /// Apply the field-profile rules only to the supplied candidate graph. Availability is
+    /// either checked directly or proved by the caller's complete, public custody traversal.
+    pub(super) fn trace_documents(
+        &self,
+        docs: &BTreeMap<Id, Document>,
+        frontier: &mut BTreeSet<Id>,
+        mut available: impl FnMut(Id) -> bool,
+    ) -> BTreeMap<Id, CorrectionImpact> {
         let mut impacts = BTreeMap::new();
         let mut dependents = BTreeMap::<Id, Vec<Id>>::new();
-        let mut checked_blobs = BTreeSet::new();
-        for (&id, document) in &inventory.documents {
+        let mut checked = BTreeSet::new();
+        for (&id, document) in docs {
             if self.source_version(id)
                 || matches!(
                     document.kind,
@@ -121,12 +134,7 @@ impl DependencyCorrection {
                 if !Self::dependency_edge(document, edge) {
                     continue;
                 }
-                if (edge.target.format().is_some()
-                    && !inventory.documents.contains_key(&edge.target))
-                    || (edge.target.format().is_none()
-                        && checked_blobs.insert(edge.target)
-                        && store.readable(snapshot, edge.target).is_err())
-                {
+                if checked.insert(edge.target) && !available(edge.target) {
                     frontier.insert(edge.target);
                 }
                 if let Some(impact) = self.edge_impact(edge) {
@@ -229,15 +237,16 @@ pub(crate) fn correction_signature(
     notice: &Document,
 ) -> Option<Id> {
     let versions = keys.get(&notice.scope)?;
-    let source = view.aliases.endpoints(notice.one("source-version").ok()?);
-    source.iter().find_map(|version| {
-        view.signature(
-            id,
-            &notice.scope,
-            "input-correction",
-            versions.get(version)?,
-        )
-    })
+    view.aliases
+        .members(notice.one("source-version").ok()?)
+        .find_map(|version| {
+            view.signature(
+                id,
+                &notice.scope,
+                "input-correction",
+                versions.get(&version)?,
+            )
+        })
 }
 
 pub(crate) struct AdmittedCorrection {

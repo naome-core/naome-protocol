@@ -58,6 +58,7 @@ impl Archive {
         model: &mut dyn Embedder,
         mut budget: usize,
     ) -> Result<()> {
+        let position_budget = budget;
         let key = model.id().to_string();
         let mut cursor = 0;
         let now = unix_seconds()?;
@@ -98,6 +99,12 @@ impl Archive {
             tx.commit()?;
             budget -= pending.len();
         }
+        if !super::positions::ready(&self.db, head, &key)?
+            && super::coverage(&self.db, head)?.0
+            && !missing_vectors(&self.db, head, &key)?
+        {
+            self.prepare_positions(head, &key, position_budget)?;
+        }
         Ok(())
     }
 
@@ -111,7 +118,7 @@ impl Archive {
     ) -> Result<Vec<Pending>> {
         self.db
             .prepare_cached(
-                "SELECT p.id,e.object,p.location,p.text FROM rep_search_visibility v
+                "SELECT p.id,e.object,p.location,p.text FROM rep_search_visible v
              JOIN rep_search_entries e ON e.id=v.entry
              JOIN rep_search_passages p ON p.entry=e.id
              LEFT JOIN rep_search_vector_state st ON st.passage=p.id AND st.model=?2
@@ -225,7 +232,7 @@ fn unix_seconds() -> Result<i64> {
 
 pub(super) fn missing_vectors(db: &Connection, head: &str, model: &str) -> Result<bool> {
     Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM rep_search_visibility v
+        "SELECT EXISTS(SELECT 1 FROM rep_search_visible v
          JOIN rep_search_passages p ON p.entry=v.entry
          LEFT JOIN rep_search_vector_state st ON st.passage=p.id AND st.model=?2
          WHERE v.head=?1 AND p.semantic AND (st.passage IS NULL OR st.retry_after IS NOT NULL))",

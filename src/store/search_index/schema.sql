@@ -1,5 +1,5 @@
-CREATE TABLE rep_search_schema(version INTEGER PRIMARY KEY CHECK(version=4));
-INSERT INTO rep_search_schema VALUES(4);
+CREATE TABLE rep_search_schema(version INTEGER PRIMARY KEY CHECK(version=7));
+INSERT INTO rep_search_schema VALUES(7);
 CREATE TABLE rep_search_revision(value INTEGER NOT NULL);
 INSERT INTO rep_search_revision VALUES(0);
 CREATE TABLE rep_search_heads(
@@ -30,15 +30,6 @@ CREATE TABLE rep_search_entries(
     coverage INTEGER,
     UNIQUE(object,section)
 );
-CREATE TABLE rep_search_visibility(
-    head TEXT NOT NULL REFERENCES rep_search_heads(head) ON DELETE CASCADE,
-    entry INTEGER NOT NULL REFERENCES rep_search_entries(id) ON DELETE CASCADE,
-    object TEXT NOT NULL,
-    section INTEGER NOT NULL,
-    PRIMARY KEY(head,entry)
-) WITHOUT ROWID;
-CREATE INDEX rep_search_visibility_entry ON rep_search_visibility(entry);
-CREATE INDEX rep_search_visibility_order ON rep_search_visibility(head,object,section);
 CREATE TABLE rep_search_text(
     entry INTEGER PRIMARY KEY REFERENCES rep_search_entries(id) ON DELETE CASCADE,
     cursor INTEGER NOT NULL DEFAULT 0,
@@ -88,20 +79,4 @@ CREATE TRIGGER rep_search_object_arrival AFTER INSERT ON objects
 BEGIN
     UPDATE rep_search_revision SET value=value+1;
     UPDATE rep_search_waiting SET ready=1 WHERE source=NEW.id;
-END;
-CREATE TRIGGER rep_search_object_withdrawal AFTER UPDATE OF data ON objects
-WHEN OLD.data IS NOT NULL AND NEW.data IS NULL
-BEGIN
-    UPDATE rep_search_revision SET value=value+1;
-    INSERT OR IGNORE INTO rep_search_gaps(head,object)
-        SELECT v.head,e.object FROM rep_search_entries e
-        JOIN rep_search_visibility v ON v.entry=e.id
-        JOIN rep_search_sources s ON s.entry=e.id WHERE s.source=NEW.id;
-    UPDATE rep_search_entries SET coverage=NULL WHERE section=0 AND object IN (
-        SELECT e.object FROM rep_search_entries e JOIN rep_search_sources s ON s.entry=e.id
-        WHERE s.source=NEW.id
-    );
-    DELETE FROM rep_search_entries WHERE id IN (
-        SELECT entry FROM rep_search_sources WHERE source=NEW.id
-    );
 END;

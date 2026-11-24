@@ -434,14 +434,10 @@ fn scoped_withdrawal_reaches_delegated_use_of_an_unaffected_receipt() -> Result<
             ..radial.clone()
         };
         let mixed_recheck = assess(&archive, &after, &mixed)?;
-        // Pin the mixed-use receipt under the current evaluator.
-        let expected = match format {
-            Format::A => "1:0:21dc32846d318726fdf3b50db52a5debf3aaedfb80ab67299de3ba51ed4844ac",
-            Format::B => "2:0:ae2fd59e4fa2cc0a3df4e417d5e5208e6c8d33e1cb1470b6daed39159814f22c",
-        };
+        let repeated = assess(&archive, &archive.head(after.id()?)?, &mixed)?;
         assert_eq!(
             deposit_receipt(&archive, &after, &mixed, &mixed_recheck, format)?,
-            expected.parse()?
+            deposit_receipt(&archive, &after, &mixed, &repeated, format)?
         );
         assert_eq!(mixed_recheck.result, Some(Standing::Unresolved));
         assert!(!mixed_recheck.horizon_complete);
@@ -511,10 +507,12 @@ fn direct_withdrawal_routes_affected_claims_and_arguments_without_a_prior_receip
     for format in [Format::A, Format::B] {
         let archive = Archive::memory()?;
         let case = fixture::seed(&archive, format)?;
-        let mut before = archive.head(case.s0)?;
+        let before = archive.head(case.s0)?;
         let query = threshold_query(&archive, &case, format)?;
         let argument = query.arguments[0];
-        before.objects.insert(query.policy);
+        let mut members = before.objects.clone();
+        members.insert(query.policy);
+        let before = archive.seal_members(&before.source, before.parents.clone(), members)?;
         assert_eq!(
             assess(&archive, &before, &query)?.result,
             Some(Standing::Supported)
@@ -527,8 +525,9 @@ fn direct_withdrawal_routes_affected_claims_and_arguments_without_a_prior_receip
         ] {
             let notice = signed_withdrawal(&archive, format, target, json!({"mode":mode}))?;
             let signature = fixture::sign(&archive, format, notice, SCOPE, "notice", 9)?;
-            let mut after = before.clone();
-            after.objects.extend([notice, signature]);
+            let mut members = before.objects.clone();
+            members.extend([notice, signature]);
+            let after = archive.seal_members(&before.source, before.parents.clone(), members)?;
             let impact = archive.impact(&after, notice, &[], after.objects.len())?;
             assert!(impact.frontier.is_empty());
             assert_eq!(

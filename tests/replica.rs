@@ -9,7 +9,8 @@ use naome_protocol::{
 };
 
 fn replica(source: &Archive, s: &Snapshot) -> Result<Replica> {
-    let mut replica = Replica::new(s.id()?, s.clone())?;
+    let wire = serde_json::to_vec(s)?;
+    let mut replica = Replica::new(s.id()?, serde_json::from_slice(&wire)?)?;
     for packet in source.export(s, "read")?.packets {
         replica.accept(
             packet.id,
@@ -34,7 +35,10 @@ fn only_released_readable_members_are_served_and_mirrors_preserve_rights() -> Re
     source.release(head)?;
     let outside = source.blob(b"not released", Id::blob(PUBLIC))?;
     assert!(source.released_member(head, outside).is_err());
-    assert_eq!(replica(&source, &s)?.commit(&dest)?, head);
+    assert_eq!(
+        replica(&source, &source.released_manifest(head)?)?.commit(&dest)?,
+        head
+    );
     assert_eq!(
         dest.released_member(head, id)?.blob_access,
         Some(Id::blob(READ_ONLY))
@@ -161,19 +165,21 @@ fn frames_must_match_the_requested_identity_and_inventory_before_commit() -> Res
     assert!(partial.commit(&dest).is_err());
     assert!(dest.head(head).is_err());
     assert!(dest.resolve(&s, id, "read").is_err());
-    let mut with_parents = s.clone();
-    with_parents.parents = (0..MAX_MANIFEST_PARENTS)
+    let mut parents: std::collections::BTreeSet<_> = (0..MAX_MANIFEST_PARENTS)
         .map(|n| Id::blob(&n.to_le_bytes()))
         .collect();
-    Replica::new(with_parents.id()?, with_parents.clone())?;
-    with_parents.parents.insert(Id::blob(b"additional parent"));
-    assert!(Replica::new(with_parents.id()?, with_parents).is_err());
-    let oversized = Snapshot {
-        objects: (0..=MAX_MEMBERS)
-            .map(|n| Id::blob(&n.to_le_bytes()))
-            .collect(),
-        ..s
-    };
+    let with_parents = source.seal_members("parents", parents.clone(), s.objects.clone())?;
+    Replica::new(with_parents.id()?, with_parents)?;
+    parents.insert(Id::blob(b"additional parent"));
+    assert!(
+        source
+            .seal_members("parents", parents, s.objects.clone())
+            .is_err()
+    );
+    let members = (0..=MAX_MEMBERS)
+        .map(|n| Id::blob(&n.to_le_bytes()))
+        .collect();
+    let oversized = source.seal_members("oversized", Default::default(), members)?;
     assert!(Replica::new(oversized.id()?, oversized).is_err());
     Ok(())
 }
@@ -224,7 +230,8 @@ fn an_authentic_but_unadmitted_correction_does_not_change_the_judgment() -> Resu
     let case = fixture::seed(&source, Format::A)?;
     let notice = fixture::notice(&source, Format::A, case.calibration, 80, 9)?;
     let s = source.snapshot("other laboratory", [case.published].into())?;
-    replica(&source, &s)?.commit(&dest)?;
+    source.release(s.id()?)?;
+    replica(&source, &source.released_manifest(s.id()?)?)?.commit(&dest)?;
     let result = assess(&dest, &s, &case.queries[2])?;
     assert!(result.visible_notices.contains(&notice));
     assert!(!result.applicable_notices.contains(&notice));
@@ -279,5 +286,140 @@ fn replicated_releases_do_not_replace_the_local_search_head() -> Result<()> {
     assert!(target.releases()?.contains(&peer_id));
     assert_eq!(target.search_head(None)?.id()?, work);
     assert_eq!(target.search_head(Some(peer_id))?.id()?, peer_id);
+    Ok(())
+}
+
+#[test]
+fn selected_records_can_be_transferred_before_their_access_descriptor() -> Result<()> {
+    use naome_protocol::store::custody::MEMBERS;
+    use std::collections::BTreeSet;
+    let source = Archive::memory()?;
+    let mut records = BTreeSet::new();
+    for n in 0..MEMBERS {
+        let doc = profile::Document::new(
+            profile::Kind::Occurrence,
+            "sample",
+            "bench",
+            serde_json::json!({"index": n}),
+            vec![],
+        )?;
+        records.insert(source.document(&doc, Format::A, Id::blob(PUBLIC))?);
+    }
+    let selected = source.selected_snapshot("selected", Default::default(), records.clone())?;
+    let target = selected.id()?;
+    source.custody_share(target, true)?;
+    let direct = Archive::memory()?;
+    let portable = Archive::memory()?;
+    let first = direct.custody_pull(&source, target, 1)?;
+    assert!(!first.complete);
+    assert_eq!(direct.head(first.cursor)?.objects, records);
+    let mut frame = Vec::new();
+    source.custody_export_step(target, None, &mut frame)?;
+    let prefix = portable.custody_import_step(target, frame.as_slice())?.head;
+    assert_eq!(prefix, first.cursor);
+    source.custody_share(target, false)?;
+    assert!(direct.custody_pull(&source, target, 1).is_err());
+    assert!(
+        source
+            .custody_export_step(target, Some(prefix), Vec::new())
+            .is_err()
+    );
+    source.custody_share(target, true)?;
+    assert!(direct.custody_pull(&source, target, 1)?.complete);
+    frame.clear();
+    source.custody_export_step(target, Some(prefix), &mut frame)?;
+    assert_eq!(
+        portable.custody_import_step(target, frame.as_slice())?.head,
+        target
+    );
+    assert_eq!(direct.head(target)?, selected);
+    assert_eq!(portable.head(target)?, selected);
+    Ok(())
+}
+
+#[test]
+fn publication_and_replication_charge_the_same_linked_witnesses() -> Result<()> {
+    use naome_protocol::store::sharing::MAX_RELEASE_BYTES;
+    use std::collections::BTreeSet;
+
+    let source = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    for n in 0..24 {
+        source.blob(&[n], public)?;
+    }
+    let linked = source.snapshot("linked", Default::default())?;
+    let link = source.deposit_manifest(&linked)?;
+    let mut roots = BTreeSet::from([link]);
+    for n in 0..15 {
+        roots.insert(source.blob(&vec![n; MAX_MEMBER_BYTES], public)?);
+    }
+    let select = |size| -> Result<Snapshot> {
+        let mut members = roots.clone();
+        members.insert(source.blob(&vec![0xff; size], public)?);
+        source.selected_snapshot("release", Default::default(), members)
+    };
+    // All main inventory keys have fixed width and fit in a single leaf.
+    let sample = select(16)?;
+    source.release(sample.id()?)?;
+    let packet = serde_json::to_value(source.released_manifest(sample.id()?)?)?;
+    let mut used = 0;
+    for page in packet["pages"].as_object().unwrap().values() {
+        used += serde_json::to_vec(page)?.len();
+    }
+    assert!(packet["pages"].as_object().unwrap().len() > 1);
+    for &id in &sample.objects {
+        used += source.resolve(&sample, id, "read")?.len();
+    }
+    let mut mirror = Archive::memory()?;
+    mirror.import(&source.export(&linked, "read")?)?;
+
+    let remaining = MAX_RELEASE_BYTES - used + 16;
+    let exact = select(remaining)?.id()?;
+    source.release(exact)?;
+    let mut receiver = Replica::new(exact, source.released_manifest(exact)?)?;
+    while let Some(id) = receiver.next_member() {
+        receiver.accept(id, source.released_member(exact, id)?)?;
+    }
+    assert_eq!(receiver.commit(&Archive::memory()?)?, exact);
+    let over = select(remaining + 1)?;
+    let over_id = over.id()?;
+    assert!(source.release(over_id).is_err());
+    assert!(!source.has_observed_release(over_id)?);
+    let err = replica(&source, &over)?.commit(&mirror).unwrap_err();
+    assert!(err.to_string().contains("network limit"), "{err}");
+    assert!(!mirror.has_observed_release(over_id)?);
+    assert!(mirror.head(over_id).is_err());
+
+    // A mirror can use verified witnesses already in its archive if they fit the same limit.
+    let exact_snapshot = source.head(exact)?;
+    assert_eq!(replica(&source, &exact_snapshot)?.commit(&mirror)?, exact);
+    assert_eq!(
+        serde_json::to_value(mirror.released_manifest(exact)?)?,
+        serde_json::to_value(source.released_manifest(exact)?)?,
+    );
+    Ok(())
+}
+
+#[test]
+fn replica_with_missing_linked_witnesses_rolls_back_and_can_retry() -> Result<()> {
+    let source = Archive::memory()?;
+    let receiver = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    source.blob(b"historical evidence", public)?;
+    let historical = source.snapshot("historical", Default::default())?;
+    let link = source.deposit_manifest(&historical)?;
+    let selected = source.selected_snapshot("release", Default::default(), [link].into())?;
+    let head = selected.id()?;
+    source.release(head)?;
+
+    let err = replica(&source, &selected)?.commit(&receiver).unwrap_err();
+    assert!(err.to_string().contains("missing inventory page"), "{err}");
+    assert!(!receiver.has_observed_release(head)?);
+    assert!(receiver.head(head).is_err());
+    assert!(receiver.resolve(&selected, link, "read").is_err());
+
+    let complete = source.released_manifest(head)?;
+    assert_eq!(replica(&source, &complete)?.commit(&receiver)?, head);
+    assert_eq!(receiver.released_manifest(head)?, complete);
     Ok(())
 }

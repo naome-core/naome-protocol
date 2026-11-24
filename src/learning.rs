@@ -1,16 +1,18 @@
+mod prospective;
+
+pub use crate::evaluation::Impact;
 use crate::{
     evaluation::{
         Assessment, EVALUATOR_ID, EvidenceView, ReadInventory, assess_with_inventory,
-        calibration_identity::CalibrationIdentities,
-        correction::{MeasurementUse, Notice, WithdrawalRules},
+        correction::Notice,
         dependency_correction::{
             CorrectionImpact, CorrectionKeys, DependencyCorrection, admitted_corrections,
-            correction_keys, correction_signature,
+            correction_keys,
         },
     },
     migration::Equivalence,
-    profile::{CALIBRATION_EVENT_IDENTITY, Document, Kind, PUBLIC, link, verify_attestation},
-    store::{Archive, Snapshot},
+    profile::{Document, Kind, PUBLIC, link, verify_attestation},
+    store::{Archive, ManifestEncoding, Snapshot},
     wire::{Format, Id},
 };
 use anyhow::{Context, Result, ensure};
@@ -173,8 +175,7 @@ impl TrainingTrust {
             return BTreeSet::new();
         };
         aliases
-            .endpoints(target)
-            .into_iter()
+            .members(target)
             .flat_map(|id| {
                 self.inventory
                     .attestations(id)
@@ -214,8 +215,7 @@ impl TrainingTrust {
             let signature = candidates
                 .into_iter()
                 .find(|candidate| {
-                    bound_signatures
-                        .is_none_or(|bound| !aliases.endpoints(*candidate).is_disjoint(bound))
+                    bound_signatures.is_none_or(|bound| aliases.intersects(*candidate, bound))
                 })
                 .context("missing bound, admitted data-origin attestation")?;
             signatures.insert(signature);
@@ -225,12 +225,8 @@ impl TrainingTrust {
     }
 }
 
-fn canonical(aliases: &Equivalence, id: Id) -> Id {
-    aliases.endpoints(id).first().copied().unwrap_or(id)
-}
-
 fn canonical_set(aliases: &Equivalence, ids: &BTreeSet<Id>) -> BTreeSet<Id> {
-    ids.iter().map(|id| canonical(aliases, *id)).collect()
+    ids.iter().map(|id| aliases.representative(*id)).collect()
 }
 
 fn optional_link(doc: &Document, role: &str) -> Result<Option<Id>> {
@@ -240,6 +236,8 @@ fn optional_link(doc: &Document, role: &str) -> Result<Option<Id>> {
     Ok(value)
 }
 
+mod replay_cache;
+
 struct TrainingReview<'a> {
     store: &'a Archive,
     before: &'a Snapshot,
@@ -247,8 +245,10 @@ struct TrainingReview<'a> {
     request: &'a TrainingRequest,
     aliases: &'a Equivalence,
     trust: TrainingTrust,
+    requires_legacy_mapping: bool,
     // A bounded working set for the most recently replayed historical inventory.
     historical: Option<(Id, Snapshot, ReadInventory)>,
+    previous_horizons: replay_cache::Cache,
     access: &'a crate::profile::TrainingAccess<'a>,
 }
 
@@ -260,10 +260,9 @@ impl TrainingReview<'_> {
             after,
             request,
             aliases,
-            trust,
-            historical,
             access,
-        } = self;
+            ..
+        } = *self;
         let l = store.read_for_training(after, ex.label, access)?;
         ensure!(l.kind == Kind::Label, "expected label");
         let value = l.fields.get("value").context("missing label value")?;
@@ -302,7 +301,7 @@ impl TrainingReview<'_> {
         );
         let original: crate::evaluation::Query = receipt.field("original_query")?;
         ensure!(
-            aliases.endpoints(original.policy).contains(&request.policy),
+            aliases.equivalent(original.policy, request.policy),
             "receipt policy differs from admitted training policy"
         );
         let receipt_head = receipt.one("snapshot")?;
@@ -312,19 +311,37 @@ impl TrainingReview<'_> {
             "label replay exceeds local extraction budget"
         );
         let evaluator: String = receipt.field("evaluator")?;
-        if historical
+        if self.requires_legacy_mapping {
+            ensure!(
+                matches!(
+                    crate::evaluation::manifest_encoding(&evaluator)?,
+                    ManifestEncoding::LegacyJson
+                ),
+                "current receipt requires canonical mapping inventories"
+            );
+        }
+        if self
+            .historical
             .as_ref()
             .is_none_or(|(head, _, _)| *head != receipt_head)
         {
-            let snapshot = store.head(receipt_head)?;
-            ensure!(
-                snapshot.objects.is_subset(&after.objects),
-                "receipt inventory outside label horizon"
-            );
-            *historical = Some((receipt_head, snapshot, ReadInventory::for_replay()));
+            let saved = self.previous_horizons.take(receipt_head)?;
+            if let Some((id, snapshot, inventory)) = self.historical.take() {
+                self.previous_horizons.remember(id, &snapshot, &inventory)?;
+            }
+            let (snapshot, inventory) = match saved {
+                Some(pair) => pair,
+                None => (
+                    store.receipt_horizon(after, receipt_head)?,
+                    ReadInventory::for_replay(),
+                ),
+            };
+            self.historical = Some((receipt_head, snapshot, inventory));
         }
-        let (historical_head, historical, inventory) =
-            historical.as_mut().context("missing receipt inventory")?;
+        let (historical_head, historical, inventory) = self
+            .historical
+            .as_mut()
+            .context("missing receipt inventory")?;
         let replay =
             assess_with_inventory(store, historical, &original, &evaluator, inventory)?.receipt;
         let expected = crate::evaluation::receipt_document(
@@ -336,11 +353,10 @@ impl TrainingReview<'_> {
             &evaluator,
         )?
         .encode(Id::blob(PUBLIC))?;
-        let endpoints = aliases.endpoints(receipt_id);
         ensure!(
             [Format::A, Format::B]
                 .iter()
-                .any(|f| endpoints.contains(&Id::record(*f, &expected.encode(*f)))),
+                .any(|f| aliases.equivalent(receipt_id, Id::record(*f, &expected.encode(*f)))),
             "receipt fields or dependencies do not replay"
         );
         ensure!(
@@ -348,7 +364,7 @@ impl TrainingReview<'_> {
             "label disagrees with the assessed predicate"
         );
         let bound_signatures = l.roles("origin-attestation").collect::<BTreeSet<_>>();
-        let origins = trust.origin(
+        let origins = self.trust.origin(
             store,
             after,
             &receipt,
@@ -360,53 +376,8 @@ impl TrainingReview<'_> {
             bound_signatures.len() == origins.len(),
             "ambiguous origin attestations"
         );
-        let mut witnesses = BTreeSet::new();
-        if let Some(plan) = request.forecast_plan {
-            ensure!(
-                store
-                    .read_for_training(before, plan, access)
-                    .is_ok_and(|d| d.kind == Kind::Plan),
-                "registered forecast plan unavailable at feature cutoff"
-            );
-            for &id in &original.arguments {
-                let argument = store.read_for_training(historical, id, access)?;
-                let witness_id = argument.one("release")?;
-                let witness = store.read_for_training(historical, witness_id, access)?;
-                ensure!(
-                    witness.kind == Kind::Occurrence
-                        && witness.subject == receipt.subject
-                        && witness.scope == receipt.scope
-                        && aliases.endpoints(witness.one("plan")?).contains(&plan)
-                        && witness.one("feature-cutoff")? == request.feature_cutoff
-                        && witness.field::<bool>("concealed")?
-                        && witness.field::<u64>("sealed")? < witness.field::<u64>("released")?,
-                    "missing controlled pre-outcome cutoff"
-                );
-                let signature = trust
-                    .signatures(aliases, witness_id, &witness.scope, "release")
-                    .into_iter()
-                    .find(|id| store.resolve_for_training(historical, *id, access).is_ok())
-                    .context("no admitted release signature at the receipt horizon")?;
-                let mut outcomes = argument
-                    .inputs
-                    .iter()
-                    .filter(|edge| {
-                        matches!(edge.role.as_str(), "reading" | "outcome" | "outcome-input")
-                    })
-                    .peekable();
-                ensure!(
-                    outcomes.peek().is_some(),
-                    "argument has no declared outcome evidence"
-                );
-                ensure!(
-                    outcomes
-                        .all(|edge| aliases.endpoints(edge.target).is_disjoint(&before.objects)),
-                    "outcome evidence visible at the feature cutoff"
-                );
-                witnesses.insert(signature);
-            }
-        }
-        let mut axes = BTreeSet::from([("claim".to_owned(), canonical(aliases, claim))]);
+        let witnesses = prospective::witnesses(self, &receipt, &original.arguments)?;
+        let mut axes = BTreeSet::from([("claim".to_owned(), aliases.representative(claim))]);
         let features = store.explain_for_training(before, &ex.features, access);
         let label = store.explain_for_training(after, &[ex.label], access);
         ensure!(
@@ -420,18 +391,19 @@ impl TrainingReview<'_> {
             .filter(|id| id.format().is_some())
         {
             let horizon = if features.visited.contains(&id) {
-                *before
+                before
             } else {
-                *after
+                after
             };
             let doc = store.read_for_training(horizon, id, access)?;
             for edge in doc.inputs {
                 if request.independent_roles.contains(&edge.role) {
-                    axes.insert((edge.role, canonical(aliases, edge.target)));
+                    axes.insert((edge.role, aliases.representative(edge.target)));
                 }
             }
         }
         if request.standing == LabelStanding::Current {
+            let trust = &mut self.trust;
             ensure!(
                 trust.inventory.notice_search_complete(),
                 "requested notice horizon has unreadable notices or records of unknown kind"
@@ -524,7 +496,12 @@ impl Archive {
         ensure!(d.kind == Kind::Assessment, "expected assessment");
         let mut aliases = Equivalence::default();
         for mapping in d.roles("mapping") {
-            aliases.add(self.verify_mapping(s, mapping)?);
+            let evaluator: String = d.field("evaluator")?;
+            aliases.add(self.verify_mapping_with(
+                s,
+                mapping,
+                crate::evaluation::manifest_encoding(&evaluator)?,
+            )?);
         }
         let trust = TrainingTrust::load(self, s, d.one("policy")?, false)?;
         let origins = trust.origin(self, s, &d, &aliases, origin, None)?;
@@ -568,8 +545,19 @@ impl Archive {
             "feature cutoff outside outcome history"
         );
         let mut aliases = Equivalence::default();
+        let mut requires_legacy_mapping = false;
         for &id in &request.mappings {
-            aliases.add(self.verify_mapping(&after, id)?);
+            let pairs = match self.verify_mapping(&after, id) {
+                Ok(pairs) => pairs,
+                Err(_) if request.standing == LabelStanding::Historical => {
+                    let pairs =
+                        self.verify_mapping_with(&after, id, ManifestEncoding::LegacyJson)?;
+                    requires_legacy_mapping = true;
+                    pairs
+                }
+                Err(error) => return Err(error),
+            };
+            aliases.add(pairs);
         }
         let trust = TrainingTrust::load(
             self,
@@ -585,7 +573,9 @@ impl Archive {
             request,
             aliases: &aliases,
             trust,
+            requires_legacy_mapping,
             historical: None,
+            previous_horizons: Default::default(),
             access: &access,
         };
         let mut partitions: BTreeMap<(String, Id), String> = BTreeMap::new();
@@ -605,10 +595,10 @@ impl Archive {
                     "shared ancestor crosses declared partitions"
                 );
                 let row_key = (
-                    canonical(&aliases, ex.label),
+                    aliases.representative(ex.label),
                     ex.features
                         .iter()
-                        .map(|id| canonical(&aliases, *id))
+                        .map(|id| aliases.representative(*id))
                         .collect::<Vec<_>>(),
                 );
                 ensure!(exact_rows.insert(row_key), "duplicate training example");
@@ -646,7 +636,7 @@ impl Archive {
             });
         }
         for (role, s) in [("feature-cutoff", &before), ("label-horizon", &after)] {
-            let id = self.blob(&serde_json::to_vec(s)?, Id::blob(PUBLIC))?;
+            let id = self.deposit_manifest(s)?;
             links.push(link(role, id));
         }
         if let Some(plan) = request.forecast_plan {
@@ -689,260 +679,4 @@ impl Archive {
             rows,
         })
     }
-    pub fn impact(
-        &self,
-        s: &Snapshot,
-        notice: Id,
-        mappings: &[Id],
-        budget: usize,
-    ) -> Result<Impact> {
-        self.impact_with_policy(s, notice, mappings, budget, None)
-    }
-
-    /// Trace a correction. An explicit recipient policy admits physical identity
-    /// links for this snapshot in addition to the format mappings.
-    pub fn impact_with_policy(
-        &self,
-        s: &Snapshot,
-        notice: Id,
-        mappings: &[Id],
-        budget: usize,
-        policy: Option<Id>,
-    ) -> Result<Impact> {
-        let n = self.read(s, notice, "read")?;
-        ensure!(n.kind == Kind::Notice, "expected notice");
-        let mut eq = Equivalence::default();
-        for &m in mappings {
-            eq.add(self.verify_mapping(s, m)?);
-        }
-        let correction_notice = Notice(&n);
-        let input_correction = DependencyCorrection::is_correction(&n)
-            .then(|| DependencyCorrection::parse(&n, self, s, &eq, true))
-            .transpose()?;
-        let calibration = input_correction.is_none() && n.roles("calibration").next().is_some();
-        let (initial, correction) = if calibration {
-            (
-                eq.endpoints(n.one("calibration")?),
-                Some(correction_notice.calibration_limits()?),
-            )
-        } else if input_correction.is_some() {
-            (BTreeSet::new(), None)
-        } else {
-            let targets = correction_notice.target_endpoints(&eq);
-            ensure!(!targets.is_empty(), "missing notice target");
-            (targets, None)
-        };
-        let withdrawal =
-            !calibration && n.fields.get("action").and_then(Value::as_str) == Some("withdraw");
-        let mut inventory = ReadInventory::default();
-        let mut frontier = BTreeSet::new();
-        for (i, id) in s.records().enumerate() {
-            if i >= budget || !inventory.read(self, s, id, true) {
-                frontier.insert(id);
-            }
-        }
-        let docs = &inventory.documents;
-        let mut foreign_uses = BTreeSet::new();
-        let mut correction_authority = None;
-        if let Some(policy_id) = policy
-            && frontier.is_empty()
-        {
-            let policy = self.read(s, policy_id, "read")?;
-            ensure!(
-                policy.kind == Kind::Policy && policy.scope == "research-policy-1",
-                "unsupported impact policy"
-            );
-            let evidence = EvidenceView {
-                store: self,
-                snapshot: s,
-                inventory: &inventory,
-                aliases: &eq,
-            };
-            if input_correction.is_some() {
-                correction_authority =
-                    correction_signature(&evidence, &correction_keys(&policy)?, notice, &n);
-            } else {
-                let identities = CalibrationIdentities::admit(&evidence, &policy, budget)?;
-                foreign_uses = identities.affected_uses(
-                    &evidence,
-                    notice,
-                    &n,
-                    docs.keys().copied(),
-                    budget,
-                    &mut frontier,
-                )?;
-            }
-        }
-        if let Some(correction) = input_correction {
-            let impacts = correction.downstream(self, s, &inventory, &mut frontier);
-            let matching = |status| {
-                impacts
-                    .iter()
-                    .filter_map(move |(id, &impact)| (impact == status).then_some(id))
-            };
-            return Ok(Impact {
-                notice,
-                by_kind: group_impact(docs, matching(CorrectionImpact::Affected))?,
-                needs_reassessment: group_impact(docs, matching(CorrectionImpact::Open))?,
-                outside_scope: if frontier.is_empty() {
-                    group_impact(docs, matching(CorrectionImpact::Outside))?
-                } else {
-                    BTreeMap::new()
-                },
-                correction_authority,
-                frontier,
-            });
-        }
-        let argument_excluded = |id: Id, argument: &Document| {
-            !foreign_uses.contains(&id)
-                && argument.kind == Kind::Argument
-                && MeasurementUse::for_argument(
-                    argument,
-                    |id| docs.get(&id),
-                    WithdrawalRules::Scoped,
-                )
-                .is_some_and(|measurement| {
-                    correction_notice.excludes_current_withdrawal(&argument.scope, measurement)
-                })
-        };
-        let mut dependents = BTreeMap::<Id, Vec<Id>>::new();
-        let mut excluded_uses = BTreeSet::new();
-        let mut direct = BTreeSet::new();
-        for (&id, d) in docs {
-            if matches!(
-                d.kind,
-                Kind::Notice | Kind::Mapping | Kind::Attestation | Kind::Policy
-            ) {
-                continue;
-            }
-            // A different differential bias can change scores and bounds while arithmetic replay passes.
-            if d.kind == Kind::Label
-                && d.fields.get("check").and_then(Value::as_str) == Some("arithmetic replay")
-                && n.field::<i64>("bias").is_ok()
-            {
-                continue;
-            }
-            if withdrawal {
-                let excluded = match d.kind {
-                    Kind::Argument => argument_excluded(id, d),
-                    Kind::Occurrence if d.fields.contains_key("gauge") => correction_notice
-                        .excludes_current_withdrawal(
-                            &d.scope,
-                            MeasurementUse::from_reading(d, WithdrawalRules::Scoped),
-                        ),
-                    Kind::Assessment => {
-                        let mut arguments = d.roles("argument").peekable();
-                        arguments.peek().is_some()
-                            && arguments.all(|id| {
-                                docs.get(&id).is_some_and(|doc| argument_excluded(id, doc))
-                            })
-                            && !d.inputs.iter().any(|edge| {
-                                edge.role != "dependency" && initial.contains(&edge.target)
-                            })
-                    }
-                    _ => false,
-                };
-                if excluded {
-                    excluded_uses.insert(id);
-                }
-            }
-            // Claims and arguments can themselves be reported before any
-            // assessment or other record links them to a downstream use.
-            if !calibration
-                && initial.contains(&id)
-                && matches!(d.kind, Kind::Argument | Kind::Claim)
-                && correction_notice.in_scope(&d.scope)
-                && !excluded_uses.contains(&id)
-            {
-                direct.insert(id);
-            }
-            for edge in &d.inputs {
-                if matches!(
-                    edge.role.as_str(),
-                    "source-calibration" | "recipient-calibration"
-                ) && d.kind == Kind::Claim
-                    && d.fields.get("predicate").and_then(Value::as_str)
-                        == Some(CALIBRATION_EVENT_IDENTITY)
-                {
-                    continue;
-                }
-                if initial.contains(&edge.target)
-                    && correction.as_ref().is_some_and(|limits| limits.excludes(d))
-                {
-                    continue;
-                }
-                dependents.entry(edge.target).or_default().push(id);
-            }
-        }
-        let mut reached_without_impact = BTreeSet::new();
-        let mut affected = initial
-            .union(&foreign_uses)
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let mut pending: Vec<_> = affected.iter().copied().collect();
-        while let Some(id) = pending.pop() {
-            let propagates = affected.contains(&id);
-            if let Some(children) = dependents.get(&id) {
-                for &child in children {
-                    // An unaffected use can still carry premises into another
-                    // argument, which evaluates them in its own context.
-                    let newly_reached = if !excluded_uses.contains(&child)
-                        && (propagates || docs[&child].kind == Kind::Argument)
-                    {
-                        affected.insert(child)
-                    } else {
-                        !affected.contains(&child) && reached_without_impact.insert(child)
-                    };
-                    if newly_reached {
-                        pending.push(child);
-                    }
-                }
-            }
-        }
-        Ok(Impact {
-            notice,
-            by_kind: group_impact(docs, affected.difference(&initial).chain(&direct))?,
-            needs_reassessment: BTreeMap::new(),
-            outside_scope: BTreeMap::new(),
-            correction_authority: None,
-            frontier,
-        })
-    }
-}
-
-fn group_impact<'a>(
-    docs: &BTreeMap<Id, Document>,
-    records: impl Iterator<Item = &'a Id>,
-) -> Result<BTreeMap<String, BTreeSet<Id>>> {
-    let mut groups: BTreeMap<String, BTreeSet<Id>> = BTreeMap::new();
-    for id in records {
-        if let Some(d) = docs.get(id) {
-            groups
-                .entry(
-                    serde_json::to_value(d.kind)?
-                        .as_str()
-                        .context("kind")?
-                        .into(),
-                )
-                .or_default()
-                .insert(*id);
-        }
-    }
-    Ok(groups)
-}
-
-#[derive(Serialize)]
-pub struct Impact {
-    pub notice: Id,
-    pub by_kind: BTreeMap<String, BTreeSet<Id>>,
-    /// Possible uses whose declared input coverage cannot exclude the change.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub needs_reassessment: BTreeMap<String, BTreeSet<Id>>,
-    /// Recorded uses with disjoint selectors and a complete search frontier.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub outside_scope: BTreeMap<String, BTreeSet<Id>>,
-    /// Admitted signer for an input correction. Without it the impact trace is advisory.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub correction_authority: Option<Id>,
-    pub frontier: BTreeSet<Id>,
 }

@@ -304,27 +304,19 @@ impl Archive {
                 Ok(v) => {
                     scores.push(json!({"gain_numerator":v.net_gain_numerator.to_string(),"denominator":v.denominator.to_string()}));
                     if v.net_gain_numerator > 0 {
-                        let better = match best {
-                            None => true,
-                            Some((_, num, den)) => v
-                                .net_gain_numerator
-                                .checked_mul(den)
-                                .zip(v.denominator.checked_mul(num))
-                                .map(|(a, b)| a > b)
-                                .context("selection arithmetic overflow")?,
-                        };
-                        if better {
-                            best = Some((id, v.net_gain_numerator, v.denominator));
+                        // Every accepted model preserves the registered prior masses.
+                        if best.is_none_or(|(_, gain)| v.net_gain_numerator > gain) {
+                            best = Some((id, v.net_gain_numerator));
                         }
                     }
                 }
                 Err(e) => scores.push(json!({"open":e.to_string()})),
             }
         }
-        if let Some((id, _, _)) = best {
+        if let Some((id, _)) = best {
             links.push(link("selected", id));
         }
-        let head = self.blob(&serde_json::to_vec(s)?, Id::blob(PUBLIC))?;
+        let head = self.deposit_manifest(s)?;
         links.push(link("snapshot", head));
         self.document(
             &Document::new(
