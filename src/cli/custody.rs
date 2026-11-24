@@ -30,11 +30,21 @@ pub enum Command {
     /// Admit up to 64 members from a JSON array of {id,access,position,file}.
     Append {
         source: String,
-        manifest: PathBuf,
+        #[arg(required_unless_present = "file", conflicts_with = "file")]
+        manifest: Option<PathBuf>,
+        /// Admit one file. Use --record-format for an encoded scientific record.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long, requires = "file")]
+        record_format: Option<Format>,
+        #[arg(long, requires = "file")]
+        expected: Option<Id>,
+        #[arg(long, requires = "file")]
+        access: Option<Id>,
         #[arg(long)]
         parent: Option<Id>,
     },
-    /// Stream a file into fixed blocks. The stream ID names a caller-defined observation.
+    /// Append a file to a named observation in committed batches for range reads.
     Capture {
         source: String,
         stream: Id,
@@ -131,8 +141,9 @@ fn capture(
     let mut block = 0_u64;
     let mut items = Vec::new();
     loop {
-        let mut data = Vec::new();
-        (&mut reader).take(BLOCK as u64).read_to_end(&mut data)?;
+        let mut data = vec![0; BLOCK];
+        let used = crate::payload::read_block(&mut reader, &mut data)?;
+        data.truncate(used);
         let eof = data.len() < BLOCK;
         if !data.is_empty() {
             digest.update(&data);
@@ -144,8 +155,7 @@ fn capture(
             items.push(item);
             block += 1;
         }
-        // Leave room for the default access descriptors on the first batch.
-        if !items.is_empty() && (eof || items.len() == BATCH_BYTES / BLOCK - 1) {
+        if !items.is_empty() && (eof || items.len() == BATCH_BYTES / BLOCK) {
             let admitted = db.custody_append(source, parent, &items)?;
             parent = Some(admitted.head);
             items.clear();
@@ -208,7 +218,40 @@ pub(super) fn run(db_path: &Path, command: Command) -> Result<()> {
             source,
             parent,
             manifest,
+            file,
+            record_format,
+            expected,
+            access,
         } => {
+            if let Some(path) = file {
+                let bytes = load(&path, MAX_BYTES)?;
+                let item = if let Some(format) =
+                    record_format.or_else(|| expected.and_then(|id| id.format()))
+                {
+                    let record = Record::decode(&bytes, format)?;
+                    ensure!(
+                        access.is_none_or(|a| a == record.access),
+                        "record access mismatch"
+                    );
+                    Item {
+                        member: Member {
+                            id: Id::record(format, &bytes),
+                            access: record.access,
+                            position: None,
+                            absent: false,
+                        },
+                        bytes,
+                    }
+                } else {
+                    Item::blob(bytes, access.unwrap_or_else(|| Id::blob(PUBLIC)))
+                };
+                ensure!(
+                    expected.is_none_or(|id| id == item.member.id),
+                    "unexpected member identifier"
+                );
+                return print(db.custody_append(&source, parent, &[item])?);
+            }
+            let manifest = manifest.context("missing batch manifest")?;
             let specs: Vec<Input> = serde_json::from_slice(&load(&manifest, 64 * 1024)?)?;
             ensure!((1..=MEMBERS).contains(&specs.len()), "invalid batch size");
             let mut remaining = if specs.len() == 1 {

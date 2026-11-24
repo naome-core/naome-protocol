@@ -1,6 +1,22 @@
 # Archive qualification results
 
-## Current manifest and migration
+## Optimized admission, point disclosure and direct pull
+
+The version 2 driver adds a point-disclosure round trip to each real archive size. It compares the same first record in a one-packet full-inventory bundle and a point proof. The receiver checks the independent head pin, decodes the record and lacks a complete head. Run `python3 tools/scale/qualify.py target/new-samples.json` to regenerate all 57 observations. The preceding writer at `3aabddd` produced identical heads for these inputs. The physical comparison uses fresh SQLite files on Apple silicon, macOS 27.3 and Rust 1.97.1. Time figures are medians of three local processes. Other activity on the host was uncontrolled.
+
+| Real records | First admission, s | First direct pull, s | Full JSON, bytes | Point JSON, bytes |
+| ---: | ---: | ---: | ---: | ---: |
+| 128 | 0.019 | 0.024 | 21,371 | 46,810 |
+| 1,024 | 0.174 | 0.219 | 160,346 | 54,750 |
+| 12,800 | 7.708 | 8.568 | 1,980,671 | 70,895 |
+
+At 12,800 records the previous matched run took 14.624 s for admission and 17.946 s for the first pull. Origin file growth fell from 189,878,272 to 161,173,504 bytes. Logical pages created remained 71,645. SQLite backing-row reads fell from 387,626 to 248,287, and backing bytes read from 840,298,755 to 509,976,762. Admission peak RSS rose from 9.03 to 9.31 MiB, and pull peak RSS from 11.81 to 12.14 MiB. Direct pull delivered the same 1,755,290 payload bytes. Its accounted descriptor traffic fell from 11,352,502 standalone framing bytes to 2,889,118 bytes of descriptor references, cache misses and member lengths. Portable frame bytes are preserved. Direct pull uses local databases. No network traffic was measured.
+
+A separate CLI check upgraded a real v5 search cache prepared by the preceding binary. After one record was added to 1,024 records, the two views contained 2,049 logical mappings backed by 1,025 physical entries. A sparse semantic-search control used the same hits, scores and comparison budget for an equivalent filtered scan and a direct positional lookup.
+
+The 203-byte change at 12,800 records read 33 logical pages and created 21, versus 37 and 21 in the preceding run. Median process time was 10.31 versus 11.66 ms. A single-step direct pull used 1,263 descriptor bytes versus 1,235 standalone framing bytes. The larger gains occur during initial replication and selective exchange. Small cuts and isolated steps can cost more. Virtual inventory keys, local mixed-source bursts and physical deployment limits are described below.
+
+## Original manifest and migration qualification
 
 The workload and per-tree bounds were frozen at `12f572a`. The active manifest adds a separate authenticated membership root and registers scientific and custody heads in the same local catalog. Its identities and frame bytes change. The earlier splice-layout measurements below remain historical observations at `78419e5`.
 
@@ -76,6 +92,6 @@ Historical scientific replay reproduced the rules-2, rules-3, rules-4 and rules-
 
 ## Capacity model and remaining limits
 
-Three TiB of raw data use 12,582,912 positions at 256 KiB per block. At 15 blocks per capture batch this takes 838,861 data commits. At 10 decimal Gbit/s, the payload alone takes about 2,639 seconds before storage, proofs and contention. These figures are arithmetic rather than observed throughput.
+Three TiB of raw data use 12,582,912 positions at 256 KiB per block. At 16 blocks per full continuation batch this takes 786,432 data commits. At 10 decimal Gbit/s, the payload alone takes about 2,639 seconds before storage, proofs and contention. These figures are arithmetic rather than observed throughput.
 
 Two example labs producing 800 MiB/s each for ten seconds against a 600 MiB/s receiver create a 10,000 MiB backlog. If aggregate arrivals then fall to 200 MiB/s, ideal drain time is 25 seconds. In this model committed origin history holds the backlog. Sustained production above receiver capacity grows the durable backlog even with bounded RAM. Field-record amplification, compaction, multi-terabyte recovery, WAN transport and physical multi-lab throughput remain unqualified. Full scientific views, materialized JSON and complete-release buffering have separate work and size limits.

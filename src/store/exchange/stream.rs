@@ -85,29 +85,25 @@ impl Archive {
                 },
             )?;
             output.write_all(b"\n")?;
-            let emit = |m: &super::Manifest, out: &mut dyn Write| -> Result<()> {
-                let mut tree = Tree::new(&self.db);
-                m.walk(
-                    |id| {
-                        let data = tree.read(id)?;
-                        serde_json::to_writer(
-                            &mut *out,
-                            &Witness {
-                                page: id,
-                                data: data.clone(),
-                            },
-                        )?;
-                        out.write_all(b"\n")?;
-                        Ok(data)
-                    },
-                    |_| Ok(()),
-                )
-            };
-            emit(manifest, output)?;
-            let mut tree = Tree::new(&self.db);
+            let output = std::cell::RefCell::new(output);
+            let mut pages = Tree::new(&self.db);
+            let mut access = Tree::new(&self.db);
             let mut count = 0;
+            let emit = |id, tree: &mut Tree<'_>| -> Result<_> {
+                let data = tree.read(id)?;
+                let mut writer = output.borrow_mut();
+                serde_json::to_writer(
+                    &mut **writer,
+                    &Witness {
+                        page: id,
+                        data: data.clone(),
+                    },
+                )?;
+                writer.write_all(b"\n")?;
+                Ok(data)
+            };
             manifest.walk(
-                |id| tree.read(id),
+                |id| emit(id, &mut pages),
                 |id| {
                     if purpose == "train"
                         && let Some(view) = view
@@ -121,7 +117,7 @@ impl Archive {
                     let resolved = if let Some(view) = view {
                         self.resolve_with(view, id, |acl| crate::profile::allows(acl, purpose))
                     } else {
-                        self.resolve_member(manifest, id, purpose)
+                        self.resolve_inventory_member(manifest, id, purpose, &mut access)
                     };
                     let Ok((bytes, access)) = resolved else {
                         return Ok(());
@@ -134,23 +130,24 @@ impl Archive {
                         // it only when every page is available, without retaining its membership.
                         let mut tree = Tree::new(&self.db);
                         if linked.walk(|page| tree.read(page), |_| Ok(())).is_ok() {
-                            emit(&linked, output)?
+                            linked.walk(|page| emit(page, &mut tree), |_| Ok(()))?
                         }
                     }
+                    let mut writer = output.borrow_mut();
                     serde_json::to_writer(
-                        &mut *output,
+                        &mut **writer,
                         &Packet {
                             id,
                             access,
                             hex: hex::encode(bytes),
                         },
                     )?;
-                    output.write_all(b"\n")?;
+                    writer.write_all(b"\n")?;
                     count += 1;
                     Ok(())
                 },
             )?;
-            output.write_all(b"null\n")?;
+            output.into_inner().write_all(b"null\n")?;
             Ok(count)
         })
     }

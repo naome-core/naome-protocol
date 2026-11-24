@@ -237,12 +237,70 @@ fn withdrawing_a_large_text_chunk_discards_its_prepared_passages() -> Result<()>
             end: offset + marker.len(),
         }
     );
+    assert!(archive.prepare_search(&snapshot, 100, None)?.index_complete);
+    claim(
+        &archive,
+        "child",
+        "independent control",
+        Id::blob(PUBLIC),
+        Format::A,
+    )?;
+    let next = archive.snapshot("long reading", [snapshot.id()?].into())?;
+    assert!(archive.prepare_search(&next, 100, None)?.index_complete);
     let chunk = archive.read(&snapshot, descriptor, "read")?.inputs[0].target;
     archive.withdraw(chunk)?;
+    for cut in [&snapshot, &next] {
+        assert!(archive.prepare_search(cut, 8, None)?.limited_coverage);
+        let report = archive.search_prepared(cut, query, options, None)?;
+        assert!(report.limited_coverage && report.hits.is_empty());
+    }
+    Ok(())
+}
 
-    let preparation = archive.prepare_search(&snapshot, 8, None)?;
-    assert!(preparation.limited_coverage);
-    let report = archive.search_prepared(&snapshot, query, options, None)?;
-    assert!(report.limited_coverage && report.hits.is_empty());
+#[cfg(feature = "cli")]
+#[test]
+fn child_search_views_share_parent_entries_across_parent_rebuilds() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("search.sqlite");
+    let a = Archive::open(&file)?;
+    let public = Id::blob(PUBLIC);
+    let base = claim(&a, "base", "common predecessor", public, Format::A)?;
+    let root = a.snapshot("lab", Default::default())?;
+    a.prepare_search(&root, 100, None)?;
+    let left = claim(&a, "child", "first child", public, Format::A)?;
+    let child = a.snapshot("lab", [root.id()?].into())?;
+    a.prepare_search(&child, 100, None)?;
+    let sql = rusqlite::Connection::open(file)?;
+    assert_eq!(
+        sql.query_row("SELECT count(*) FROM rep_search_set_entries", [], |r| r
+            .get::<_, i64>(0))?,
+        2
+    );
+    assert_eq!(
+        sql.query_row("SELECT count(*) FROM rep_search_visible", [], |r| r
+            .get::<_, i64>(0))?,
+        3
+    );
+    a.clear_search_index(root.id()?)?;
+    let result = a.search_prepared(
+        &child,
+        naome_protocol::search::SearchInput::Text("predecessor"),
+        Default::default(),
+        None,
+    )?;
+    assert_eq!(result.hits[0].id, base);
+    a.prepare_search(&root, 100, None)?;
+    assert!(
+        a.find(&root, "child", Default::default(), None)?
+            .hits
+            .iter()
+            .all(|hit| hit.id != left)
+    );
+    assert_eq!(
+        a.find(&child, "first child", Default::default(), None)?
+            .hits[0]
+            .id,
+        left
+    );
     Ok(())
 }

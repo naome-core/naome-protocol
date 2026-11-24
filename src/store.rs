@@ -7,7 +7,7 @@ pub mod custody;
 mod search_index;
 pub mod sharing;
 mod snapshot;
-pub use exchange::{Bundle, Packet};
+pub use exchange::{Bundle, MemberProof, Packet};
 #[cfg(feature = "cli")]
 pub(crate) use search_index::IndexPreparation;
 pub(crate) use snapshot::ManifestEncoding;
@@ -66,6 +66,28 @@ impl Archive {
             }
         }
         Self::init(Connection::open(path)?)
+    }
+    /// Open a current archive without taking a writer lock. Older or new archives still
+    /// initialize through the transactional upgrade path.
+    pub fn open_for_read(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if path.is_file() {
+            let reader = Self::custody_reader(path)?;
+            let current: bool = reader.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='archive_member_access' AND type='table')",
+                [], |r| r.get(0),
+            )?;
+            if current
+                && reader
+                    .db
+                    .query_row("SELECT EXISTS(SELECT 1 FROM archive_layout)", [], |r| {
+                        r.get::<_, bool>(0)
+                    })?
+            {
+                return Ok(reader);
+            }
+        }
+        Self::open(path)
     }
     pub fn memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
@@ -178,9 +200,9 @@ impl Archive {
             let b = if let Some(n) = length {
                 extents::get(&self.db, id, usize::try_from(n)?)?
             } else {
+                id.verify(&b)?;
                 b
             };
-            id.verify(&b)?;
             Ok((b, a.parse()?))
         })
         .transpose()
@@ -427,13 +449,15 @@ fn check_object_bounds(bytes: &[u8], access: Id) -> Result<()> {
     );
     Ok(())
 }
-fn validate(id: Id, b: &[u8], access: Id) -> Result<()> {
+fn validate(id: Id, b: &[u8], access: Id) -> Result<Option<Record>> {
     check_object_bounds(b, access)?;
     id.verify(b)?;
     if let Some(f) = id.format() {
-        ensure!(Record::decode(b, f)?.access == access, "access mismatch")
+        let record = Record::decode(b, f)?;
+        ensure!(record.access == access, "access mismatch");
+        return Ok(Some(record));
     }
-    Ok(())
+    Ok(None)
 }
 #[derive(PartialEq, Eq)]
 pub(crate) enum ObjectAvailability {

@@ -105,6 +105,9 @@ pub struct Receipt {
     pub visible_notices: BTreeSet<Id>,
     pub applicable_notices: BTreeSet<Id>,
     pub frontier: BTreeSet<Id>,
+    /// First inclusive record in the unexamined suffix at the receipt's pinned horizon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unscanned_records_from: Option<Id>,
 }
 impl Receipt {
     // The existing evaluator could also match a named signed test when a
@@ -597,13 +600,7 @@ pub(crate) fn assess_with_inventory(
             "unsupported query policy"
         );
         out.dependencies.extend([q.target, q.policy]);
-        inventory.search(
-            store,
-            s,
-            q,
-            out,
-            rules.notice_budget == NoticeBudget::Records,
-        )?;
+        inventory.search(store, s, q, out, &rules.notice_budget)?;
         let mut aliases = Equivalence::default();
         for &mapping in &q.mappings {
             aliases.add(store.verify_mapping_with(s, mapping, rules.manifests)?);

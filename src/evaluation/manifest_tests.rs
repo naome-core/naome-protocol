@@ -50,3 +50,32 @@ fn archived_and_current_rules_apply_their_own_manifest_encoding() -> Result<()> 
     }
     Ok(())
 }
+
+#[test]
+fn record_budget_suffix_keeps_the_previous_receipt_replayable() -> Result<()> {
+    let a = Archive::memory()?;
+    let case = fixture::seed(&a, Format::A)?;
+    let s = a.head(case.s0)?;
+    let mut q = case.queries[0].clone();
+    q.budget = 2;
+    let old = "rep-rust-rules-6";
+    let transcript = assess_for_evaluator(&a, &s, &q, old)?;
+    let id = super::deposit_receipt_for_evaluator(&a, &s, &q, &transcript, Format::A, old)?;
+    // Exact receipt returned by the preceding packaged executable, commit 3aabddd.
+    assert_eq!(
+        id.to_string(),
+        "1:0:afe0fa7e184a35af4c475283aa77d38076b6d9df6e05c4edf8d46475261bb17b"
+    );
+    let new = assess_for_evaluator(&a, &s, &q, EVALUATOR_ID)?;
+    assert_eq!(new.result, transcript.result);
+    assert!(!new.horizon_complete);
+    let from = new.unscanned_records_from.unwrap();
+    assert_eq!(new.frontier, [from].into());
+    assert_eq!(
+        s.records()
+            .filter(|id| *id >= from)
+            .collect::<std::collections::BTreeSet<_>>(),
+        transcript.frontier
+    );
+    Ok(())
+}

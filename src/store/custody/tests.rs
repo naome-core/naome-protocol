@@ -258,6 +258,29 @@ fn qualification_sample() -> Result<()> {
             fs::write(tip_file, head.to_string())?;
             json!({"head":head,"payload_bytes":payload,"io":io})
         }
+        "point" => {
+            let head: Id = fs::read_to_string(&tip_file)?.parse()?;
+            let id: Id =
+                a.db.query_row("SELECT min(id) FROM custody_records", [], |r| {
+                    r.get::<_, String>(0)
+                })?
+                .parse()?;
+            let full = a.export_page(&a.head(head)?, "read", None, 1)?;
+            assert_eq!(full.packets[0].id, id);
+            let full_bytes = serde_json::to_vec(&full)?.len();
+            let member = a.export_member(head, id)?;
+            let bytes = serde_json::to_vec(&member)?;
+            let proof = crate::store::MemberProof::read(bytes.as_slice())?;
+            let b = Archive::open(directory.join("point.sqlite"))?;
+            assert_eq!(b.import_member(head, &proof)?, id);
+            assert_eq!(
+                b.read_head(head, id, "read")?,
+                a.read_head(head, id, "read")?
+            );
+            assert!(b.head(head).is_err());
+            json!({"head":head,"member":id,"payload_bytes":full.packets[0].hex.len()/2,
+                "full_json_bytes":full_bytes,"point_json_bytes":bytes.len()})
+        }
         "pull-first" | "pull-delta" => {
             let head: Id = fs::read_to_string(tip_file)?.parse()?;
             let dest = directory.join("receiver.sqlite");
@@ -561,5 +584,89 @@ fn physical_page_splices_preserve_roots_and_bound_backing_reads() -> Result<()> 
     }
     assert!(tree.io.backing_reads > tree.io.reads && tree.io.backing_reads <= 5 * tree.io.reads);
     assert!(tree.io.backing_written_bytes < tree.io.written_bytes);
+    Ok(())
+}
+
+#[test]
+fn partial_point_disclosure_preserves_scope_and_live_withdrawal() -> Result<()> {
+    use crate::store::MemberProof;
+    let a = store()?;
+    let b = store()?;
+    let sample = specimen(7, Kind::Occurrence, None);
+    let id = sample.member.id;
+    let raw = Item::blob(vec![23; 512], Id::blob(READ_ONLY));
+    let raw_id = raw.member.id;
+    let head = a.custody_append("point", None, &[sample, raw])?.head;
+    let proof = a.export_member(head, id)?;
+    assert!(b.import_member(Id::blob(b"fork"), &proof).is_err());
+    let wire = serde_json::to_value(&proof)?;
+    for field in ["pages", "packets", "descriptor"] {
+        let mut corrupt = wire.clone();
+        match field {
+            "pages" => {
+                let pages = corrupt["pages"].as_object_mut().unwrap();
+                let key = pages.keys().next().unwrap().clone();
+                pages.remove(&key);
+            }
+            "packets" => {
+                corrupt["packets"][0]["hex"] = json!("00");
+            }
+            _ => {
+                corrupt["descriptor"]["source"] = json!("different lab");
+            }
+        }
+        let object: MemberProof = serde_json::from_value(corrupt)?;
+        assert!(b.import_member(head, &object).is_err());
+        assert!(b.raw(id)?.is_none());
+    }
+    assert_eq!(b.import_member(head, &proof)?, id);
+    assert_eq!(
+        a.read_head(head, id, "read")?,
+        b.read_head(head, id, "read")?
+    );
+    assert!(b.head(head).is_err());
+    assert!(b.resolve_head(head, id, "train").is_err());
+    assert!(b.resolve_head(head, raw_id, "read").is_err());
+    let raw_proof = a.export_member(head, raw_id)?;
+    b.import_member(head, &raw_proof)?;
+    b.withdraw(raw_id)?;
+    assert!(b.import_member(head, &raw_proof).is_err());
+    assert!(b.resolve_head(head, raw_id, "read").is_err());
+    a.withdraw(raw_id)?;
+    assert!(a.export_member(head, raw_id).is_err());
+    Ok(())
+}
+
+#[test]
+fn confirmed_grant_checks_only_later_withdrawals_and_competing_cursors_recover() -> Result<()> {
+    let a = store()?;
+    let b = store()?;
+    let root = Item::blob(b"shared payload".to_vec(), public());
+    let member = root.member.id;
+    let first = a.custody_append("origin", None, &[root])?.head;
+    let tx = a.db.unchecked_transaction()?;
+    for n in 0u32..1030 {
+        let id = a.blob(&n.to_le_bytes(), public())?;
+        tx.execute("UPDATE objects SET data=NULL WHERE id=?", [id.to_string()])?;
+    }
+    tx.commit()?;
+    let second = a
+        .custody_append("origin", Some(first), &[specimen(1, Kind::Claim, None)])?
+        .head;
+    let fork = a
+        .custody_append("origin", Some(first), &[specimen(2, Kind::Claim, None)])?
+        .head;
+    a.custody_share(second, true)?;
+    a.custody_share(fork, true)?;
+    assert_eq!(b.custody_pull(&a, second, 1)?.cursor, first);
+    assert!(b.custody_pull(&a, fork, 1)?.complete);
+    b.db.execute(
+        "UPDATE custody_pull_cursors SET cursor=? WHERE target=?",
+        params![fork.to_string(), second.to_string()],
+    )?;
+    assert!(b.custody_pull(&a, second, 1)?.complete);
+    a.withdraw(member)?;
+    assert!(b.custody_pull(&a, second, 1).is_err());
+    assert!(a.custody_share(second, true).is_err());
     Ok(())
 }

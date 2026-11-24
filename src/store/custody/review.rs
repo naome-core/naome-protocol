@@ -38,10 +38,23 @@ impl Archive {
         budget: usize,
     ) -> Result<()> {
         // Custody is live: a pinned inventory alone does not prove continued availability.
-        let mut statement = self
+        // Old read-only archives have no journal. Their indexed tombstones remain authoritative.
+        let journal: bool = self
             .db
-            .prepare("SELECT id FROM objects WHERE data IS NULL ORDER BY id LIMIT ?")?;
-        let mut rows = statement.query([(budget + 1) as i64])?;
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='custody_grant_checks')",
+            )?
+            .query_row([], |r| r.get(0))?;
+        let sql = if journal {
+            "SELECT object FROM custody_withdrawal_log WHERE serial>coalesce((SELECT serial FROM custody_grant_checks WHERE head=?1),0) ORDER BY serial LIMIT ?2"
+        } else {
+            "SELECT id FROM objects WHERE data IS NULL AND ?1 IS NOT NULL ORDER BY id LIMIT ?2"
+        };
+        let mut statement = self.db.prepare_cached(sql)?;
+        let mut rows = statement.query(params![
+            h.manifest()?.id()?.to_string(),
+            budget.saturating_add(1).min(i64::MAX as usize) as i64
+        ])?;
         let mut checked = 0;
         while let Some(row) = rows.next()? {
             checked += 1;

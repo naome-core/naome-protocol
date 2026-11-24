@@ -6,9 +6,8 @@ use super::{
 use crate::{profile::Document, wire::Id};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use std::ops::Bound::{Excluded, Unbounded};
 
-pub(super) const INDEX_VERSION: u32 = 5;
+pub(super) const INDEX_VERSION: u32 = 6;
 const BATCH: usize = 16;
 const TEXT_BATCH: usize = 4;
 const ADD_MEDIA_PASSAGE_INDEX: &str = "CREATE INDEX IF NOT EXISTS rep_search_media_passages
@@ -38,8 +37,14 @@ impl Archive {
             return Ok(());
         }
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-        match installed_version(&tx)? {
+        let previous = installed_version(&tx)?;
+        match previous {
             Some(INDEX_VERSION) => {}
+            Some(5) => tx.execute_batch(
+                "DROP TABLE rep_search_schema;
+                CREATE TABLE rep_search_schema(version INTEGER PRIMARY KEY CHECK(version=6));
+                INSERT INTO rep_search_schema VALUES(6);",
+            )?,
             Some(1) => {
                 tx.execute_batch(include_str!("replace_v1.sql"))?;
                 tx.execute_batch(include_str!("schema.sql"))?;
@@ -50,6 +55,20 @@ impl Archive {
             }
             None => tx.execute_batch(include_str!("schema.sql"))?,
             Some(_) => anyhow::bail!("unsupported local search index version"),
+        }
+        if previous != Some(INDEX_VERSION) {
+            tx.execute_batch(include_str!("visibility.sql"))?;
+            if previous == Some(5) {
+                // Preserve extracted text and vectors while changing ownership of the mappings.
+                tx.execute_batch(
+                    "INSERT INTO rep_search_sets(writer) SELECT head FROM rep_search_heads;
+                     INSERT INTO rep_search_head_sets SELECT writer,id FROM rep_search_sets;
+                     INSERT INTO rep_search_set_entries SELECT s.id,v.entry,v.object,v.section
+                         FROM rep_search_visibility v JOIN rep_search_sets s ON s.writer=v.head;
+                     DROP TABLE rep_search_visibility;",
+                )?;
+            }
+            tx.execute_batch(include_str!("positions.sql"))?;
         }
         tx.execute_batch(ADD_MEDIA_PASSAGE_INDEX)?;
         tx.commit()?;
@@ -62,10 +81,7 @@ impl Archive {
         head: &str,
         mut budget: usize,
     ) -> Result<()> {
-        self.db.execute(
-            "INSERT OR IGNORE INTO rep_search_heads(head) VALUES(?)",
-            [head],
-        )?;
+        self.initialize_visibility(snapshot, head)?;
         let mut state = state(&self.db, head)?.context("search snapshot missing")?;
         while budget > 0 {
             let revision = revision(&self.db)?;
@@ -76,12 +92,8 @@ impl Archive {
                 if state.finished {
                     break;
                 }
-                let bound = state.cursor.map_or(Unbounded, Excluded);
                 snapshot
-                    .objects
-                    .range((bound, Unbounded))
-                    .copied()
-                    .filter(|id| id.format().is_some())
+                    .records_after(state.cursor)
                     .take(count + 1)
                     .collect()
             } else {
@@ -131,7 +143,7 @@ impl Archive {
             let Some((entry, object, cursor, length)) = self
                 .db
                 .query_row(
-                    "SELECT t.entry,e.object,t.cursor,t.length FROM rep_search_visibility v
+                    "SELECT t.entry,e.object,t.cursor,t.length FROM rep_search_visible v
                  JOIN rep_search_text t ON t.entry=v.entry
                  JOIN rep_search_entries e ON e.id=t.entry
                  WHERE v.head=? AND t.cursor<t.length ORDER BY e.object LIMIT 1",
@@ -163,7 +175,7 @@ impl Archive {
             let (passages, next, limited) = indexed?;
             let changed = tx.execute(
                 "UPDATE rep_search_text SET cursor=?2 WHERE entry=?1 AND cursor=?3
-                   AND EXISTS(SELECT 1 FROM rep_search_visibility WHERE head=?4 AND entry=?1)",
+                   AND EXISTS(SELECT 1 FROM rep_search_visible WHERE head=?4 AND entry=?1)",
                 params![entry, i64::try_from(next)?, cursor, head],
             )?;
             if changed != 0 {
@@ -176,7 +188,7 @@ impl Archive {
                     )?;
                     tx.execute(
                         "INSERT OR IGNORE INTO rep_search_gaps(head,object)
-                         SELECT head,object FROM rep_search_visibility WHERE entry=?",
+                         SELECT head,object FROM rep_search_visible WHERE entry=?",
                         [entry],
                     )?;
                 }
@@ -190,7 +202,7 @@ impl Archive {
 pub(super) fn prepared_cache_available(db: &Connection) -> Result<bool> {
     match installed_version(db)? {
         Some(INDEX_VERSION) => Ok(true),
-        None | Some(1..=4) => Ok(false),
+        None | Some(1..=5) => Ok(false),
         Some(_) => anyhow::bail!("unsupported local search index version"),
     }
 }
@@ -241,7 +253,7 @@ pub(super) fn coverage(db: &Connection, head: &str) -> Result<(bool, bool)> {
         "SELECT coalesce((SELECT finished FROM rep_search_heads WHERE head=?1), 0)
                 AND NOT EXISTS(SELECT 1 FROM rep_search_waiting WHERE head=?1 AND ready)
                 AND NOT EXISTS(SELECT 1 FROM rep_search_text t
-                    JOIN rep_search_visibility v ON v.entry=t.entry WHERE v.head=?1 AND t.cursor<t.length),
+                    JOIN rep_search_visible v ON v.entry=t.entry WHERE v.head=?1 AND t.cursor<t.length),
                 EXISTS(SELECT 1 FROM rep_search_gaps WHERE head=?1)",
         [head],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -289,7 +301,12 @@ fn cached_record(db: &Connection, snapshot: &Snapshot, id: Id) -> Result<Option<
 fn publish(db: &Connection, head: &str, id: Id, record: &Record) -> Result<()> {
     let key = id.to_string();
     db.execute(
-        "DELETE FROM rep_search_visibility WHERE head=?1
+        "INSERT OR IGNORE INTO rep_search_sets(writer) VALUES(?)",
+        [head],
+    )?;
+    db.execute("INSERT OR IGNORE INTO rep_search_head_sets SELECT ?1,id FROM rep_search_sets WHERE writer=?1",[head])?;
+    db.execute(
+        "DELETE FROM rep_search_set_entries WHERE set_id=(SELECT id FROM rep_search_sets WHERE writer=?1)
          AND entry IN (SELECT id FROM rep_search_entries WHERE object=?2)",
         params![head, key],
     )?;
@@ -316,8 +333,9 @@ fn publish(db: &Connection, head: &str, id: Id, record: &Record) -> Result<()> {
     };
     for entry in entries {
         db.execute(
-            "INSERT OR IGNORE INTO rep_search_visibility(head,entry,object,section)
-             SELECT ?1,id,object,section FROM rep_search_entries WHERE id=?2",
+            "INSERT OR IGNORE INTO rep_search_set_entries(set_id,entry,object,section)
+             SELECT s.id,e.id,e.object,e.section FROM rep_search_sets s,rep_search_entries e WHERE s.writer=?1 AND e.id=?2
+             AND NOT EXISTS(SELECT 1 FROM rep_search_visible WHERE head=?1 AND entry=?2)",
             params![head, entry],
         )?;
     }

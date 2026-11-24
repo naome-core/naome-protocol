@@ -400,7 +400,7 @@ fn later_identity_withdrawal_keeps_historical_receipt_and_blocks_required_correc
     let receipt_inventory = a.snapshot("receipt", [before.id()?].into())?;
     assert_eq!(
         a.read(&receipt_inventory, receipt_id, "read")?.fields["evaluator"],
-        json!("rep-rust-rules-6")
+        json!("rep-rust-rules-7")
     );
     let label = a.label(
         &receipt_inventory,

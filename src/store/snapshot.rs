@@ -118,6 +118,14 @@ impl Snapshot {
         }
         Ok(())
     }
+    pub(crate) fn replay_header(&self) -> Result<Vec<u8>> {
+        self.bytes()
+    }
+    pub(crate) fn restore_replay(header: &[u8], pages: &Pages) -> Result<Self> {
+        let mut cut = serde_json::from_slice::<StoredHeader>(header)?.into_snapshot();
+        cut.hydrate(pages)?;
+        Ok(cut)
+    }
     pub(crate) fn ensure_hydrated(&self) -> Result<()> {
         ensure!(
             self.manifest
@@ -330,6 +338,35 @@ impl Archive {
         }
         Ok(head)
     }
+    /// Continue one explicitly requested full lineage. Resolve the tip and seal under one lock.
+    pub fn continue_snapshot(&self, source: &str) -> Result<Id> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let tips = self.custody_tips(source, None, 2)?;
+        let [parent] = tips.as_slice() else {
+            anyhow::bail!("continuation requires exactly one tip; select --parent explicitly");
+        };
+        let prior: Option<(i64, i64)> = self
+            .db
+            .query_row(
+                "SELECT high_water,epoch FROM archive_seals WHERE id=? AND source=?",
+                params![parent.to_string(), source],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let prior = prior.context("tip is not a full local seal; select --parent explicitly")?;
+        let current = self.db.query_row("SELECT (SELECT coalesce(max(serial),0) FROM archive_deposits),withdrawn FROM archive_epoch",[],|r| Ok((r.get(0)?,r.get(1)?)))?;
+        let head = if prior == current {
+            *parent
+        } else {
+            self.snapshot_id(source, [*parent].into())?
+        };
+        tx.commit()?;
+        Ok(head)
+    }
+
     pub(super) fn register_snapshot(&self, m: &Manifest, imported: bool) -> Result<()> {
         let id = m.id()?.to_string();
         if self.db.execute(
@@ -510,6 +547,16 @@ impl Archive {
             tree.get(m.inventory, &id.to_string())? == Some(id),
             "outside snapshot"
         );
+        self.resolve_inventory_member(m, id, purpose, &mut tree)
+    }
+    /// The caller has just visited this member in a verified membership walk.
+    pub(super) fn resolve_inventory_member(
+        &self,
+        m: &Manifest,
+        id: Id,
+        purpose: &str,
+        tree: &mut super::custody::tree::Tree<'_>,
+    ) -> Result<(Vec<u8>, Id)> {
         let (bytes, access) = self.raw(id)?.context("unavailable")?;
         ensure!(
             tree.get(m.inventory, &access.to_string())? == Some(access),
@@ -519,11 +566,17 @@ impl Archive {
         Ok((bytes, access))
     }
     /// Check a payload and its access descriptor through their authenticated inventory paths.
+    pub fn active_manifest_id(&self, head: Id) -> Result<Id> {
+        self.active_manifest(head)?.id()
+    }
+
+    /// Resolve and decode both the record and its profile against the same inventory and custody cut.
+    pub fn read_head(&self, head: Id, id: Id, purpose: &str) -> Result<crate::profile::Document> {
+        self.with_read_view(|| self.read_with(id, |input| self.point_bytes(head, input, purpose)))
+    }
+
     pub fn resolve_head(&self, head: Id, id: Id, purpose: &str) -> Result<Vec<u8>> {
-        self.with_read_view(|| {
-            let m = self.active_manifest(head)?;
-            Ok(self.resolve_member(&m, id, purpose)?.0)
-        })
+        self.with_read_view(|| self.point_bytes(head, id, purpose))
     }
     pub fn head(&self, id: Id) -> Result<Snapshot> {
         let b: Option<Vec<u8>> = self

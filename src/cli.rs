@@ -43,12 +43,12 @@ pub enum ArchiveCommand {
     Custody(custody::Arguments),
     /// Show supported formats, evaluators and independently pinned kit digests.
     Capabilities,
-    /// Convert an existing archive into a new file and retain its historical evidence.
+    /// Maintenance: copy and upgrade an archive. Ordinary writable opens upgrade in place.
     MigrateArchive {
         source: PathBuf,
         destination: PathBuf,
     },
-    /// Resolve the active head corresponding to an earlier project identifier.
+    /// Maintenance: look up the current identifier of a historical archive head.
     MigratedHead { head: Id },
     /// Run all cases in an externally pinned bootstrap package.
     Kit { file: PathBuf, sha256: String },
@@ -67,7 +67,7 @@ pub enum ArchiveCommand {
     Publish { head: Id },
     /// List the complete inventories available for replication.
     Heads,
-    /// Capture an arbitrary stream as an ordered, digest-checked chunk manifest.
+    /// Capture a complete file atomically as a digest-checked descriptor for recover.
     Capture {
         file: PathBuf,
         media: String,
@@ -114,6 +114,9 @@ pub enum ArchiveCommand {
         source: String,
         #[arg(long)]
         parent: Vec<Id>,
+        /// Continue the sole full local tip for this source, retaining its history.
+        #[arg(long = "continue", conflicts_with_all = ["parent", "root"])]
+        continue_tip: bool,
         /// Select an object and its transitive inputs. Repeat for multiple roots.
         #[arg(long)]
         root: Vec<Id>,
@@ -183,6 +186,9 @@ pub enum ArchiveCommand {
     /// Serialize a bounded inventory with its permitted objects for offline exchange.
     Export {
         head: Id,
+        /// Disclose one readable object with independently verifiable membership and access paths.
+        #[arg(long,conflicts_with_all=["after","limit","stream"])]
+        member: Option<Id>,
         #[arg(long)]
         after: Option<Id>,
         #[arg(long)]
@@ -197,6 +203,9 @@ pub enum ArchiveCommand {
     /// Verify and reconcile an exchange file atomically.
     Import {
         file: PathBuf,
+        /// Interpret a point disclosure against this independently obtained head.
+        #[arg(long, conflicts_with = "stream")]
+        member_head: Option<Id>,
         /// Read the streaming exchange format.
         #[arg(long)]
         stream: bool,
@@ -339,16 +348,14 @@ fn output_json(path: &Path, data: &impl Serialize) -> Result<()> {
 pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
     let public = Id::blob(PUBLIC);
     let open = || Archive::open(&db_path);
+    let reader = || Archive::open_for_read(&db_path);
     match command {
         ArchiveCommand::Custody(args) => custody::run(&db_path, args.0),
         ArchiveCommand::MigrateArchive {
             source,
             destination,
         } => print(json!({"converted":Archive::migrate_archive_file(&source,&destination)?})),
-        ArchiveCommand::MigratedHead { head } => {
-            let db = open()?;
-            print(db.active_head(head)?.id()?)
-        }
+        ArchiveCommand::MigratedHead { head } => print(reader()?.active_manifest_id(head)?),
         ArchiveCommand::Capabilities => print(json!({
             "version": env!("CARGO_PKG_VERSION"),
             "capabilities": ["carrier","archive-custody","profile-reader","evaluator","local-executor-reservations"],
@@ -411,7 +418,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             output: path,
             bytes,
         } => {
-            let db = open()?;
+            let db = reader()?;
             let s = db.active_head(head)?;
             print(publish(&path, |file| {
                 db.materialize(&s, descriptor, "read", bytes, file)
@@ -445,7 +452,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             open()?.release(head)?;
             print(head)
         }
-        ArchiveCommand::Heads => print(open()?.releases()?),
+        ArchiveCommand::Heads => print(reader()?.releases()?),
         ArchiveCommand::Blob { file, access } => {
             print(open()?.blob(&load(&file, MAX_BYTES)?, access.unwrap_or(public))?)
         }
@@ -462,10 +469,13 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             source,
             parent,
             root,
+            continue_tip,
         } => {
             let db = open()?;
             let parents = parent.into_iter().collect();
-            let head = if root.is_empty() {
+            let head = if continue_tip {
+                db.continue_snapshot(&source)?
+            } else if root.is_empty() {
                 db.snapshot_id(&source, parents)?
             } else {
                 db.selected_snapshot(&source, parents, root.into_iter().collect())?
@@ -474,8 +484,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             print(head)
         }
         ArchiveCommand::Show { head, id, purpose } => {
-            let db = open()?;
-            print(db.read(&db.active_head(head)?, id, &purpose)?)
+            print(reader()?.read_head(head, id, &purpose)?)
         }
         ArchiveCommand::Resolve {
             head,
@@ -483,7 +492,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             output: path,
             purpose,
         } => {
-            let db = open()?;
+            let db = reader()?;
             output(&path, &db.resolve_head(head, id, &purpose)?)
         }
         ArchiveCommand::Discover {
@@ -494,7 +503,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             after,
             budget,
         } => {
-            let db = open()?;
+            let db = reader()?;
             let kind = kind
                 .map(|s| serde_json::from_value::<Kind>(s.into()))
                 .transpose()?;
@@ -512,7 +521,11 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             print(LocalSearch::default().find(&open()?, arguments)?)
         }
         ArchiveCommand::SearchHead { head, clear } => {
-            let db = open()?;
+            let db = if head.is_some() || clear {
+                open()?
+            } else {
+                reader()?
+            };
             if head.is_some() || clear {
                 db.set_search_head(head)?;
             }
@@ -535,7 +548,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             compact,
             after,
         } => {
-            let db = open()?;
+            let db = reader()?;
             let snapshot = db.active_head(head)?;
             let report = if compact {
                 db.argument_graph_page(&snapshot, id, &purpose, budget, depth, after)?
@@ -554,14 +567,23 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         }
         ArchiveCommand::Export {
             head,
+            member,
             output: path,
             purpose,
             after,
             limit,
             stream,
         } => {
-            let db = open()?;
+            let db = reader()?;
             let head = db.current_head_id(head)?;
+            if let Some(id) = member {
+                ensure!(
+                    purpose == "read",
+                    "member proofs are read-purpose disclosures"
+                );
+                output_json(&path, &db.export_member(head, id)?)?;
+                return print(json!({"head":head,"member":id}));
+            }
             if stream {
                 let count = publish(&path, |file| {
                     let mut output = BufWriter::new(file);
@@ -582,10 +604,16 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 json!({"head":packet.head,"continuation":packet.continuation,"packets":packet.packets.len()}),
             )
         }
-        ArchiveCommand::Import { file, stream } => {
+        ArchiveCommand::Import {
+            file,
+            stream,
+            member_head,
+        } => {
             let mut db = open()?;
             let file = File::open(file)?;
-            if stream {
+            if let Some(head) = member_head {
+                print(db.import_member(head, &crate::store::MemberProof::read(file)?)?)
+            } else if stream {
                 print(db.import_stream(BufReader::new(file))?)
             } else {
                 print(db.import(&Bundle::read(file)?)?)
@@ -610,7 +638,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             print(db.migrate(&db.active_head(head)?, f, &issuer)?)
         }
         ArchiveCommand::Mapping { head, id } => {
-            let db = open()?;
+            let db = reader()?;
             print(db.verify_mapping(&db.active_head(head)?, id)?)
         }
         ArchiveCommand::Impact {
@@ -620,15 +648,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             policy,
             budget,
             compact,
-        } => {
-            let db = open()?;
-            let snapshot = db.active_head(head)?;
-            if compact {
-                print(db.impact_compact(&snapshot, notice, &mapping, budget, policy)?)
-            } else {
-                print(db.impact_with_policy(&snapshot, notice, &mapping, budget, policy)?)
-            }
-        }
+        } => print(reader()?.impact_head(head, notice, &mapping, budget, policy, compact)?),
         ArchiveCommand::Adopt {
             head,
             request,
@@ -685,11 +705,10 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             scope,
             public_key,
         } => {
-            let db = open()?;
-            let s = db.active_head(head)?;
-            db.resolve(&s, target, "read")?;
+            let db = reader()?;
+            db.resolve_head(head, target, "read")?;
             profile::verify_attestation(
-                &db.read(&s, attestation, "read")?,
+                &db.read_head(head, attestation, "read")?,
                 target,
                 &scope,
                 &role,

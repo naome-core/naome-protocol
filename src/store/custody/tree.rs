@@ -3,7 +3,10 @@ use crate::wire::Id;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    rc::Rc,
+};
 
 const FANOUT: usize = 32;
 const MAX_PAGE: usize = 16 * 1024;
@@ -68,6 +71,9 @@ impl Backing {
 pub(in crate::store) struct Tree<'a> {
     pub db: &'a Connection,
     pub io: PageIo,
+    // Per-operation immutable pages. Each encoded page is at most MAX_PAGE bytes.
+    cache: BTreeMap<Id, Rc<Page>>,
+    order: VecDeque<Id>,
 }
 
 impl<'a> Tree<'a> {
@@ -75,6 +81,8 @@ impl<'a> Tree<'a> {
         Self {
             db,
             io: PageIo::default(),
+            cache: BTreeMap::new(),
+            order: VecDeque::new(),
         }
     }
     fn backing(&mut self, id: Id, hops: u8) -> Result<Backing> {
@@ -217,9 +225,68 @@ impl<'a> Tree<'a> {
             }
         }
     }
+    fn cached(&mut self, id: Id) -> Result<Rc<Page>> {
+        if let Some(page) = self.cache.get(&id) {
+            return Ok(Rc::clone(page));
+        }
+        let page = Rc::new(self.read(id)?);
+        if self.cache.len() == 64 {
+            let first = self.order.pop_front().expect("page cache order");
+            self.cache.remove(&first);
+        }
+        self.order.push_back(id);
+        self.cache.insert(id, Rc::clone(&page));
+        Ok(page)
+    }
+
+    /// Resolve sorted, possibly absent keys in one descent per matching child.
+    pub(super) fn lookup_many(
+        &mut self,
+        root: Option<Id>,
+        keys: BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Id>> {
+        let mut found = BTreeMap::new();
+        if let Some(root) = root {
+            self.lookup_slice(root, &keys.into_iter().collect::<Vec<_>>(), 0, &mut found)?;
+        }
+        Ok(found)
+    }
+    fn lookup_slice(
+        &mut self,
+        id: Id,
+        keys: &[String],
+        depth: usize,
+        found: &mut BTreeMap<String, Id>,
+    ) -> Result<()> {
+        ensure!(depth <= 32, "tree depth limit");
+        if keys.is_empty() {
+            return Ok(());
+        }
+        match self.cached(id)?.as_ref() {
+            Page::Leaf(rows) => {
+                for key in keys {
+                    if let Ok(i) = rows.binary_search_by(|(k, _)| k.cmp(key)) {
+                        found.insert(key.clone(), rows[i].1);
+                    }
+                }
+            }
+            Page::Branch(rows) => {
+                for (i, (start, child)) in rows.iter().enumerate() {
+                    let lo = keys.partition_point(|k| k < start);
+                    let hi = rows
+                        .get(i + 1)
+                        .map_or(keys.len(), |(end, _)| keys.partition_point(|k| k < end));
+                    if lo < hi {
+                        self.lookup_slice(*child, &keys[lo..hi], depth + 1, found)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn get(&mut self, mut root: Id, key: &str) -> Result<Option<Id>> {
         for _ in 0..=32 {
-            match self.read(root)? {
+            match self.cached(root)?.as_ref() {
                 Page::Leaf(rows) => {
                     return Ok(rows
                         .binary_search_by(|(k, _)| k.as_str().cmp(key))
@@ -244,11 +311,11 @@ impl<'a> Tree<'a> {
         limit: usize,
         found: &mut Vec<Id>,
     ) -> Result<()> {
-        match self.read(root)? {
+        match self.cached(root)?.as_ref() {
             Page::Leaf(rows) => {
                 for (k, id) in rows {
                     if k.starts_with(prefix) && found.len() < limit {
-                        found.push(id);
+                        found.push(*id);
                     }
                 }
             }

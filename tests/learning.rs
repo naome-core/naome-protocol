@@ -282,13 +282,21 @@ fn training_reuses_inventories_without_widening_query_budgets() -> Result<()> {
             ..query.clone()
         },
     ];
+    // Alternate between two immutable horizons, returning to the first for the byte-budget replay.
+    let second = archive.seal_members(
+        "same evidence",
+        [evidence.id()?].into(),
+        evidence.objects.clone(),
+    )?;
     let receipts = queries
         .iter()
-        .map(|query| -> Result<Id> {
-            let receipt = evaluation::assess(&archive, &evidence, query)?;
+        .enumerate()
+        .map(|(index, query)| -> Result<Id> {
+            let horizon = if index == 1 { &second } else { &evidence };
+            let receipt = evaluation::assess(&archive, horizon, query)?;
             assert!(receipt.horizon_complete);
             assert_eq!(receipt.result, Some(Standing::Supported));
-            evaluation::deposit_receipt(&archive, &evidence, query, &receipt, format)
+            evaluation::deposit_receipt(&archive, horizon, query, &receipt, format)
         })
         .collect::<Result<Vec<_>>>()?;
     let assessed = archive.snapshot("assessed", [case.published].into())?;

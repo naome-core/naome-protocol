@@ -1,9 +1,11 @@
 mod cache;
 mod extract;
 mod lexical;
+mod positions;
 mod rank;
 mod text;
 mod vectors;
+mod visibility;
 
 use self::rank::{SemanticQuery, VectorWork, rank};
 use super::{Archive, Snapshot};
@@ -194,9 +196,14 @@ impl Archive {
             index_complete,
             limited_coverage,
         )?;
+        let sample_positions_ready = model_key
+            .as_deref()
+            .map(|model| positions::ready(&read, &key, model))
+            .transpose()?;
         read.commit()?;
         Ok(SearchPreparation {
             head,
+            sample_positions_ready,
             index_complete,
             semantic_index_complete,
             limited_coverage,
@@ -356,7 +363,7 @@ impl Archive {
         )?;
         if mode == SearchMode::Lexical {
             let media_exists: bool = read.query_row(
-                "SELECT EXISTS(SELECT 1 FROM rep_search_passages p JOIN rep_search_visibility v ON v.entry=p.entry
+                "SELECT EXISTS(SELECT 1 FROM rep_search_passages p JOIN rep_search_visible v ON v.entry=p.entry
                     WHERE v.head=? AND p.semantic AND p.text='')",
                 [&head],
                 |row| row.get(0),
@@ -487,7 +494,7 @@ fn semantic_coverage(
     let limited_vectors: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM rep_search_vector_state st
             JOIN rep_search_passages p ON p.id=st.passage
-            JOIN rep_search_visibility v ON v.entry=p.entry
+            JOIN rep_search_visible v ON v.entry=p.entry
             WHERE v.head=? AND st.model=? AND st.limited)",
         params![head, model],
         |row| row.get(0),

@@ -235,3 +235,148 @@ fn cli_admits_and_transfers_a_large_single_logical_payload() -> Result<()> {
     assert_eq!(receiver.resolve_head(head, id, "read")?, data);
     Ok(())
 }
+
+#[test]
+fn continuation_reuses_a_unique_full_tip_and_refuses_ambiguity() -> Result<()> {
+    let a = Archive::memory()?;
+    let first = a.snapshot_id("local", Default::default())?;
+    assert_eq!(a.continue_snapshot("local")?, first);
+    let raw = a.blob(b"second", Id::blob(PUBLIC))?;
+    let second = a.continue_snapshot("local")?;
+    assert_eq!(a.custody_head(second)?.parent, Some(first));
+    assert_eq!(a.resolve_head(second, raw, "read")?, b"second");
+    assert_eq!(a.continue_snapshot("local")?, second);
+    a.custody_append(
+        "local",
+        Some(first),
+        &[naome_protocol::store::custody::Item::blob(
+            b"sibling".to_vec(),
+            Id::blob(PUBLIC),
+        )],
+    )?;
+    assert!(a.continue_snapshot("local").is_err());
+    Ok(())
+}
+
+#[test]
+fn migrates_stored_page_bytes_and_reads_during_a_writer_reservation() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("archive.sqlite");
+    let a = Archive::open(&file)?;
+    for i in 0u32..150 {
+        a.blob(&i.to_le_bytes(), Id::blob(PUBLIC))?;
+    }
+    let base = a.snapshot_id("lab", Default::default())?;
+    let id = a.blob(b"one more", Id::blob(PUBLIC))?;
+    let child = a.continue_snapshot("lab")?;
+    drop(a);
+    let sql = Connection::open(&file)?;
+    sql.execute_batch(
+        "BEGIN IMMEDIATE;
+        ALTER TABLE custody_pages RENAME TO source_pages;
+        CREATE TABLE custody_pages(id TEXT PRIMARY KEY,data BLOB NOT NULL) WITHOUT ROWID;
+        INSERT INTO custody_pages SELECT * FROM source_pages;
+        DROP TABLE source_pages; COMMIT;",
+    )?;
+    let stored = || -> rusqlite::Result<Vec<(String, Vec<u8>)>> {
+        sql.prepare("SELECT id,data FROM custody_pages ORDER BY id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    };
+    let before = stored()?;
+    assert!(before.iter().any(|(_, bytes)| bytes.first() == Some(&2)));
+    drop(Archive::open(&file)?);
+    assert_eq!(before, stored()?);
+    assert_eq!(
+        sql.query_row(
+            "SELECT wr FROM pragma_table_list WHERE name='custody_pages'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        0
+    );
+    sql.execute_batch("BEGIN IMMEDIATE")?;
+    let reader = Archive::open_for_read(&file)?;
+    assert_eq!(reader.resolve_head(child, id, "read")?, b"one more");
+    assert!(reader.resolve_head(base, id, "read").is_err());
+    sql.execute_batch("ROLLBACK")?;
+    Ok(())
+}
+
+#[test]
+fn cli_captures_sixteen_blocks_in_one_child_and_exchanges_a_single_member() -> Result<()> {
+    use std::process::Command;
+    let dir = tempfile::tempdir()?;
+    let run = |db: &str, args: &[&str]| -> Result<serde_json::Value> {
+        let out = Command::new(env!("CARGO_BIN_EXE_nao"))
+            .current_dir(dir.path())
+            .args(["--db", db])
+            .args(args)
+            .output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(serde_json::from_slice(&out.stdout)?)
+    };
+    let payload = b"stream descriptor";
+    fs::write(dir.path().join("stream"), payload)?;
+    let stream = Id::blob(payload);
+    let root = run(
+        "a.sqlite",
+        &[
+            "custody",
+            "append",
+            "lab",
+            "--file",
+            "stream",
+            "--expected",
+            &stream.to_string(),
+        ],
+    )?;
+    let parent = root["head"].as_str().unwrap();
+    let data: Vec<_> = (0u8..16)
+        .flat_map(|i| std::iter::repeat_n(i, 256 * 1024))
+        .collect();
+    fs::write(dir.path().join("blocks"), &data)?;
+    let captured = run(
+        "a.sqlite",
+        &[
+            "custody",
+            "capture",
+            "lab",
+            &stream.to_string(),
+            "blocks",
+            "--parent",
+            parent,
+        ],
+    )?;
+    let head = captured["head"].as_str().unwrap();
+    let db = Archive::open_for_read(dir.path().join("a.sqlite"))?;
+    let h = db.custody_head(head.parse()?)?;
+    assert_eq!(h.parent, Some(parent.parse()?));
+    assert_eq!(h.delta.len(), 16);
+    assert_eq!(
+        db.custody_range(head.parse()?, stream, 0, data.len())?,
+        data
+    );
+    run(
+        "a.sqlite",
+        &[
+            "export",
+            head,
+            "proof.json",
+            "--member",
+            &stream.to_string(),
+        ],
+    )?;
+    assert_eq!(
+        run("b.sqlite", &["import", "proof.json", "--member-head", head])?,
+        serde_json::to_value(stream)?
+    );
+    let b = Archive::open_for_read(dir.path().join("b.sqlite"))?;
+    assert_eq!(b.resolve_head(head.parse()?, stream, "read")?, payload);
+    assert!(b.head(head.parse()?).is_err());
+    Ok(())
+}

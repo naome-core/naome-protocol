@@ -10,7 +10,7 @@ pub use tree::PageIo;
 use super::{Archive, ObjectAvailability, insert, validate};
 use crate::{
     profile::{Document, MEASUREMENT_PROFILE, PROFILE, PUBLIC, READ_ONLY, allows},
-    wire::{Id, Record},
+    wire::Id,
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
@@ -118,14 +118,16 @@ impl Archive {
     }
 
     pub fn custody_head(&self, id: Id) -> Result<Head> {
-        let data: Vec<u8> = self
-            .db
-            .prepare_cached("SELECT data FROM custody_heads WHERE id=?")?
-            .query_row([id.to_string()], |r| r.get(0))
-            .context("unadmitted paged head")?;
+        let data = self.custody_head_bytes(id)?;
         let h: Head = serde_json::from_slice(&data)?;
         h.manifest()?.verify(id)?;
         Ok(h)
+    }
+    fn custody_head_bytes(&self, id: Id) -> Result<Vec<u8>> {
+        self.db
+            .prepare_cached("SELECT data FROM custody_heads WHERE id=?")?
+            .query_row([id.to_string()], |r| r.get(0))
+            .context("unadmitted paged head")
     }
 
     /// Independently authored children of the same parent each retain an addressable head.
@@ -198,6 +200,15 @@ impl Archive {
         } else {
             Vec::new()
         };
+        let keys = bootstrap
+            .iter()
+            .chain(items)
+            .flat_map(|item| {
+                let id = item.member.id;
+                [object(id), required(id)]
+            })
+            .collect();
+        let known = tree.lookup_many(root, keys)?;
         for item in bootstrap.iter().chain(items) {
             let Member {
                 id,
@@ -217,20 +228,14 @@ impl Archive {
                     "absent member carries data"
                 );
                 let key = object(id);
-                if changes.insert(key.clone(), access).is_none()
-                    && root
-                        .map(|r| tree.get(r, &key))
-                        .transpose()?
-                        .flatten()
-                        .is_none()
-                {
+                if changes.insert(key.clone(), access).is_none() && !known.contains_key(&key) {
                     added.insert(id);
                     opaque += 1;
                     restricted = true;
                 }
                 continue;
             }
-            validate(id, &item.bytes, access)?;
+            let record = validate(id, &item.bytes, access)?;
             if let Some(ref slot) = slot {
                 ensure!(
                     id.format().is_none() && !item.bytes.is_empty() && item.bytes.len() <= BLOCK,
@@ -248,7 +253,7 @@ impl Archive {
                 ensure!(old == access, "conflicting access");
                 continue;
             }
-            if let Some(old) = root.map(|r| tree.get(r, &key)).transpose()?.flatten() {
+            if let Some(&old) = known.get(&key) {
                 ensure!(old == access, "conflicting access");
                 continue;
             }
@@ -259,8 +264,7 @@ impl Archive {
                 changes.insert(format!("r/{access}/{id}"), id);
                 changes.insert(format!("f/{id}/{access}"), access);
             }
-            if let Some(f) = id.format() {
-                let record = Record::decode(&item.bytes, f)?;
+            if let Some(record) = record {
                 // Large historical records remain readable. An unindexed edge leaves coverage open.
                 let index_edges = edges.saturating_add(record.edges.len()) <= 4096;
                 if index_edges {
@@ -313,29 +317,20 @@ impl Archive {
             }
         }
         for &id in &added {
-            if root
-                .map(|r| tree.get(r, &required(id)))
-                .transpose()?
-                .flatten()
-                .is_some()
-            {
+            if known.contains_key(&required(id)) {
                 unresolved.remove(&id);
                 missing = missing.checked_sub(1).context("invalid coverage count")?;
             }
         }
+        let keys = references
+            .iter()
+            .filter(|id| !added.contains(id))
+            .flat_map(|&id| [object(id), required(id)])
+            .collect();
+        let known = tree.lookup_many(root, keys)?;
         for id in references {
             let key = required(id);
-            if !added.contains(&id)
-                && root
-                    .map(|r| tree.get(r, &object(id)))
-                    .transpose()?
-                    .flatten()
-                    .is_none()
-                && root
-                    .map(|r| tree.get(r, &key))
-                    .transpose()?
-                    .flatten()
-                    .is_none()
+            if !added.contains(&id) && !known.contains_key(&object(id)) && !known.contains_key(&key)
             {
                 missing += 1;
                 if unresolved.len() < 64 {

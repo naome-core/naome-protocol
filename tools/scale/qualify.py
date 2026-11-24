@@ -51,7 +51,7 @@ PAYLOAD_BYTES = {128: 17298, 1024: 139178, 12800: 1755290}
 WORKLOADS = [
     (["mixed"], [24]),
     (["inventory"], list(INVENTORY_ROOTS)),
-    (["first", "pull-first", "delta", "pull-delta"], list(PAYLOAD_BYTES)),
+    (["first", "point", "pull-first", "delta", "pull-delta"], list(PAYLOAD_BYTES)),
 ]
 
 
@@ -72,6 +72,9 @@ def verify(report):
     first = {}
     full = {(p, n) for phases, sizes in WORKLOADS for p in phases for n in sizes}
     quick = {(p, sizes[0]) for phases, sizes in WORKLOADS for p in phases}
+    if report.get("qualification_version", 1) == 1:
+        full = {key for key in full if key[0] != "point"}
+        quick = {key for key in quick if key[0] != "point"}
     for row in samples:
         phase, size = key = row["phase"], row["size"]
         seen = by_trial.setdefault(row["repetition"], set())
@@ -82,6 +85,10 @@ def verify(report):
             assert result["root"] == INVENTORY_ROOTS[size]
             assert result["delta_io"]["reads"] <= result["height"]
             assert result["delta_io"]["writes"] <= 2 * result["height"] + 1
+        elif phase == "point":
+            assert result["payload_bytes"] > 0 and result["point_json_bytes"] < 256 * 1024
+            if size >= 1024:
+                assert result["point_json_bytes"] < result["full_json_bytes"]
         elif phase == "mixed":
             assert result["writers"] == len(set(result["federated_tips"])) == 2
             assert result["batches"] == result["receiver_reopens"] == size
@@ -126,7 +133,7 @@ def main():
                         row["repetition"] = trial
                         rows.append(row)
                         print(size, phase, row["process_ms"], flush=True)
-    report = {"archive_format": "manifest", "platform": platform.platform(), "build": "cargo test --lib --release --locked",
+    report = {"qualification_version": 2, "archive_format": "manifest", "platform": platform.platform(), "build": "cargo test --lib --release --locked",
               "rustc": subprocess.check_output(["rustc", "-V"], text=True).strip(),
               "samples": rows}
     verify(report)

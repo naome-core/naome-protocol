@@ -241,6 +241,10 @@ fn run_profile(
     )?;
     assert!(!amended_head.objects.contains(&missing));
     let impact = archive.impact_with_policy(&amended_head, admitted, &[], 1000, Some(policy))?;
+    assert_eq!(
+        archive.impact_head(amended_head.id()?, admitted, &[], 1000, Some(policy), false)?,
+        serde_json::to_value(&impact)?
+    );
     assert!(impact.frontier.is_empty());
     assert_eq!(impact.correction_authority, Some(authority));
     assert_eq!(impact.by_kind["assessment"], [historical].into());
@@ -566,5 +570,40 @@ fn unrelated_payloads_do_not_spend_the_notice_and_impact_record_budget() -> Resu
     assert!(rest["unscanned"].is_null());
     let graph = archive.argument_graph(&larger, query.target, "read", query.budget, 48)?;
     assert_eq!(graph["unsearched"], json!([next]));
+    Ok(())
+}
+
+#[test]
+fn indexed_input_review_stays_inside_the_candidate_budget() -> Result<()> {
+    let a = Archive::memory()?;
+    let study = Study {
+        archive: &a,
+        format: Format::A,
+    };
+    let version = a.blob(b"input version", Id::blob(PUBLIC))?;
+    let evidence = a.blob(b"source revision", Id::blob(PUBLIC))?;
+    let scope = json!({"profile":"table-rows-1","selector":{"ranges":[[1,3]],"columns":["x"]}});
+    let read = study.record(
+        Kind::Occurrence,
+        json!({}),
+        vec![study.use_source(version, &scope)],
+    )?;
+    let (notice, _) = study.notice(version, &scope, evidence, ISSUER)?;
+    for n in 0..100 {
+        study.record(Kind::Claim, json!({"independent":n}), vec![])?;
+    }
+    let s = a.snapshot("bounded routing", Default::default())?;
+    let mut offline = Archive::memory()?;
+    offline.import(&a.export(&s, "read")?)?;
+    assert!(offline.custody_head(s.id()?).is_err());
+    let expected = offline.impact(&s, notice, &[], 1000)?;
+    assert!(expected.by_kind["occurrence"].contains(&read));
+    let routed = a.impact_head(s.id()?, notice, &[], 16, None, false)?;
+    assert_eq!(routed, serde_json::to_value(&expected)?);
+    assert_eq!(
+        routed,
+        serde_json::to_value(a.impact(&s, notice, &[], 16)?)?
+    );
+    assert!(!offline.impact(&s, notice, &[], 16)?.frontier.is_empty());
     Ok(())
 }

@@ -39,6 +39,28 @@ impl Archive {
         Ok(usize::try_from(n)?)
     }
     pub(super) fn upgrade_catalog(&self) -> Result<()> {
+        if self.db.execute(
+            "INSERT OR IGNORE INTO custody_withdrawal_state VALUES(1)",
+            [],
+        )? != 0
+        {
+            self.db.execute("INSERT OR IGNORE INTO custody_withdrawal_log(object) SELECT id FROM objects WHERE data IS NULL ORDER BY id", [])?;
+        }
+        // The former WITHOUT ROWID table puts wide page payloads in an index b-tree.
+        // Preserve each stored page (including physical splices) and its exact identifier.
+        let old_pages: bool = self.db.query_row(
+            "SELECT wr FROM pragma_table_list WHERE schema='main' AND name='custody_pages'",
+            [],
+            |r| r.get(0),
+        )?;
+        if old_pages {
+            self.db.execute_batch(
+                "ALTER TABLE custody_pages RENAME TO old_custody_pages;
+                CREATE TABLE custody_pages(id TEXT PRIMARY KEY NOT NULL,data BLOB NOT NULL);
+                INSERT INTO custody_pages SELECT id,data FROM old_custody_pages;
+                DROP TABLE old_custody_pages;",
+            )?;
+        }
         let done: bool =
             self.db
                 .query_row("SELECT EXISTS(SELECT 1 FROM archive_layout)", [], |r| {

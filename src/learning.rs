@@ -236,6 +236,8 @@ fn optional_link(doc: &Document, role: &str) -> Result<Option<Id>> {
     Ok(value)
 }
 
+mod replay_cache;
+
 struct TrainingReview<'a> {
     store: &'a Archive,
     before: &'a Snapshot,
@@ -246,6 +248,7 @@ struct TrainingReview<'a> {
     requires_legacy_mapping: bool,
     // A bounded working set for the most recently replayed historical inventory.
     historical: Option<(Id, Snapshot, ReadInventory)>,
+    previous_horizons: replay_cache::Cache,
     access: &'a crate::profile::TrainingAccess<'a>,
 }
 
@@ -322,8 +325,18 @@ impl TrainingReview<'_> {
             .as_ref()
             .is_none_or(|(head, _, _)| *head != receipt_head)
         {
-            let snapshot = store.receipt_horizon(after, receipt_head)?;
-            self.historical = Some((receipt_head, snapshot, ReadInventory::for_replay()));
+            let saved = self.previous_horizons.take(receipt_head)?;
+            if let Some((id, snapshot, inventory)) = self.historical.take() {
+                self.previous_horizons.remember(id, &snapshot, &inventory)?;
+            }
+            let (snapshot, inventory) = match saved {
+                Some(pair) => pair,
+                None => (
+                    store.receipt_horizon(after, receipt_head)?,
+                    ReadInventory::for_replay(),
+                ),
+            };
+            self.historical = Some((receipt_head, snapshot, inventory));
         }
         let (historical_head, historical, inventory) = self
             .historical
@@ -562,6 +575,7 @@ impl Archive {
             trust,
             requires_legacy_mapping,
             historical: None,
+            previous_horizons: Default::default(),
             access: &access,
         };
         let mut partitions: BTreeMap<(String, Id), String> = BTreeMap::new();

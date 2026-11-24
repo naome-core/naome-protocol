@@ -7,12 +7,13 @@ pub(crate) const FIXTURE_EVALUATOR_ID: &str = "rep-rust-rules-1";
 const RECORD_BUDGET_EVALUATOR_ID: &str = "rep-rust-rules-5";
 
 // The current writer selects one immutable replay policy by ID.
-pub(crate) const EVALUATOR_ID: &str = "rep-rust-rules-6";
+pub(crate) const EVALUATOR_ID: &str = "rep-rust-rules-7";
 
 #[derive(PartialEq, Eq)]
 pub(super) enum NoticeBudget {
     Objects,
     Records,
+    CompactRecords,
 }
 
 pub(super) enum CorrectionRules {
@@ -60,6 +61,15 @@ pub(super) struct EvaluatorRules {
 const REPLAY_RULES: &[EvaluatorRules] = &[
     EvaluatorRules {
         ids: &[EVALUATOR_ID],
+        manifests: ManifestEncoding::Canonical,
+        notice_budget: NoticeBudget::CompactRecords,
+        withdrawal: WithdrawalRules::Scoped,
+        resolve_required_withdrawals: true,
+        physical_identity: true,
+        corrections: CorrectionRules::ScopedWhenConfigured,
+    },
+    EvaluatorRules {
+        ids: &["rep-rust-rules-6"],
         manifests: ManifestEncoding::Canonical,
         notice_budget: NoticeBudget::Records,
         withdrawal: WithdrawalRules::Scoped,

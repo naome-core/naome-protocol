@@ -31,9 +31,27 @@ Import keeps the current search context. Use `nao find QUERY --head SNAPSHOT_ID`
 
 ## Work with large laboratory archives
 
-Every new snapshot, scientific receipt, search selection and exchange names the same compact archive manifest. A manifest commits to the source, parents, inventory page root, member count and custody descriptor. Use `nao migrate-archive old.sqlite new.sqlite` to create a migrated copy at a new path. The command opens the source read-only, verifies historical manifest IDs and publishes the destination only after conversion succeeds. Opening an older database for writing also upgrades its catalog in place. Use `nao --db new.sqlite migrated-head OLD_ID` for the active identifier. Historical receipts keep their original evidence bytes, record IDs and evaluator rules.
+A snapshot, scientific receipt, search selection and exchange use the same manifest. It commits the source, parents, inventory root, count and custody descriptor. Ordinary writable opens upgrade older catalogs in a transaction. Historical receipts keep their original evidence bytes, record IDs and evaluator rules.
 
-Use `nao --db LAB.sqlite custody append LAB members.json` to start an independently writable lineage. Each member names its logical ID, access descriptor and local file. Subsequent batches name a parent. Use `custody tips` to find concurrent branches, `custody share` to grant a specific tip, and `custody pull` to advance a receiver by a bounded number of batches. Separate laboratories can move portable frames using `custody export-step` and `custody import-step`. A federated review names its source heads and checks the coverage available at each one. The specification includes the wire contract, work bounds and limits of local qualification. [Paged custody](spec/scale/paged-custody.md)
+Use these commands for a local instrument archive. Substitute the identifiers printed by the preceding commands.
+
+```sh
+nao --db lab.sqlite custody append LAB --file instrument.txt
+nao --db lab.sqlite custody append LAB --parent HEAD --file reading.rep --record-format a
+nao --db lab.sqlite export HEAD reading.json --member RECORD_ID
+nao --db receiver.sqlite import reading.json --member-head HEAD
+nao --db receiver.sqlite show HEAD RECORD_ID
+```
+
+For an encoded record the CLI derives access from the envelope. Use `--expected ID` to check a file against an independently supplied ID. A batch manifest accepts up to 64 members with individual IDs, access descriptors and optional block positions. A point disclosure includes the readable object, its profile when needed, access descriptors and authenticated paths. Obtain the expected head independently. This read-purpose evidence supports a point lookup. Use a full exchange for an inventory or historical replay.
+
+Use `capture FILE MEDIA` for an atomic, recoverable file descriptor. Use `custody capture LAB STREAM FILE --parent HEAD` for a block-addressed measurement stream whose batches commit independently. For ordinary full snapshots, `snapshot LAB --continue` advances the sole local full tip. It returns the same head when nothing has changed. With competing tips, choose `--parent HEAD` explicitly.
+
+Identify concurrent branches with `custody tips`. A grant from `custody share` permits a bounded pull for that tip. Separate laboratories can exchange portable frames with `custody export-step` and `custody import-step`. A federated review names its sources and checks the coverage available at each one. [Paged custody](spec/scale/paged-custody.md)
+
+### Archive maintenance
+
+Use `nao migrate-archive old.sqlite new.sqlite` to make an upgraded copy at a new path. Use `nao --db new.sqlite migrated-head OLD_ID` to look up its active identifier. The separate `migrate` command converts scientific record representations and produces format-mapping evidence.
 
 ## Reproduce the reference trial
 
@@ -67,15 +85,15 @@ nao find reading --prepare --model model --python python
 
 Once set up, inference runs offline. Use `--input FILE` for a query from a supported media or text file.
 
-After a search index upgrade, the first keyword search or `nao prepare-search` starts rebuilding the derived index from the archive. Repeat preparation if the report shows incomplete coverage. For an exact object ID, use `nao find ID` and prepare the index separately.
+The current search index upgrades version 5 in place and reuses its extracted entries and embeddings. Older caches rebuild on first preparation. Explicit model preparation reports `sample_positions_ready`. Repeat preparation to finish a large unfiltered positional index. Filtered semantic queries retain their canonical filtered sample order. Repeat preparation if the report shows incomplete coverage. For an exact object ID, use `nao find ID` and prepare the index separately.
 
 ## Protocol reference
 
 `nao capabilities` reports the supported formats and bootstrap digests. The notice and impact scan budgets count records. Checks that follow a dependency still account for the objects they need, including payload blocks.
 
-Use `nao explain HEAD CLAIM --compact` and `nao impact HEAD NOTICE --compact` to report an unscanned record range separately from individual unavailable dependencies. In these reports, `unscanned: null` means the record scan reached the end of the snapshot. To resume a compact explanation, use its `unscanned.after` with `--after` at the same head. To complete an impact calculation, repeat it with a larger budget at that head so the dependency walk can see the complete inventory. The default reports and stored assessment receipts retain their existing frontier format.
+Use `nao explain HEAD CLAIM --compact` and `nao impact HEAD NOTICE --compact` to report an unscanned record range separately from individual unavailable dependencies. In these reports, `unscanned: null` means the record scan reached the end of the snapshot. To resume a compact explanation, use its `unscanned.after` with `--after` at the same head. To complete an impact calculation, repeat it with a larger budget at that head so the dependency walk can see the complete inventory. The default impact and explanation JSON can also enumerate the frontier.
 
-New assessment receipts use `rep-rust-rules-6`. It verifies canonical snapshot manifests for delegated assessments, notice freshness and format mappings. Historical receipts replay with their recorded evaluator. `nao capabilities` lists the supported versions.
+New assessment receipts use `rep-rust-rules-7`. When a record or byte budget ends the scan, `unscanned_records_from` gives the first record in the unexamined suffix of the pinned inventory. This keeps the notice horizon open. Rules 6 and 7 verify canonical snapshot manifests for delegated assessments, notice freshness and format mappings. Historical receipts replay with their recorded evaluator. `nao capabilities` lists the supported versions.
 
 - [Whitepaper](spec/research-evidence-protocol.pdf)
 - [Bootstrap kit A](spec/kits/A.json) and [bootstrap kit B](spec/kits/B.json)

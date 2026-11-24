@@ -165,7 +165,7 @@ fn lexical(
             JOIN rep_search_terms t ON t.term=token.value
             JOIN rep_search_passages p ON p.id=t.passage
             JOIN rep_search_entries e ON e.id=p.entry
-            JOIN rep_search_visibility visible ON visible.entry=e.id AND visible.head=?1
+            JOIN rep_search_visible visible ON visible.entry=e.id AND visible.head=?1
             WHERE (?3 IS NULL OR e.kind=?3) AND (?4 IS NULL OR e.subject=?4) AND (?5 IS NULL OR e.scope=?5)
             GROUP BY q.key,p.id
         ), ordered AS (

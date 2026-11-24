@@ -17,7 +17,9 @@ use std::{
     io::{BufReader, Read},
 };
 
+mod member;
 mod stream;
+pub use member::MemberProof;
 
 #[cfg(test)]
 mod tests;

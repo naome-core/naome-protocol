@@ -35,12 +35,17 @@ impl Archive {
         if visible {
             let h = self.custody_head(id)?;
             ensure!(!h.restricted, "restricted inventory");
-            self.check_withdrawals(&h, &mut Tree::new(&self.db), 1024)?;
+            self.check_withdrawals(&h, &mut Tree::new(&self.db), usize::MAX)?;
+            tx.execute("INSERT OR REPLACE INTO custody_grant_checks SELECT ?,coalesce(max(serial),0) FROM custody_withdrawal_log",[id.to_string()])?;
             tx.execute(
                 "INSERT OR IGNORE INTO custody_shared VALUES(?)",
                 [id.to_string()],
             )?;
         } else {
+            tx.execute(
+                "DELETE FROM custody_grant_checks WHERE head=?",
+                [id.to_string()],
+            )?;
             tx.execute("DELETE FROM custody_shared WHERE head=?", [id.to_string()])?;
         }
         tx.commit()?;
@@ -105,32 +110,55 @@ impl Archive {
         let mut cursor = target;
         let mut seq = tip.sequence;
         if !self.admitted(target)? {
-            // Find the longest verified prefix, including one previously received for another fork.
-            let (mut low, mut high) = (0, tip.sequence);
-            while low < high {
-                let mid = low + (high - low).div_ceil(2);
-                if self.admitted(origin.ancestor(target, tip.sequence - mid)?)? {
-                    low = mid;
-                } else {
-                    high = mid - 1;
+            let saved: Option<String> = self
+                .db
+                .query_row(
+                    "SELECT cursor FROM custody_pull_cursors WHERE target=?",
+                    [target.to_string()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let prefix = saved
+                .and_then(|s| s.parse::<Id>().ok())
+                .and_then(|id| self.custody_head(id).ok().map(|h| (id, h.sequence)))
+                .filter(|&(id, seq)| {
+                    seq <= tip.sequence
+                        && origin.ancestor(target, tip.sequence - seq).ok() == Some(id)
+                });
+            if let Some((id, verified)) = prefix
+                && verified < tip.sequence
+                && !self.admitted(origin.ancestor(target, tip.sequence - verified - 1)?)?
+            {
+                cursor = id;
+                seq = verified;
+            } else {
+                // Find the longest verified prefix, including one previously received for another fork.
+                let (mut low, mut high) = (0, tip.sequence);
+                while low < high {
+                    let mid = low + (high - low).div_ceil(2);
+                    if self.admitted(origin.ancestor(target, tip.sequence - mid)?)? {
+                        low = mid;
+                    } else {
+                        high = mid - 1;
+                    }
+                }
+                seq = low;
+                if seq > 0 {
+                    cursor = origin.ancestor(target, tip.sequence - seq)?;
                 }
             }
-            seq = low;
-            if seq > 0 {
-                cursor = origin.ancestor(target, tip.sequence - seq)?;
-            }
         }
+        let mut cache = super::frame::ProofCache::default();
         let mut batches = 0;
         let mut payload_bytes = 0;
         let mut descriptor_bytes = 0;
         while seq < tip.sequence && batches < budget {
             let after = (seq != 0).then_some(cursor);
-            let mut frame = Vec::new();
-            let (payload, io) = origin.custody_export_step(target, after, &mut frame)?;
+            let (receipt, payload, descriptors, io) =
+                self.direct_step(origin, target, &tip, after, seq + 1, &mut cache)?;
             sender_io += io;
             payload_bytes += payload;
-            descriptor_bytes += frame.len() - payload;
-            let receipt = self.custody_import_step(target, frame.as_slice())?;
+            descriptor_bytes += descriptors;
             let next = receipt.head;
             receiver_io += receipt.io;
             seq += 1;

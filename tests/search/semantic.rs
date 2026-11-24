@@ -351,7 +351,23 @@ fn limited_semantic_results_survive_different_cache_histories() -> Result<()> {
             [records[2].0]
         );
         assert_eq!(result.vector_rows_loaded, 1);
-        assert!(result.vector_rows_examined > result.vector_rows_loaded);
+        assert_eq!(result.vector_rows_examined, result.vector_rows_loaded);
+        // All records are claims. This equivalent filter exercises the ordered scan.
+        let filtered = archive.search_prepared(
+            &snapshot,
+            naome_protocol::search::SearchInput::Text("query"),
+            SearchOptions {
+                kind: Some(Kind::Claim),
+                ..options
+            },
+            Some(&mut model),
+        )?;
+        assert_eq!(
+            serde_json::to_value(&result.hits)?,
+            serde_json::to_value(&filtered.hits)?
+        );
+        assert_eq!(result.vector_products, filtered.vector_products);
+        assert!(filtered.vector_rows_examined > result.vector_rows_examined);
         if let Some(head) = expected {
             assert_eq!(result.head, head);
         }
