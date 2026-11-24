@@ -1,4 +1,5 @@
 mod custody;
+mod research;
 mod search;
 #[cfg(windows)]
 mod windows_key;
@@ -72,20 +73,7 @@ pub enum ArchiveCommand {
     /// List the complete inventories available for replication.
     Heads,
     /// Capture a complete file atomically as a digest-checked descriptor for recover.
-    Capture {
-        file: PathBuf,
-        media: String,
-        #[arg(long, default_value_t = 1048576)]
-        chunk_size: usize,
-        #[arg(long)]
-        access: Option<Id>,
-        /// Link the captured evidence to a local question, plan, occurrence or derivation.
-        #[arg(long = "for", value_name = "RECORD")]
-        context: Option<Id>,
-        /// Record an explicit note about this use of the evidence.
-        #[arg(long, requires = "context")]
-        note: Option<String>,
-    },
+    Capture(DeferredArgs<research::CaptureArguments>),
     /// Verify and recover a complete chunked payload into a new file.
     Recover {
         head: Id,
@@ -139,15 +127,7 @@ pub enum ArchiveCommand {
         purpose: String,
     },
     /// Inspect a question and the evidence, claims and assessments linked to it.
-    Question {
-        id: Id,
-        /// Use this snapshot instead of the active search snapshot.
-        #[arg(long)]
-        head: Option<Id>,
-        /// Maximum records to inspect for relationships, within the 64 MiB scan budget.
-        #[arg(long, default_value_t = 1000)]
-        budget: usize,
-    },
+    Question(DeferredArgs<research::QuestionArguments>),
     /// Write verified, permitted bytes. The output path must be new.
     Resolve {
         head: Id,
@@ -205,24 +185,9 @@ pub enum ArchiveCommand {
     /// Evaluate a query and persist its immutable receipt.
     Assess { head: Id, query: PathBuf },
     /// Re-run the recorded evaluator and compare the result with the saved receipt.
-    Replay {
-        receipt: Id,
-        /// Search for the receipt in this snapshot. Defaults to the active search snapshot.
-        #[arg(long)]
-        head: Option<Id>,
-    },
+    Replay(DeferredArgs<research::ReplayArguments>),
     /// Re-evaluate a saved query at the given snapshot and save a linked successor receipt.
-    Reassess {
-        receipt: Id,
-        #[arg(long)]
-        head: Id,
-        /// Add an argument to the saved query. Repeat for additional arguments.
-        #[arg(long)]
-        argument: Vec<Id>,
-        /// Override the saved query time for freshness checks.
-        #[arg(long)]
-        at: Option<u64>,
-    },
+    Reassess(DeferredArgs<research::ReassessArguments>),
     /// Serialize a bounded inventory with its permitted objects for offline exchange.
     Export {
         head: Id,
@@ -461,14 +426,14 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         ArchiveCommand::Value { model } => {
             print(input::<crate::investigation::ObservationModel>(&model)?.evaluate()?)
         }
-        ArchiveCommand::Capture {
+        ArchiveCommand::Capture(DeferredArgs(research::CaptureArguments {
             file,
             media,
             chunk_size,
             access,
             context,
             note,
-        } => {
+        })) => {
             let source = File::open(file)?;
             let db = open()?;
             if let Some(target) = context {
@@ -570,7 +535,11 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         ArchiveCommand::Show { head, id, purpose } => {
             print(reader()?.read_head(head, id, &purpose)?)
         }
-        ArchiveCommand::Question { id, head, budget } => {
+        ArchiveCommand::Question(DeferredArgs(research::QuestionArguments {
+            id,
+            head,
+            budget,
+        })) => {
             let db = reader()?;
             print(db.question_view(&db.search_head(head)?, id, budget)?)
         }
@@ -658,16 +627,16 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             let id = evaluation::deposit_receipt(&db, &s, &q, &r, f)?;
             print(json!({"id":id,"receipt":r}))
         }
-        ArchiveCommand::Replay { receipt, head } => {
+        ArchiveCommand::Replay(DeferredArgs(research::ReplayArguments { receipt, head })) => {
             let db = reader()?;
             print(db.replay_assessment(&db.search_head(head)?, receipt)?)
         }
-        ArchiveCommand::Reassess {
+        ArchiveCommand::Reassess(DeferredArgs(research::ReassessArguments {
             receipt,
             head,
             argument,
             at,
-        } => print(open()?.reassess(head, receipt, &argument, at, f)?),
+        })) => print(open()?.reassess(head, receipt, &argument, at, f)?),
         ArchiveCommand::Export {
             head,
             member,
