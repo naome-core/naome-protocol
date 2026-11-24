@@ -3,6 +3,10 @@ name: Full Cargo CI
 on:
   workflow_dispatch:
     inputs:
+      release_commit:
+        description: Full commit SHA on main to build and qualify for distribution
+        type: string
+        required: false
       model_search:
         description: Run offline search qualification with EmbeddingGemma 2
         type: boolean
@@ -49,6 +53,7 @@ jobs:
       profile: ${{ matrix.profile }}
       package_target: ${{ matrix.profile == 'release' && matrix.target || '' }}
       model_search: ${{ matrix.profile == 'release' && inputs.model_search }}
+      source_commit: ${{ inputs.release_commit || '' }}
 
   result:
     name: Full Cargo results

@@ -15,6 +15,9 @@ on:
       model_search:
         type: boolean
         default: false
+      source_commit:
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -24,6 +27,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
   NAOME_TEST_PROFILE: ${{ inputs.profile }}
+  NAOME_SOURCE_COMMIT: ${{ inputs.source_commit }}
 
 defaults:
   run:
@@ -35,9 +39,18 @@ jobs:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.model_search && 60 || 30 }}
     steps:
+      - name: Check the release source input
+        if: ${{ inputs.source_commit != '' }}
+        run: |
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$NAOME_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.source_commit || '' }}
+          fetch-depth: ${{ inputs.source_commit != '' && '0' || '1' }}
           persist-credentials: false
 
       - name: Verify checkout, profile, and pinned toolchain
@@ -46,6 +59,10 @@ jobs:
             test|release) ;;
             *) echo "Unsupported test profile: $NAOME_TEST_PROFILE"; exit 1 ;;
           esac
+          if [[ -n "$NAOME_SOURCE_COMMIT" ]]; then
+            test "$(git rev-parse HEAD)" = "$NAOME_SOURCE_COMMIT"
+            git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          fi
           git show --no-patch --format='commit=%H%ntree=%T%nparents=%P' HEAD
           rustup show active-toolchain
           rustup component list --installed
@@ -127,8 +144,7 @@ jobs:
         if: ${{ inputs.package_target == 'x86_64-unknown-linux-gnu' }}
         run: |
           cargo package --locked
-          mkdir -p target/source-distribution
-          cp target/package/naome-protocol-*.crate spec/research-evidence-protocol.pdf target/source-distribution/
+          python tools/ci/package_release.py --source
 
       - name: Upload the verified native release files
         if: ${{ inputs.package_target != '' }}

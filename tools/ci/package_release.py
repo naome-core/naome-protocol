@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import tomllib
 
@@ -52,11 +53,46 @@ def verify(nao, directory, version):
         receiver = f"{mode} receiver.sqlite"
         resolved = f"{mode} reading.txt"
         run("export", head, exchange, *options)
-        run("--db", receiver, "import", exchange, *options)
+        pin = ["--expected-head", head] if mode == "paged" else []
+        run("--db", receiver, "import", exchange, *options, *pin)
         subprocess.run([nao, "--db", receiver, "resolve", head, object_id, resolved],
                        cwd=directory, timeout=60, check=True)
         if (directory / resolved).read_bytes() != reading:
             raise ValueError(f"{mode} exchange changed the payload")
+
+    retired = run("blob", "README.md")
+    transfer_head = run("snapshot", "paged release qualification", "--root", object_id, "--root", retired)
+    subprocess.run([nao, "withdraw", retired], cwd=directory, check=True, timeout=60)
+    receive = ["--db", "continued receiver.sqlite", "import"]
+    pin = ["--paged", "--expected-head", transfer_head]
+    cursor = None
+    for index in range(8):
+        page = f"transfer-{index}.json"
+        after = ["--after", cursor] if cursor else []
+        sent = run("export", transfer_head, page, "--paged", "--limit", "1", *after)
+        accepted = run(*receive, page, *pin)
+        if accepted != sent:
+            raise ValueError("receiver acknowledged a different exchange range")
+        retry = run(*receive, "transfer-0.json", *pin)
+        if retry["complete"] != accepted["complete"] or retry["continuation"] != accepted["continuation"]:
+            raise ValueError("repeated delivery changed the exchange checkpoint")
+        if accepted["complete"]:
+            break
+        cursor = accepted["continuation"]
+    else:
+        raise ValueError("paged transfer never completed")
+    subprocess.run([nao, "--db", "continued receiver.sqlite", "resolve", transfer_head, object_id,
+                    "continued-reading.txt"], cwd=directory, check=True, timeout=60)
+    if (directory / "continued-reading.txt").read_bytes() != reading:
+        raise ValueError("continued transfer changed the available payload")
+    unavailable = subprocess.run([nao, "--db", "continued receiver.sqlite", "resolve", transfer_head,
+                                  retired, "withdrawn.txt"], cwd=directory, capture_output=True, timeout=60)
+    if unavailable.returncode == 0 or b"unavailable" not in unavailable.stderr:
+        raise ValueError("finished inventory incorrectly supplied withdrawn evidence")
+
+    study = run("trial", "research trial")
+    if not {"historic replay", "correction impact"} <= set(study["verified"]):
+        raise ValueError("research trial omitted replay or correction checks")
 
     (directory / "stream.txt").write_bytes(b"instrument capture stream")
     stream = run("blob", "stream.txt")
@@ -107,6 +143,24 @@ def verify(nao, directory, version):
     if seed.stat().st_size != 32:
         raise ValueError("key generation did not write a 32-byte seed")
     print(f"Verified {nao.name}: published profiles, archive exchange, custody transfer and review, and key generation")
+
+
+def source_package():
+    with (ROOT / "Cargo.toml").open("rb") as manifest:
+        version = tomllib.load(manifest)["package"]["version"]
+    name = f"naome-protocol-{version}"
+    archive = ROOT / "target/package" / f"{name}.crate"
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    with tarfile.open(archive, "r:gz") as package:
+        with package.extractfile(f"{name}/.cargo_vcs_info.json") as info:
+            git = json.load(info)["git"]
+    if git.get("sha1") != commit or git.get("dirty"):
+        raise ValueError(f"source package does not match clean checkout {commit}")
+    output = ROOT / "target/source-distribution"
+    output.mkdir(exist_ok=True)
+    shutil.copy2(archive, output)
+    shutil.copy2(ROOT / "spec/research-evidence-protocol.pdf", output)
+    print(f"Staged {archive.name} from {commit}")
 
 
 def package(target, model):
@@ -163,7 +217,12 @@ def package(target, model):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("target")
+    platform = parser.add_mutually_exclusive_group(required=True)
+    platform.add_argument("target", nargs="?")
+    platform.add_argument("--source", action="store_true")
     parser.add_argument("--model", action="store_true")
     args = parser.parse_args()
-    package(args.target, args.model)
+    if args.source:
+        source_package()
+    else:
+        package(args.target, args.model)
