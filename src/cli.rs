@@ -65,6 +65,8 @@ pub enum ArchiveCommand {
     },
     /// Create or open a custody database.
     Init,
+    /// Show the active archive, full snapshot and count of deposited objects awaiting a snapshot.
+    Status,
     /// Register a complete, readable inventory in the local replica release catalog.
     Publish { head: Id },
     /// List the complete inventories available for replication.
@@ -77,6 +79,12 @@ pub enum ArchiveCommand {
         chunk_size: usize,
         #[arg(long)]
         access: Option<Id>,
+        /// Link the captured evidence to a local question, plan, occurrence or derivation.
+        #[arg(long = "for", value_name = "RECORD")]
+        context: Option<Id>,
+        /// Record an explicit note about this use of the evidence.
+        #[arg(long, requires = "context")]
+        note: Option<String>,
     },
     /// Verify and recover a complete chunked payload into a new file.
     Recover {
@@ -130,6 +138,16 @@ pub enum ArchiveCommand {
         #[arg(long, default_value = "read")]
         purpose: String,
     },
+    /// Inspect a question and the evidence, claims and assessments linked to it.
+    Question {
+        id: Id,
+        /// Use this snapshot instead of the active search snapshot.
+        #[arg(long)]
+        head: Option<Id>,
+        /// Maximum records to inspect for relationships, within the 64 MiB scan budget.
+        #[arg(long, default_value_t = 1000)]
+        budget: usize,
+    },
     /// Write verified, permitted bytes. The output path must be new.
     Resolve {
         head: Id,
@@ -158,7 +176,7 @@ pub enum ArchiveCommand {
     /// Show or pin the active search snapshot.
     SearchHead {
         head: Option<Id>,
-        /// Use the newest local snapshot, or the first import if there is no local snapshot.
+        /// Follow the newest full local snapshot when one exists.
         #[arg(long, conflicts_with = "head")]
         clear: bool,
     },
@@ -186,6 +204,25 @@ pub enum ArchiveCommand {
     },
     /// Evaluate a query and persist its immutable receipt.
     Assess { head: Id, query: PathBuf },
+    /// Re-run the recorded evaluator and compare the result with the saved receipt.
+    Replay {
+        receipt: Id,
+        /// Search for the receipt in this snapshot. Defaults to the active search snapshot.
+        #[arg(long)]
+        head: Option<Id>,
+    },
+    /// Re-evaluate a saved query at the given snapshot and save a linked successor receipt.
+    Reassess {
+        receipt: Id,
+        #[arg(long)]
+        head: Id,
+        /// Add an argument to the saved query. Repeat for additional arguments.
+        #[arg(long)]
+        argument: Vec<Id>,
+        /// Override the saved query time for freshness checks.
+        #[arg(long)]
+        at: Option<u64>,
+    },
     /// Serialize a bounded inventory with its permitted objects for offline exchange.
     Export {
         head: Id,
@@ -429,13 +466,27 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             media,
             chunk_size,
             access,
-        } => print(open()?.capture(
-            File::open(file)?,
-            &media,
-            chunk_size,
-            access.unwrap_or(public),
-            f,
-        )?),
+            context,
+            note,
+        } => {
+            let source = File::open(file)?;
+            let db = open()?;
+            if let Some(target) = context {
+                print(db.capture_for(
+                    source,
+                    &media,
+                    chunk_size,
+                    crate::payload::CaptureContext {
+                        target,
+                        note: note.as_deref(),
+                        access,
+                    },
+                    f,
+                )?)
+            } else {
+                print(db.capture(source, &media, chunk_size, access.unwrap_or(public), f)?)
+            }
+        }
         ArchiveCommand::Recover {
             head,
             descriptor,
@@ -471,6 +522,15 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         ArchiveCommand::Init => {
             open()?;
             print(json!({"profile":Id::blob(profile::PROFILE),"public":public}))
+        }
+        ArchiveCommand::Status => {
+            let path = std::path::absolute(&db_path)?;
+            let state = if path.try_exists()? {
+                Some(reader()?.status()?)
+            } else {
+                None
+            };
+            print(json!({"path":path,"archive":state}))
         }
         ArchiveCommand::Publish { head } => {
             open()?.release(head)?;
@@ -509,6 +569,10 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         }
         ArchiveCommand::Show { head, id, purpose } => {
             print(reader()?.read_head(head, id, &purpose)?)
+        }
+        ArchiveCommand::Question { id, head, budget } => {
+            let db = reader()?;
+            print(db.question_view(&db.search_head(head)?, id, budget)?)
         }
         ArchiveCommand::Resolve {
             head,
@@ -594,6 +658,16 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             let id = evaluation::deposit_receipt(&db, &s, &q, &r, f)?;
             print(json!({"id":id,"receipt":r}))
         }
+        ArchiveCommand::Replay { receipt, head } => {
+            let db = reader()?;
+            print(db.replay_assessment(&db.search_head(head)?, receipt)?)
+        }
+        ArchiveCommand::Reassess {
+            receipt,
+            head,
+            argument,
+            at,
+        } => print(open()?.reassess(head, receipt, &argument, at, f)?),
         ArchiveCommand::Export {
             head,
             member,

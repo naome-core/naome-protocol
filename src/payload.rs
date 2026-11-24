@@ -1,12 +1,28 @@
 use crate::{
-    profile::{Document, Kind, link},
+    profile::{Document, Kind, PUBLIC, allows, link},
     store::{Archive, ObjectAvailability, Snapshot},
     wire::{Format, Id, MAX_BYTES},
 };
 use anyhow::{Context, Result, ensure};
+use rusqlite::{Transaction, TransactionBehavior};
+use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
+
+pub(crate) const CAPTURED_EVIDENCE_SCOPE: &str = "captured-evidence-1";
+
+pub struct CaptureContext<'a> {
+    pub target: Id,
+    pub note: Option<&'a str>,
+    pub access: Option<Id>,
+}
+
+#[derive(Serialize)]
+pub struct LinkedCapture {
+    pub descriptor: Id,
+    pub occurrence: Id,
+}
 
 /// Fill a fixed-size logical block across interrupted or short underlying reads.
 pub(crate) fn read_block(source: &mut impl Read, buffer: &mut [u8]) -> std::io::Result<usize> {
@@ -26,6 +42,81 @@ impl Archive {
     /// Stream an exact payload into an ordered chunk descriptor. A failed import rolls back every new object.
     pub fn capture(
         &self,
+        source: impl Read,
+        media: &str,
+        chunk_size: usize,
+        access: Id,
+        f: Format,
+    ) -> Result<Id> {
+        let tx = self.db.unchecked_transaction()?;
+        let id = self.capture_payload(source, media, chunk_size, access, f)?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Capture bytes and record their use in local research in the same transaction.
+    pub fn capture_for(
+        &self,
+        source: impl Read,
+        media: &str,
+        chunk_size: usize,
+        context: CaptureContext<'_>,
+        f: Format,
+    ) -> Result<LinkedCapture> {
+        let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
+        let mut target_access = Id::blob(PUBLIC);
+        let document = self.read_with(context.target, |id| {
+            let (bytes, acl) = self.raw(id)?.context("research context unavailable")?;
+            self.check_access(acl, |policy| allows(policy, "read"))?;
+            if id == context.target {
+                target_access = acl;
+            }
+            Ok(bytes)
+        })?;
+        ensure!(
+            matches!(
+                document.kind,
+                Kind::Question | Kind::Plan | Kind::Occurrence | Kind::Derivation
+            ),
+            "capture context must be a question, plan, occurrence or derivation"
+        );
+        let access = context.access.unwrap_or(target_access);
+        let public = Id::blob(PUBLIC);
+        let occurrence_access = if target_access == public {
+            access
+        } else {
+            ensure!(
+                access == public || access == target_access,
+                "incompatible research context and payload access policies"
+            );
+            target_access
+        };
+        self.check_access(access, |policy| allows(policy, "read"))?;
+        let descriptor = self.capture_payload(source, media, chunk_size, access, f)?;
+        let fields = match context.note {
+            Some(note) => json!({"note":note}),
+            None => json!({}),
+        };
+        let occurrence = self.document(
+            &Document::new(
+                Kind::Occurrence,
+                &document.subject,
+                CAPTURED_EVIDENCE_SCOPE,
+                fields,
+                vec![link("context", context.target), link("payload", descriptor)],
+            )?,
+            f,
+            occurrence_access,
+        )?;
+        tx.commit()?;
+        Ok(LinkedCapture {
+            descriptor,
+            occurrence,
+        })
+    }
+
+    fn capture_payload(
+        &self,
         mut source: impl Read,
         media: &str,
         chunk_size: usize,
@@ -36,7 +127,6 @@ impl Archive {
             !media.is_empty() && (1..=MAX_BYTES).contains(&chunk_size),
             "invalid representation or chunk size"
         );
-        let tx = self.db.unchecked_transaction()?;
         let mut buf = vec![0; chunk_size];
         let mut digest = Sha256::new();
         let mut offset = 0u64;
@@ -74,9 +164,7 @@ impl Archive {
             json!({"algorithm":"SHA-256","sha256":hex::encode(digest.finalize()),"length":offset,"media":media}),
             chunks,
         )?;
-        let id = self.document(&d, f, access)?;
-        tx.commit()?;
-        Ok(id)
+        self.document(&d, f, access)
     }
     /// Write into an unpublished staging destination. Success certifies the complete sequence.
     pub fn materialize(

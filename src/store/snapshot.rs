@@ -286,12 +286,7 @@ impl Archive {
         } else {
             None
         };
-        let (water, epoch): (i64, i64) = self.db.query_row(
-            "SELECT (SELECT coalesce(max(serial),0) FROM archive_deposits),withdrawn
-             FROM archive_epoch WHERE singleton=1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (water, epoch) = self.archive_revision()?;
         let encoded = serde_json::to_string(&parents)?;
         let existing: Option<String> = self
             .db
@@ -344,41 +339,93 @@ impl Archive {
             &self.db,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        let mut tips = self.custody_tips(source, None, 2)?;
-        if tips.len() > 1 {
-            // A full rebuild can start a new custody chain after a withdrawal. Its
-            // recorded seal parents still identify the branches it continued.
-            let mut query = self.db.prepare(
-                "SELECT head FROM custody_tips WHERE source=?1
-                 EXCEPT SELECT p.value FROM archive_seals s, json_each(s.parents) p
-                        WHERE s.source=?1
-                 LIMIT 2",
-            )?;
-            tips = query
-                .query_map([source], |r| r.get::<_, String>(0))?
-                .map(|r| r?.parse())
-                .collect::<Result<_>>()?;
+        // A withdrawal may rebuild the custody tree. Full seal parents still identify
+        // the tips it continued even when the physical ancestry had to be rebuilt.
+        let mut query = self.db.prepare(
+            "SELECT t.head,s.high_water,s.epoch FROM custody_tips t
+             LEFT JOIN archive_seals s ON s.id=t.head
+             WHERE t.source=?1 AND t.head NOT IN (
+                 SELECT p.value FROM archive_seals parent, json_each(parent.parents) p
+                 WHERE parent.source=?1
+             )",
+        )?;
+        let mut rows = query.query([source])?;
+        let mut full = None;
+        let ambiguity =
+            "continuation requires exactly one full local tip; select --parent explicitly";
+        while let Some(row) = rows.next()? {
+            let id: Id = row.get::<_, String>(0)?.parse()?;
+            if let Some(water) = row.get::<_, Option<i64>>(1)? {
+                ensure!(full.is_none(), "{ambiguity}");
+                full = Some((id, water, row.get::<_, i64>(2)?));
+            } else {
+                let tip = self.custody_head(id)?;
+                // Selected cuts build a new tree. Explicit custody appends bootstrap a
+                // lineage or name their physical parent as their sole origin.
+                let append = tip.bootstrap
+                    || tip.parent.is_some_and(|parent| {
+                        tip.origins.len() == 1 && tip.origins.contains(&parent)
+                    });
+                ensure!(!append, "{ambiguity}");
+            }
         }
-        let [parent] = tips.as_slice() else {
-            anyhow::bail!("continuation requires exactly one tip; select --parent explicitly");
-        };
-        let prior: Option<(i64, i64)> = self
-            .db
-            .query_row(
-                "SELECT high_water,epoch FROM archive_seals WHERE id=? AND source=?",
-                params![parent.to_string(), source],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let prior = prior.context("tip is not a full local seal; select --parent explicitly")?;
-        let current = self.db.query_row("SELECT (SELECT coalesce(max(serial),0) FROM archive_deposits),withdrawn FROM archive_epoch",[],|r| Ok((r.get(0)?,r.get(1)?)))?;
-        let head = if prior == current {
-            *parent
+        drop(rows);
+        let (parent, water, epoch) = full.context(ambiguity)?;
+        let head = if (water, epoch) == self.archive_revision()? {
+            parent
         } else {
-            self.snapshot_id(source, [*parent].into())?
+            self.snapshot_id(source, [parent].into())?
         };
         tx.commit()?;
         Ok(head)
+    }
+
+    pub(super) fn archive_revision(&self) -> Result<(i64, i64)> {
+        Ok(self.db.query_row(
+            "SELECT (SELECT coalesce(max(serial),0) FROM archive_deposits),withdrawn
+             FROM archive_epoch WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
+    }
+
+    pub(super) fn latest_full_seal(&self) -> Result<Option<(Id, String, i64, i64)>> {
+        let seal: Option<(String, String, i64, i64)> = self
+            .db
+            .query_row(
+                "SELECT id,source,high_water,epoch FROM archive_seals ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        seal.map(|(id, source, water, epoch)| Ok((id.parse()?, source, water, epoch)))
+            .transpose()
+    }
+
+    /// Describe the current local work without sealing or preparing search data.
+    pub fn status(&self) -> Result<super::ArchiveStatus> {
+        self.with_read_view(|| {
+            let full = self.latest_full_seal()?;
+            let pin = self.search_pin()?;
+            let search_head = self.default_search_head(pin, full.as_ref().map(|seal| seal.0))?;
+            let pending_objects: i64 = self.db.query_row(
+                "SELECT count(*) FROM archive_deposits d JOIN objects o ON o.id=d.id
+                 WHERE d.serial>? AND o.data IS NOT NULL",
+                [full.as_ref().map_or(0, |seal| seal.2)],
+                |row| row.get(0),
+            )?;
+            let (_, current_epoch) = self.archive_revision()?;
+            Ok(super::ArchiveStatus {
+                search_head,
+                search_pinned: pin.is_some(),
+                pending_objects: u64::try_from(pending_objects)?,
+                full_snapshot: full.map(|(id, source, _, epoch)| super::WorkingSnapshot {
+                    id,
+                    source,
+                    withdrawals_since: current_epoch - epoch,
+                }),
+            })
+        })
     }
 
     pub(super) fn register_snapshot(&self, m: &Manifest, imported: bool) -> Result<()> {

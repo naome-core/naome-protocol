@@ -9,6 +9,7 @@ use crate::{
             CorrectionImpact, CorrectionKeys, DependencyCorrection, admitted_corrections,
             correction_keys,
         },
+        rebuild_receipt,
     },
     migration::Equivalence,
     profile::{Document, Kind, PUBLIC, link, verify_attestation},
@@ -342,23 +343,19 @@ impl TrainingReview<'_> {
             .historical
             .as_mut()
             .context("missing receipt inventory")?;
-        let replay =
-            assess_with_inventory(store, historical, &original, &evaluator, inventory)?.receipt;
-        let expected = crate::evaluation::receipt_document(
+        let rebuilt = rebuild_receipt(
             store,
             historical,
             *historical_head,
             &original,
-            &replay,
             &evaluator,
-        )?
-        .encode(Id::blob(PUBLIC))?;
+            inventory,
+        )?;
         ensure!(
-            [Format::A, Format::B]
-                .iter()
-                .any(|f| aliases.equivalent(receipt_id, Id::record(*f, &expected.encode(*f)))),
+            rebuilt.matches(receipt_id, aliases),
             "receipt fields or dependencies do not replay"
         );
+        let replay = rebuilt.receipt;
         ensure!(
             &label_value(&replay, check, condition)? == value,
             "label disagrees with the assessed predicate"

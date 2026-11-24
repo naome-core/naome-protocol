@@ -6,6 +6,8 @@ mod inventory;
 #[cfg(all(test, feature = "cli"))]
 mod manifest_tests;
 mod measurement;
+mod question;
+mod replay;
 mod rules;
 mod science;
 use calibration_identity::CalibrationIdentities;
@@ -18,6 +20,9 @@ use dependency_correction::{
 pub use impact::Impact;
 pub(crate) use inventory::{EvidenceView, ReadInventory};
 use measurement::Predicate;
+pub use question::{QuestionRecord, QuestionView};
+pub(crate) use replay::rebuild_receipt;
+pub use replay::{Reassessment, ReceiptReplay};
 #[cfg(feature = "cli")]
 pub(crate) use rules::replay_evaluator_ids;
 pub(crate) use rules::{EVALUATOR_ID, manifest_encoding};

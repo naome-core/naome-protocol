@@ -48,6 +48,20 @@ pub struct Page {
 pub struct Archive {
     pub(crate) db: Connection,
 }
+#[derive(Serialize)]
+pub struct ArchiveStatus {
+    pub full_snapshot: Option<WorkingSnapshot>,
+    pub search_head: Option<Id>,
+    pub search_pinned: bool,
+    pub pending_objects: u64,
+}
+
+#[derive(Serialize)]
+pub struct WorkingSnapshot {
+    pub id: Id,
+    pub source: String,
+    pub withdrawals_since: i64,
+}
 impl Archive {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -242,7 +256,7 @@ impl Archive {
         ensure!(s.objects.contains(&acl), "missing access descriptor");
         self.check_access(acl, |policy| crate::profile::allows(policy, "read"))
     }
-    fn check_access(&self, acl: Id, allows: impl FnOnce(&[u8]) -> bool) -> Result<()> {
+    pub(crate) fn check_access(&self, acl: Id, allows: impl FnOnce(&[u8]) -> bool) -> Result<()> {
         let (policy, parent) = self.raw(acl)?.context("unavailable access policy")?;
         ensure!(
             acl.format().is_none() && parent == Id::blob(PUBLIC) && allows(&policy),
@@ -279,7 +293,7 @@ impl Archive {
     ) -> Result<Document> {
         self.read_with(id, |id| self.resolve_for_training(s, id, access))
     }
-    fn read_with(
+    pub(crate) fn read_with(
         &self,
         id: Id,
         mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,

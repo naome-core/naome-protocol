@@ -19,7 +19,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use cache::{INDEX_VERSION, coverage, prepared_cache_version};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeSet;
 use vectors::{embed_query, missing_vectors};
 
@@ -65,25 +65,48 @@ impl Archive {
     }
 
     fn selected_search_id(&self, head: Option<Id>) -> Result<Id> {
-        let head = match head {
-            Some(head) => head,
-            None => self
-                .db
-                .query_row(
-                    "SELECT coalesce(
-                        (SELECT head FROM rep_search_selection WHERE singleton=1),
-                        (SELECT id FROM heads
-                         WHERE NOT EXISTS (SELECT 1 FROM rep_imported_heads WHERE head=heads.id)
-                         ORDER BY rowid DESC LIMIT 1),
-                        (SELECT id FROM heads ORDER BY rowid LIMIT 1)
-                    )",
-                    [],
-                    |row| row.get::<_, Option<String>>(0),
-                )?
-                .context("no archive snapshot; create one with snapshot or specify --head")?
-                .parse()?,
-        };
-        self.current_head_id(head)
+        if let Some(head) = head {
+            return self.current_head_id(head);
+        }
+        let pin = self.search_pin()?;
+        let full = self.latest_full_seal()?.map(|seal| seal.0);
+        self.default_search_head(pin, full)?
+            .context("no archive snapshot; create one with snapshot or specify --head")
+    }
+
+    pub(super) fn search_pin(&self) -> Result<Option<Id>> {
+        let pin: Option<String> = self
+            .db
+            .query_row(
+                "SELECT head FROM rep_search_selection WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        pin.map(|head| head.parse()).transpose()
+    }
+
+    pub(super) fn default_search_head(
+        &self,
+        pin: Option<Id>,
+        full: Option<Id>,
+    ) -> Result<Option<Id>> {
+        if let Some(head) = pin.or(full) {
+            return self.current_head_id(head).map(Some);
+        }
+        // Older archives may contain only retained snapshots, without full-seal metadata.
+        let fallback: Option<String> = self.db.query_row(
+            "SELECT coalesce(
+                (SELECT id FROM heads WHERE NOT EXISTS (
+                     SELECT 1 FROM rep_imported_heads WHERE head=heads.id
+                 ) ORDER BY rowid DESC LIMIT 1),
+                (SELECT id FROM heads ORDER BY rowid LIMIT 1))",
+            [],
+            |row| row.get(0),
+        )?;
+        fallback
+            .map(|head| self.current_head_id(head.parse()?))
+            .transpose()
     }
 
     /// Return the authenticated selected header without loading its inventory.
