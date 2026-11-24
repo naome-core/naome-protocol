@@ -1,6 +1,6 @@
 \documentclass[11pt,a4paper]{article}
 \usepackage[margin=24mm,top=23mm,bottom=24mm,headheight=15pt]{geometry}
-\usepackage{amsmath,amssymb,tabularx,booktabs,xcolor,enumitem,fancyhdr,verbatim,hyperref}
+\usepackage{amsmath,amssymb,tabularx,booktabs,xcolor,enumitem,fancyhdr,hyperref}
 \definecolor{ink}{HTML}{172D37}
 \definecolor{accent}{HTML}{00665C}
 \newcommand{\edition}{1.9}
@@ -73,7 +73,7 @@ The protocol guarantees that a conforming verdict follows the admission rules in
 \topic{Withdrawing a premise}
 Suppose two arguments support the same claim. One relies on a calibration that a laboratory withdraws for a particular instrument mode and time interval. The evaluator follows the recorded dependencies within that scope and reassesses each affected argument. If the second argument still warrants the claim and no admitted argument supports its negation, the claim remains supported. If all support depended on the withdrawn premise and no contrary argument is admitted, the claim becomes unresolved. Refutation requires a surviving or new argument for the negation. If admissible arguments support both sides, the claim is contested.
 
-In the paired-measurement profile, a signed \texttt{withdraw} notice names a target premise. Its optional \texttt{mode} is a nonempty string and its optional \texttt{interval} is a closed pair of signed integer event times. Both restrictions apply when present. A scoped withdrawal of a laboratory report limits the correction that relied on it in the same way. The evaluator compares the restrictions with the recorded measurement. A known mismatch leaves the argument available. If applicability cannot be established or excluded, the receipt records the open check. An unqualified withdrawal covers every matching use in its declared scope.
+In the paired-measurement example, a signed withdrawal names a target premise. It may restrict the withdrawal to an instrument mode and a closed interval in the declared event-time basis. Both restrictions apply when present. A scoped withdrawal of a laboratory report limits the correction that relied on it in the same way. The evaluator compares the restrictions with the recorded measurement. A known mismatch leaves the argument available. If applicability cannot be established or excluded, the receipt records the open check. An unqualified withdrawal covers every matching use in its declared scope.
 
 A reverse-dependency search identifies possible downstream uses for review. Reassessment determines which arguments still justify using the finding. A training manifest that used the superseded judgement records exposure and calls for review. Its effect on a trained model requires a separate test. The earlier receipt still identifies what was warranted at its own snapshot.
 
@@ -96,17 +96,17 @@ An applicable profile is a pinned, versioned rule for interpreting the input and
 
 Follow recorded dependencies to arguments, assessments and derived uses. An affected path requires review. An open path also requires review unless a separate analysis can resolve it. An incomplete dependency or notice search leaves a frontier. The current assessment evaluates surviving arguments and records its outstanding review obligations. A historical assessment replays at its original snapshot with its original evaluator and policy. Recompute the affected result with the appropriate domain tool. Deposit a new assessment binding the revised source version, its used portion, the correction and the method. References to earlier results and notices preserve the audit trail.
 
-\topic{Two reference profiles}
-The \texttt{table-rows-1} profile uses sorted, non-overlapping half-open ranges of zero-based data rows in the named version and, optionally, named columns. An omitted column list denotes all columns in those rows. A revision of one Medicare service-count cell is a tabular example. The control uses rows that exclude that cell. The \texttt{instrument-time-1} profile uses a half-open interval of signed integer ticks, a named clock basis and an instrument mode. A different mode or a disjoint interval on a common clock can establish exclusion. Incomparable clocks leave applicability open.
+\topic{Two examples of correction scope}
+A tabular profile can identify the rows and columns of a named dataset version. A correction to one Medicare service-count cell can affect an analysis that read that cell. An analysis restricted to other rows provides a control. An instrument profile can identify an event-time interval, clock basis and operating mode. A different mode or a disjoint interval on a common clock can establish exclusion. Incomparable clocks leave applicability open.
 
-The reference evaluator reads a \texttt{source-input} link whose target is the original version and whose qualifier encodes the named profile and selector. A notice with action \texttt{correct-input} links to the same version and its evidence, and encodes its selector in the coverage field. The policy pins authorised keys by scope and version. The evaluator uses these records for dependency review. The linked domain procedure supplies the revised calculation.
+The use and the correction both identify the source version and the profile that gives meaning to their scope. The notice identifies the evidence for the correction. The recipient checks the authority to issue it under the declared policy. Overlap establishes which uses require review. The revised scientific result requires its own calculation or argument.
 
 \partpage{Documenting an investigation as it runs}\label{sec:attempt}
 The unit of documentation is an investigation attempt. Several agents may propose plans for the same question. The agent choosing a plan records its objective, selection criterion, rationale, cost ceiling, authorisation and stopping conditions. The planner, executor and evaluator each contribute the part of the record they can observe. Their references connect those contributions across the following stages.
 
 \begin{enumerate}
 \item \textbf{Design.} Record the target and scope, current evidence, alternatives, decisive observations and threats to interpretation. For an empirical comparison, state the quantity to be estimated (the estimand), the eligible units, design, controls, sampling and analysis choices, plausible sources of confounding, handling of missing data and permitted adaptations. For formal work, bind the conjecture, allowed foundations and success predicate. For exploratory work bind the search scope and selection process, to the extent known.
-\item \textbf{Commit where foresight matters.} Freeze the plan, expected outcomes or prediction distributions, scoring rule and stopping policy. A prospective claim requires evidence that the plan was fixed before access to the relevant outcomes. Record source of ordering, trust assumptions and the outcome-exposure boundary. A trusted timestamp can witness that bytes existed by a stated time. It cannot establish that their author did not already know the answer. Record controlled release or concealment evidence separately. \src{21}\src{24}
+\item \textbf{Commit where foresight matters.} Freeze the plan, expected outcomes or prediction distributions, scoring rule and stopping policy. A prospective claim requires evidence that the plan was fixed before access to the relevant outcomes. Record source of ordering, trust assumptions and the outcome-exposure boundary. A trusted timestamp can witness that bytes existed by a stated time. It cannot establish that their author did not already know the answer. Record controlled release or concealment evidence separately. \src{21}\src{23}
 \item \textbf{Authorise and execute.} An action authority binds actor, subject, operation, time, revocation condition and maximum resource use. The executor checks it immediately before acting and accounts for prior attempts. Quotas for money, materials, energy and computation use their own units. Independent agents must coordinate reservations on a shared scarce resource or abstain. For physical interventions, provide local interlocks, interruption conditions and a safe recovery state specified by the facility.
 \item \textbf{Record what happened.} Append occurrences, observations and departures from plan. For a change of plan, preserve the new plan, its reasons and dependencies, and the results visible when the change was adopted. A permitted adaptation is checked against the original rule. Preserve unselected candidates, incomplete attempts, null findings and failures at the granularity needed to audit selection.
 \item \textbf{Analyse and challenge.} Record the pipeline and scoped claims. Compare the expectation to the actual outcome under the frozen rule. A challenger can contribute a counterexample, alternative interpretation, reanalysis, or design for a discriminating new observation. Link each response to the exact challenge.
@@ -161,7 +161,7 @@ A store holds immutable records and arbitrary payload bytes. An issuer is the id
 \topic{Envelope}
 Every record carries a kind, a reference to its interpretation profile, a body, and a list of typed input references with roles. The envelope also declares the access descriptor and any critical extensions. A consumer that cannot interpret a critical extension may carry the record as opaque data. It must report unknown for any check that requires that extension. Profile, policy and body references participate in identity. The issuer attests to the resulting identifier in a separate envelope, avoiding self-reference and allowing additional attestations. Payload descriptors give digest algorithm, digest, byte length and media or representation type. An ordered chunk manifest additionally binds positions and total length. Payload validation checks the bytes actually consumed.
 
-A bootstrap instance can use SHA-256 with domain-separated record and blob hashes, an explicit algorithm identifier and RFC 8949 core deterministic CBOR. In this instance envelopes use fixed-order arrays, unsigned integers, exact byte strings and UTF-8 text. No floating-point scalars, maps, tags or indefinite lengths are admitted to the envelope. Scientific numerics live in typed payloads with declared representations. A deployment pins a bootstrap package and the means to read it through an independent channel. Appendix~\ref{app:exchange} specifies its contents and two example wire formats. A consumer resolves units, referents and claims of equivalence through the declared profile. \src{22}
+A deployment uses a trusted channel to establish an initial grammar, how to verify content identity and which profiles it can interpret. These conventions identify the exact material a recipient must inspect. Units, referents and the conditions for equivalence between representations come from the declared scientific profiles. Appendix~\ref{app:exchange} describes the evidence a recipient needs to use an exchange.
 
 \small
 \begin{tabularx}{\linewidth}{@{}L{.19\linewidth}Y@{}}
@@ -178,7 +178,7 @@ Notice / Decision & Notice identifies challenged, corrected or superseded record
 \end{tabularx}
 \normalsize
 
-A draft plan with a valid envelope, subject and scope can enter the archive with empty fields. The payload executor requires a linked question, stopping rule and predicate. Gauge scoring checks the registered thresholds and release order. Prospective training verifies the release signature and excludes outcomes from the feature cutoff.
+Recording a draft plan establishes that it exists. Authorising an experiment requires its linked question, stopping rule and intended test. A prospective evaluation also requires evidence that the plan preceded access to outcomes.
 
 \partpage{Meaning across unlike machines}\label{sec:meaning}
 An agent learns another agent's vocabulary through immutable \emph{profiles}. A bootstrap profile defines the grammar for record envelopes, references, roles and the results of tests. The consumer selects it through a previously understood, trusted channel. Reading the envelope establishes its structure. Each scientific interpretation still requires a recognised profile and a warrant for its use. A specialist profile depends on that root and may introduce new kinds of quantities, proof calculi, sensory modalities, latent representations or interpretive criteria. A consumer can preserve an opaque profile and transmit its bytes before it learns to interpret them. It may only issue a scientific verdict for meanings it can resolve.
@@ -199,7 +199,7 @@ A third profile reports peak-to-peak excursion. It agrees on increasing traces. 
 A new profile can introduce an unfamiliar predicate and checker. A consumer may obtain a delegated receipt under its trust policy. Dependent findings retain their original meaning until a mapping or reassessment justifies reuse.
 
 \partpage{The boundary between world and record}
-An acquisition record describes the path from a physical event to the first retained digital representation. A machine controlling an experiment and a passive observer use the same provenance structure. Their evidence for causal attribution differs. The observation model follows the distinctions among feature of interest, observed property, procedure, sampling and result used in the W3C/OGC sensor ontology. A persistent specimen identifier can outlive the sample. Its provenance still has to be assessed. \src{7}\src{23}
+An acquisition record describes the path from a physical event to the first retained digital representation. A machine controlling an experiment and a passive observer use the same provenance structure. Their evidence for causal attribution differs. The observation model follows the distinctions among feature of interest, observed property, procedure, sampling and result used in the W3C/OGC sensor ontology. A persistent specimen identifier can outlive the sample. Its provenance still has to be assessed. \src{7}\src{22}
 
 \small
 \begin{tabularx}{\linewidth}{@{}L{.21\linewidth}Y@{}}
@@ -251,31 +251,30 @@ Distinct attestations can share a signer, controller or evidence source. A repli
 An immutable record refers by digest to already identified inputs. Reject cyclic justification within a claimed proof of support unless the scientific profile provides independently checkable fixed-point or inductive semantics with a valid base. The query graph can expose cycles through derived inverse edges or later records asserting relations between earlier objects. Navigating a cycle adds no support. Stop on a declared compute, depth or disclosure limit and return the unvisited frontier. Report what ran before a timeout and which checks still need resources.
 
 \partpage{Reusing evidence across investigations}\label{sec:archive}
-A successor can start with an earlier claim, retrieve its supporting and contrary evidence, and decide whether to use it in a new plan. The operations below let the successor do this within its access and resource limits. Each query identifies the sources searched, the archive versions reached and known gaps in coverage. It reports unavailable dependencies to the extent disclosure permits. An archive head identifies one published set of records. Typed provenance and machine discovery draw on PROV and FAIR. \src{19}\src{20}
+A successor can start with an earlier claim, retrieve its supporting and contrary evidence, and decide whether to use it in a new plan. The operations below let the successor do this within its access and resource limits. Each query identifies the sources searched, the archive versions reached and known gaps in coverage. It reports unavailable dependencies to the extent disclosure permits. A snapshot identifies the set of records admitted to a view. Typed provenance and machine discovery draw on PROV and FAIR. \src{19}\src{20}
 
 \small
 \begin{tabularx}{\linewidth}{@{}L{.19\linewidth}Y@{}}
 \toprule
 \textbf{Operation} & \textbf{Request and response contract} \\ \midrule
-Discover & Give a typed question or pattern, subject, scope, eligible profiles, access context and search budget. Return matching identifiers, ranking basis, snapshot, searched sources, excluded or unsearched regions and continuation cursor. \\
-Resolve & Give identifier, expected descriptor, credentials and limit. Return verified bytes, an authorised projection with its own derivation, or a typed unavailable result. Locations can change. \\
+Discover & Give a typed question or pattern, subject, scope, eligible profiles, access context and search budget. Return matching identifiers, ranking basis, snapshot, searched sources, excluded or unsearched regions and where a partial search stopped. \\
+Resolve & Name the expected content, access context and resource limit. Return verified content, an authorised projection with its own derivation, or a typed unavailable result. Locations can change. \\
 Explain & Give target, intended use and dependency roles. Return a subgraph connecting evidence to conclusion, assumptions, alternatives, contrary notices and the unresolved frontier. \\
 Assess & Give exact target, arguments, profile, snapshot, policy and budget. Return the receipt defined in Section~\ref{sec:receipt}, with evaluator identity and context. A declared replay tolerance is part of the test. \\
-Deposit / reconcile & Submit an immutable record, payload or signed notice. Repeat submission of identical content is idempotent. Exchange manifests of known records and notice cursors. Concurrent heads and conflicting notices both remain addressable. \\
+Deposit / reconcile & Submit an immutable record, payload or signed notice. Repeat submission of identical content is idempotent. Exchange identified inventories of known records and notices. Concurrent snapshots and conflicting notices both remain addressable. \\
 \bottomrule
 \end{tabularx}
 \normalsize
 
 \topic{Retrieval and change}
-Indexes may use identifiers, units, spatial or temporal bounds, graph patterns, formal subsumption and learned similarity. A retrieved candidate becomes evidence only through an explicit argument. An empty search establishes absence within a bounded collection only if its completeness and exhaustive application of the matching rule are warranted. Approximate search must report its method. Responses bind the exact record set or manifest, index configuration and known notice heads. A consumer requiring current status names its notice authorities and the maximum permitted age of their evidence. If it cannot check a required authority, freshness is unknown. It can still report the result for the available snapshot. A query that requires freshness for the entire result remains unresolved until that requirement is met.
+A candidate becomes evidence through an explicit argument. An empty search establishes absence within a bounded collection when the collection and the application of the matching rule are complete. Every result identifies the evidence, search method and notices available to it. A recipient requiring current standing names its notice authorities and freshness criteria. An unreachable required authority leaves current standing unresolved and permits a result for the available snapshot.
 
-A correction or withdrawal names its target, scope and reason. Follow reverse dependencies to identify affected or open uses, then reassess their claims using surviving and revised arguments (Sections~\ref{sec:guarantee} and~\ref{sec:inputcorrections}). A later investigator can replay the earlier judgement at its snapshot and use the revised assessment in a new decision. A conflict that survives reassessment can motivate a new observation (Appendix~\ref{app:planning}).
+A correction names its target, scope and reason. Trace affected and open uses, then reassess with surviving or revised arguments (Sections~\ref{sec:guarantee} and~\ref{sec:inputcorrections}). Historical replay uses the receipt's original snapshot and policy. A conflict that survives reassessment can motivate a new observation (Appendix~\ref{app:planning}).
 
-\topic{Scale and fidelity (paged custody, p.~\pageref{sec:pagedcustody})}
-Index descriptors and retrieve payloads on demand. Summaries bind source manifests, omissions and supported queries. Replay criteria specify bit identity, numerical tolerance or a distributional test with predefined sampling and error criteria.
+\topic{Custody and long-term replay}
+A summary identifies its source snapshots, omissions and supported queries. Replay follows the declared test criterion, such as exact agreement, numerical tolerance or a distributional test with predefined sampling and error criteria. Appendix~\ref{sec:pagedcustody} explains when a search can exclude a dependency.
 
-\topic{Long horizons}
-Preserve canonical bytes, decoders, reference cases and execution environments. Test recovery against independent fixtures. A change of base encoding follows the mapping rules on page~\pageref{sec:migrate}. A change of digest algorithm or emulator likewise needs evidence for the checks it affects. A surviving receipt can outlast the ability to rerun its check. PREMIS provides a precedent. \src{25}
+Preserve the original evidence, interpretation rules and conditions needed to reproduce a judgement. Changes in representation require evidence of what is preserved (page~\pageref{sec:migrate}). A receipt can outlast the ability to repeat its check. PREMIS provides a precedent. \src{24}
 
 \clearpage
 \pdfbookmark[2]{Changing the base encoding}{migrate}
@@ -294,7 +293,7 @@ Receipts and authority & Retain original receipts, signatures, policies, notices
 \end{tabularx}
 \normalsize
 
-For each migrated object required by a named query, record a source--target pair, including pairs for receipt representations. An untranslated original keeps its source reference. Maintain an access-controlled index in both directions, with typed dependency and correction targets. Given a new claim, a receiver can recover its source claim and calibration, then the notices addressed to either. Given an old correction, a receiver can find every mapped use in the declared inventory. Apply the notice only within its event interval and instrument mode. A later mapping can help read an earlier snapshot. Its creation time cannot count as evidence available to the original investigator. Later notices extend a new snapshot. Keep earlier receipts reproducible against their original notice horizon. If a required authority is unreachable, report the historical result and the open freshness check.
+For each migrated object required by a named query, record a source--target pair, including pairs for receipt representations. An untranslated original keeps its source reference. Make the correspondence traceable in both directions under the applicable access rules. Given a new claim, a receiver can recover its source claim and calibration, then the notices addressed to either. Given an old correction, a receiver can find every mapped use in the declared inventory. Apply the notice only within its event interval and instrument mode. A later mapping can help read an earlier snapshot. Its creation time cannot count as evidence available to the original investigator. Later notices extend a new snapshot. Keep earlier receipts reproducible against their original notice horizon. If a required authority is unreachable, report the historical result and the open freshness check.
 
 A mapping can preserve integer arithmetic while losing calibration evidence. In that case arithmetic may pass, the required calibration check is unknown, and the physical claim is unresolved unless another admitted argument decides it. Competing admissible mappings remain addressable with their warrants. If originals have been withdrawn, return a permitted unavailability marker and identify which claims can still be checked from other evidence. A digest or a lookup entry alone supplies no proof of translation.
 
@@ -306,10 +305,10 @@ Two laboratories can describe one physical calibration with different report ide
 \topic{Evidence and admission}
 Preserve both originals. Record the physical asset or the evidence connecting its aliases, the occurrence window, configuration, reference and discriminating execution evidence. Cite the source records for conversions of units, clock offsets or sign conventions. Retain plausible alternatives, the reason to exclude each and the collection actually checked. A missing discriminator, incompatible observations or a material search gap leaves identity unresolved. An archive inventory bounds visibility. Completeness of that inventory for the physical question requires its own evidence.
 
-The reference measurement profile uses a claim with directed calibration endpoints and a signed assessment of the identity check. The assessment binds the original evidence, scoped search inventories and the recipient scope. The recipient supplies the trusted identity-checking keys. A passing check states that its cited evidence supports the defined physical identity and excludes relevant alternatives within the declared search boundary. A failing or unknown check can remain in the archive. The evaluator verifies admission and evidence availability. The authority that signed the check is responsible for its interpretation of the physical sources.
+A measurement profile can express the identity claim between the source and recipient calibrations and require a signed assessment of that claim. The assessment binds the original evidence, scoped search inventories and the recipient scope. The recipient supplies the trusted identity-checking keys. A passing check states that its cited evidence supports the defined physical identity and excludes relevant alternatives within the declared search boundary. A failing or unknown check can remain in the archive. The evaluator verifies admission and evidence availability. The authority that signed the check is responsible for its interpretation of the physical sources.
 
 \topic{Using an admitted link}
-A recipient follows only a direct, admitted identity assertion when connecting a notice's source calibration to a recorded local dependency. A link does not grant correction authority. The notice retains its original target, scope, signature and evidence. The recipient admits notice keys by original scope and role. It checks the local dependency, effective mode and time on the declared common axes. A source may issue a replacement bias or withdraw the calibration for a scoped use. The reference profile admits cross-scope corrections on this path for a single execution with compatible mode, bias units and event-time basis. Session-level assertions can be recorded for review. Their individual executions need separate warrants.
+A recipient follows only a direct, admitted identity assertion when connecting a notice's source calibration to a recorded local dependency. A link does not grant correction authority. The notice retains its original target, scope, signature and evidence. The recipient admits notice keys by original scope and role. It checks the local dependency, effective mode and time on the declared common axes. A source may issue a replacement bias or withdraw the calibration for a scoped use. In this example, the path warrants applying a correction across scopes only when it identifies a single execution and the mode, bias units and event-time basis agree. Session-level assertions can be recorded for review. Their individual executions need separate warrants.
 
 A current assessment binds the identity evidence and applicable correction in its receipt. A challenged or incomplete identity warrant leaves required foreign-notice applicability open. Keep historical receipts at their original evidence horizon. For example, a correction to one execution may affect a reading within its effective interval. A repeat calibration on the same asset is a distinct premise. A reading outside the interval retains its standing under this notice. If the evidence distinguishing the executions later becomes unavailable, a new assessment records the unresolved identity check.
 
@@ -495,14 +494,14 @@ Learning and correction & Seed a shared ancestor across training and evaluation 
 
 Evaluate two baselines on the same adjudicated cases. One provides reports and raw files. The other provides a graph of provenance alone. Measure incorrect acceptance, incorrect rejection and abstention separately, completeness of recovered assumptions, time and bytes to audit, storage cost, and propagation delay after correction. For as-of questions fix the same snapshot. For open-world retrieval report recall only against a bounded gold collection. Define critical false acceptances before the test. Require zero on these cases and report how many cases were tested. Estimating an error rate for a wider population requires a sampling design.
 
-A subsequent prospective trial should include two instruments with documented calibration lineage, different custodians and a calibration change concealed from the consumers until the scheduled notice. Before observing results, specify uncertainty coverage targets, sample-size rationale, failure and stopping rules, authorisation, resource limits and who controls the reference measurement. Further trials must probe unanticipated domains, long retention horizons, contested interpretations and novel agents. Interoperability beyond the two example encodings requires complete packages and independent trials for the additional profiles.
+A subsequent prospective trial should include two instruments with documented calibration lineage, different custodians and a calibration change concealed from the consumers until the scheduled notice. Before observing results, specify uncertainty coverage targets, sample-size rationale, failure and stopping rules, authorisation, resource limits and who controls the reference measurement. Further trials must probe unanticipated domains, long retention horizons, contested interpretations and novel agents. Interoperability for further profiles requires independently specified interpretation rules and trials in their intended domains.
 
 \clearpage
 \pdfbookmark[2]{Acceptance test across different base formats}{migrationtrial}
 \subsection*{Acceptance test across different base formats}\label{sec:trial}
-Extend the bar and archive fixtures on pages~\pageref{sec:rivals}--\pageref{sec:bar}. Implementation A stores native deterministic CBOR records. Independently developed B stores native tagged JSON records under the two packages in Appendix~\ref{app:exchange}. Each side produces and consumes an exchange in its own format. Each side needs its own reader or importer for its peer's records. Query the resulting native claim, argument and receipt records with the source service disconnected. Retained source bytes are available for audit under the specified access policy. Sign the fixture's source assessment and correction notices under the agreed key policy. The receiver must also be able to navigate and evaluate its native records.
+Extend the worked examples on pages~\pageref{sec:rivals}--\pageref{sec:bar}. Give two independently developed systems, A and B, different native representations. Require each receiver to interpret the other system's disclosed evidence under a documented mapping. With the source service disconnected, query claims, arguments and receipts in the recipient's records. Keep permitted originals available for audit and authenticate the source assessments and notices under the agreed policy.
 
-First check each reader against its package vectors. For an exactly mapped record inspect the native bytes, recompute each identifier, and look it up from the other endpoint. Require different native record identifiers, corresponding typed roles and successful verification of source attestations on the original signed bytes under the fixture's key policy. Freeze the claim predicates, scope, trust policy, budgets and access rules for each comparison. The expected results come from the independently calculated interval table in Section~\ref{sec:bar} and the notice sequence in Section~\ref{sec:archive}. Compare each implementation with those results before checking a round trip.
+First check that each recipient interprets its native records correctly against independently specified examples. For an exact mapping, verify the identities of both representations, the correspondence of their typed roles and the attestations on the originals. Freeze the claim predicates, scope, trust policy, budgets and access rules for each comparison. The expected results follow from the interval table in Section~\ref{sec:bar} and the notice sequence on page~\pageref{sec:rivals}. Compare each system with those results before checking a round trip.
 
 \small
 \begin{tabularx}{\linewidth}{@{}L{.22\linewidth}Y@{}}
@@ -523,116 +522,26 @@ The protocol makes the justification of a scientific claim available to the next
 
 \appendix
 \partpage{Example exchange between two agents}\label{app:exchange}
-The diagnostic projection below shows the $S_1$ exchange. Numeric measurement fields use integer micrometres. Symbols identify immutable records. Each query below inherits the same envelope context and evidence manifest. Each result belongs to a distinct target and names its warrant. The manifest includes plan, release witness, readings, stability trace, calibration, guarantees and notice evidence.
+At snapshot $S_1$, a sender discloses the plan, release witness, readings, stability trace, calibration, measurement guarantees and correction notice $N$. Both agents use the same scope and policy. The notice identifies a positive bias of 80 micrometres to subtract from both raw differences. The resulting changes of 180 and 170 micrometres yield guaranteed intervals $[150,210]$ and $[140,200]$ micrometres. The hull is $[140,210]$ and their intersection is $[150,200]$.
 
-\begin{small}
-\begin{verbatim}
-context  [evaluator_id, profile_id, policy_id, S1, budget_id]
-horizon  [west_head_S1, visible_notices=[N]]
-applies  [N, K, gauge_mode, transition_1, bias=80]
-inputs   [manifest_id, common_target=bar_7_transition_1]
-changes  [180,170]
-bounds   [[150,210],[140,200]]
-hull     [140,210]
-joint    [150,200]
-checks   [[integrity,pass],[scope,pass],[arithmetic_replay,pass]]
+\small
+\begin{tabularx}{\linewidth}{@{}L{.34\linewidth}YL{.14\linewidth}@{}}
+\toprule
+\textbf{Target} & \textbf{Evidence and rule} & \textbf{Result} \\ \midrule
+Lower hull bound above 200 & Apply the planned lower-bound score to the hull. & Fail \\
+Hull within $[210,300]$ & Apply the planned containment score to the hull. & Fail \\
+Displacement above 200 & The joint guarantee puts the displacement at or below 200. & Refuted \\
+Displacement within $[210,300]$ & The upper end of the joint guarantee is below 210. & Refuted \\
+\bottomrule
+\end{tabularx}
+\normalsize
 
-target                     warrant              check or claim result
-min(hull) > 200            planned_score_C      fail
-hull within [210,300]      planned_score_F      fail
-x > 200                    joint_upper <= 200   refuted
-x within [210,300]         joint_upper < 210    refuted
-\end{verbatim}
-\end{small}
+Each receipt binds its target, admitted arguments, policy, applicable notice and dependencies. The joint guarantee warrants both refutations. If the recipient receives only the certified hull and the scoring rules, it can replay the two scores. Both physical claims remain unresolved without evidence for the joint guarantee or another admissible argument. The example on page~\pageref{sec:rivals} shows how a rival notice changes the result.
 
-For each claim receipt, bind the target, arguments, context, checks, applicable notice and dependencies. The joint-bound argument discharges the refutation obligation under the stated guarantees. The hull scores alone leave both physical claims unresolved. With restricted calibration evidence, a consumer may still replay the disclosed arithmetic. Its calibration check remains unknown unless its policy admits an available attestation. Section~\ref{sec:archive} shows how the receipt changes when a rival notice becomes visible.
+\topic{What the recipient needs}
+The agents agree on how to identify records, recover typed values and resolve input roles, including dependencies declared within a record's body. A recipient chooses its initial interpretation rules through a trusted channel. An attestation binds an assertion to its issuer, role and authorisation context. Evidence about scope and provenance is still required to use that assertion.
 
-\topic{Minimum behaviour for exchanging records}
-The offline transfer file is specified on page~\pageref{sec:exchangefile}. The proposed envelope encodes six fields in order $(k,p,b,e,a,x)$, denoting the kind, profile reference, body, input edges, access descriptor and critical extensions. Each reference names a digest suite (algorithm and preimage rule), object class and digest value. An edge binds a role, target reference and role-specific qualifier. Role order is significant where the profile declares order. For unordered roles the profile assigns canonical ordering and duplicate policy. Body references are included in closure even when they also appear in the edge list. A profile must reject conflicting declarations of the same input. In format A below, a record digest covers the ASCII domain tag REP-record, a zero octet and the deterministic envelope encoding. Blob digests use REP-blob with the same delimiter followed by exact payload bytes. The out-of-band root description terminates the profile dependency chain. A signature is an external binding of record identifier, signer, role, signature scheme and authorisation context.
-
-Conformance has three independently declared capabilities. A \emph{carrier} checks identity and transports opaque records. A \emph{profile reader} resolves meaning and produces typed queries or graph views. An \emph{evaluator} runs specific tests and emits receipts. A full investigation also needs an authorised executor for its intended actions. Each participant publishes which capabilities and profiles it supports. A scientific evaluation requires a receipt from an evaluator capable of the requested test.
-
-\clearpage
-\pdfbookmark[2]{Offline archive exchange}{offlineexchange}
-\subsection*{Offline archive exchange}\label{sec:exchangefile}
-The offline JSON object carries \texttt{snapshot}, \texttt{head}, \texttt{pages} and \texttt{packets}. The optional \texttt{continuation} is a cursor. Each page is keyed by its blob identifier. Whitespace and field order in the enclosing exchange file are immaterial.
-
-\topic{How to reproduce the snapshot identifier}
-Encode the manifest as compact UTF-8 JSON in field order \texttt{source}, \texttt{parents}, \texttt{inventory}, \texttt{count}, \texttt{custody}, without a final newline. Source is a nonempty string of at most 256 UTF-8 bytes. Write up to 64 distinct parents in ascending numeric suite, class and digest order. Inventory is the root of the member tree, count its cardinality and custody the digest of the admission descriptor. Write IDs as two unsigned decimal integers and 64 lowercase hexadecimal digits separated by colons.
-
-For JSON strings escape quotation marks and backslashes. Use the short JSON escapes for backspace, tab, newline, form feed and carriage return, and lowercase four-digit Unicode escapes for the remaining control characters below U+0020. Emit other Unicode scalar values as UTF-8 without normalisation. Compute SHA-256 over the ASCII octets \texttt{REP-blob}, one zero octet and the encoded snapshot. Prefix its lowercase hex digest with \texttt{1:1:} to obtain \texttt{head}.
-
-\topic{How to verify and resume a transfer}
-Each packet contains \texttt{id}, \texttt{access} (a blob identifier) and \texttt{hex} (the exact payload or record bytes in hex). Recompute its identifier under its suite and class. For a record, decode its envelope and check that its access identifier agrees with the packet. For a blob, access is separate custody metadata. Enforce the access descriptor when resolving content. A fresh receiver needs the descriptor bytes for that purpose.
-
-Recompute each visited page ID. A leaf holds ordered identifier pairs whose key equals the value's canonical string. A branch holds lower bounds and child page IDs. Verify sorted, disjoint subtrees and the manifest count. Each packet must name a unique inventory member. Missing packets identify undisclosed or undelivered members. A continuation requests the next page of this head after the last member examined. Stream exports emit separate witness and packet rows with a final null row. Every supplied witness page must belong to the inventory or to a complete inventory named by a disclosed historical manifest. For incremental disclosure the receiver can retain verified pages at a fixed head and acknowledge a contiguous prefix. The next range can reuse the acknowledged path. Completion requires the verified prefix to reach the end with the declared member count. The custody frame on page~\pageref{sec:pagedcustody} additionally proves coverage by replaying bounded deltas.
-
-\clearpage
-\pdfbookmark[2]{A complete offline exchange}{offlinevector}
-\subsection*{A complete offline exchange}
-In this worked example, an instrument at \texttt{bench} deposits the three octets \texttt{4f 4b 0a} (the text \texttt{OK} followed by a newline). Its selected snapshot contains the payload and the public access descriptor it uses. The descriptor permits reading and training and names itself as its access descriptor. The complete exchange appears below.
-
-\begingroup\fontsize{7.0}{8.0}\selectfont
-\verbatiminput{examples/exchange.json}
-\endgroup
-
-An independent reader can reproduce the displayed \texttt{head} from the snapshot alone, import the two packets and resolve the payload named by the second packet to the three original octets.
-
-\clearpage
-\pdfbookmark[2]{The first readable package}{bootstrap}
-\subsection*{The first readable package}\label{sec:kit}
-A receiver needs one prior agreement. In this example it can acquire an ordered stream of octets, read UTF-8 and the JSON Canonicalization Scheme (JCS), and compute SHA-256. Its trusted channel identifies the package by the SHA-256 digest of its complete bytes and names the already understood notations for reading its grammar and decoding rules. A digest authenticates a choice of package only to the extent that this channel is trusted. Without a shared starting convention, a receiver may preserve the octets while their interpretation remains open. \src{30}
-
-\topic{Package layout}
-The package is exactly one JCS array in the form below. Fixed field order and the literal version string are part of this bootstrap convention. All leaves are JSON strings. Names and roles are interpreted within this package. The package digest is supplied outside it.
-\begin{small}
-\begin{verbatim}
-["REP-kit-1",format,grammar,rules,registry,vectors,resources]
-\end{verbatim}
-\end{small}
-In this example the format string is exactly \texttt{"A"} or \texttt{"B"}. The next three strings each name one resource. The vectors field is an ordered array of cases. The final field is an array of pairs $[\mathrm{name},\mathrm{hex}]$ in strictly increasing ASCII name order. Names are nonempty strings of ASCII letters, digits, hyphens and full stops. Hex is an even-length string of lowercase hexadecimal digits encoding exact octets. Verify the external digest and require canonical kit bytes. Reject duplicate names, unresolved resource names, wrong field types and trailing bytes. Inspect the expected answers before using the native decoder. An intact package written in an unsupported rule notation leaves interpretation unknown.
-
-\begin{itemize}
-\item \textbf{Grammar.} Supply the complete lexical and structural rules, including canonical encoding, framing, integer ranges, reference classes, extension fields and failure conditions. Bundle the exact specifications those rules invoke or identify a copy already possessed by digest. The example on the next page uses CDDL for the logical envelope. \src{31}
-\item \textbf{Decoding rules.} Supply a deterministic account of how to recover typed values, check canonical form, build references and report errors. Specify the notation and any execution model. A reference decoder may accompany these rules with its runtime and dependencies. An executable the receiver cannot inspect or interpret leaves the decoding obligation open.
-\item \textbf{Registry.} Bind field and code meanings, digest preimages, ordering rules, access interpretation, and references to the exact scientific profiles, policies and fixtures. A package may carry their bytes or declare missing external inputs. Trust in an issuer or permission to access a specimen requires separate evidence.
-\item \textbf{Vectors.} Each case is a six-string array giving case name, phase, input resource name, context resource name, expected status and expected-output resource name. The registry defines the phase and status vocabulary. Each context fixes dependencies and any relevant budget in countable units. The output resource carries the typed tree, identifier or failure reason in the agreed comparison notation. Cases cover success, invalid input, unavailable meaning and exhaustion of a stated budget. If the check exhausts its budget before deciding validity, report unknown and the unfinished obligation.
-\end{itemize}
-
-For example, a format A kit can include the case below. Its context \texttt{base} contains the two UTF-8 bytes for \texttt{[]}, denoting no extra inputs for this scalar. The expected tree uses the tagged JSON notation on the next page.
-\begin{small}
-\begin{verbatim}
-["u200","term","sample","base","pass","tree"]
-sample = 18c8      tree = 5b2275222c22323030225d
-\end{verbatim}
-\end{small}
-
-\clearpage
-\pdfbookmark[2]{Two native formats and reference cases}{nativeformats}
-\subsection*{Two native formats and reference cases}\label{sec:formats}
-Format A uses the following CDDL shape and RFC 8949 core deterministic encoding. Consume exactly one complete item, use definite lengths and shortest integer and length encodings, preserve text as valid UTF-8 without normalisation, and reject other types. In both formats the wire grammar precedes profile-specific checks. The critical extension list must be strictly increasing. An unrecognised critical extension leaves its required interpretation check unknown. A local decoder ceiling can likewise end the check before validity is decided. \src{22}\src{31}
-\begin{small}
-\begin{verbatim}
-record = [uint, ref, term, [* edge], ref, [* uint]]
-ref    = [1, 0, hash] / [2, 0, hash] / [1, 1, hash]
-hash   = bstr .size 32
-edge   = [uint, ref, term]
-term   = uint / bstr / tstr / [* term]
-\end{verbatim}
-\end{small}
-Class 0 denotes a record. Suite 1 hashes format A and suite 2 hashes format B, both with SHA-256. Their domain tags are respectively \texttt{REP-record} and \texttt{REP-json-record}. Each tag is followed by one zero octet and the exact native record bytes. Class 1 uses suite 1 in both formats for exact payload bytes under the blob rule on page~\pageref{app:exchange}. The pinned package supplies the starting profile and policy resources. Their identifiers can refer to ordinary payloads, terminating profile resolution without a self-reference.
-
-Format B encodes the same logical tree as UTF-8 JCS. An unsigned 64-bit integer maps to \texttt{["u","200"]} for the example value 200, with decimal digits, no sign and no leading zero except for zero itself. A byte string maps to \texttt{["b",hex]} using the kit's lowercase hex rule, and text to \texttt{["t",text]}. An array maps to a JSON array whose first element is the string \texttt{"a"}, followed by the recursively encoded elements. An empty array becomes \texttt{["a"]}. These four forms exhaust the vocabulary. Require the input bytes to equal their canonical encoding, then apply the same envelope grammar to the recovered tree. Format B gives records their own identifiers even when their typed values are preserved. \src{30}
-
-\topic{Reference cases with known answers}
-In the structural probe let $R=[1,1,Z]$ where $Z$ is 32 zero octets. The logical envelope is $[0,R,200,[\,],R,[\,]]$. The two placeholder references are deliberately unresolved. In A the octets are \texttt{86 00 R 18 c8 80 R 80}, with each \texttt{R} expanded to \texttt{83 01 01 58 20} and 32 zero octets. In B encode that same tree by the rule above, leaving the two source references intact. The expected record digests, shown in hexadecimal, are
-\begin{small}
-\begin{verbatim}
-A   80 bytes   48367bebac79d394b4e13f004988c1141c977b295574ceafd716f29e39732dab
-B  237 bytes   6e56a2da3546ca07d9e693089c0f240c72a754592e91abf7894a4cb413d7d390
-\end{verbatim}
-\end{small}
-Both structural checks pass. Profile and access checks are unknown, so use requiring permission is withheld. At the scalar decoding phase A accepts \texttt{18 c8} as 200 and rejects \texttt{19 00 c8} as nonminimal. B rejects \texttt{["u","0200"]} for a leading zero. Truncating the A envelope by one octet fails framing. These cases check particular rules. General equivalence requires an argument over the declared domain.
+A carrier can verify identity and transport opaque records. A profile reader can interpret recognised records and resolve their dependencies. An evaluator can issue a verdict when it has the applicable rules, permissions and necessary evidence. Independently exercised capabilities let a recipient identify what it can check, what it relies on another issuer to attest and which obligations remain open.
 
 \partpage{Choosing the next investigation}\label{app:planning}
 Discovery needs a feedback path from the knowledge store to the outside world. A researcher queries for open questions in an authorised domain and constructs candidate actions. Sources of candidates include contradiction between scoped claims, a failed prediction, a previously inaccessible measurement, a conjecture suggested by a construction, or an alternative explanation that fits the same trace. A machine can also propose a new objective or representational language. The proposal moves through the same archive with its own rationale and resource request.
@@ -657,16 +566,16 @@ An archive can retain native evidence in the format best suited to its instrumen
 \begin{tabularx}{\linewidth}{@{}L{.23\linewidth}Y@{}}
 \toprule
 \textbf{Imported object} & \textbf{Interpretation at the receiving boundary} \\ \midrule
-An RO-Crate & Import its manifest, files, contextual entities and provenance. Bind each source by exact content. Material cited through a mutable external URL needs a captured edition or an unresolved dependency. Archive membership establishes an association. Record which member provides evidence for the assertion. \src{26} \\
-A nanopublication & Bind its head graph, assertion graph, provenance graph and publication information graph together with their interpretation context. An importer can recover the published assertion, check any available attribution evidence and request a warrant for scientific use. \src{27} \\
-A Croissant dataset & Import resource descriptions, record structure and the identity of the exact release. Keep split definitions when supplied. Add learning permission, exposure cutoffs and shared-ancestor checks before claiming that an evaluation set was independent. \src{28} \\
+An RO-Crate & Import its manifest, files, contextual entities and provenance. Bind each source by exact content. Material cited through a mutable external URL needs a captured edition or an unresolved dependency. Archive membership establishes an association. Record which member provides evidence for the assertion. \src{25} \\
+A nanopublication & Bind its head graph, assertion graph, provenance graph and publication information graph together with their interpretation context. An importer can recover the published assertion, check any available attribution evidence and request a warrant for scientific use. \src{26} \\
+A Croissant dataset & Import resource descriptions, record structure and the identity of the exact release. Keep split definitions when supplied. Add learning permission, exposure cutoffs and shared-ancestor checks before claiming that an evaluation set was independent. \src{27} \\
 A domain result & Preserve the native proof, image, spectra, observation catalogue or source transcript and its original metadata. A mapping argument specifies what survived extraction. If the mapping drops calibration, an arithmetic check may survive while a metrological claim loses support. \\
 \bottomrule
 \end{tabularx}
 \normalsize
 
 \topic{Inference types constrain downstream use}
-An absolute error bound, a frequentist confidence interval, a posterior distribution and a range elicited from expert judgement can have the same numerical endpoints. An inference record binds the interpretation, conditioning information, sampling or prior assumptions, and transformation rule. Numeric equality grants no conversion between those meanings. For population effects, bind the target quantity separately from its estimator, the identification assumptions and the analysis used to estimate it. Alternative missing-data or selection assumptions produce linked sensitivity results. E9(R1) offers a clinical precedent. \src{29}
+An absolute error bound, a frequentist confidence interval, a posterior distribution and a range elicited from expert judgement can have the same numerical endpoints. An inference record binds the interpretation, conditioning information, sampling or prior assumptions, and transformation rule. Numeric equality grants no conversion between those meanings. For population effects, bind the target quantity separately from its estimator, the identification assumptions and the analysis used to estimate it. Alternative missing-data or selection assumptions produce linked sensitivity results. E9(R1) offers a clinical precedent. \src{28}
 
 A receiving agent may use a simulation to choose a physical experiment, use the resulting observation to challenge a model, or use a proof to establish a property of the simulator. Each step introduces a new argument with an explicit change of domain. A theorem about every execution of a model becomes a claim about physical devices only with a separate model-to-device warrant for the conditions in question. A review pooling several papers must identify known overlap in primary observations and declare unresolved dependencies. These rules apply across combinations of fields and to future methods whose representational vocabulary has yet to be invented.
 
@@ -682,56 +591,29 @@ The same archive can carry a clinical table, instrument trace or critical editio
 \textbf{Extraction rule} & \textbf{Condition at admission} \\ \midrule
 Prospective release & Each argument names a release occurrence binding the plan, feature inventory and time order. The recipient checks a signature by an admitted release authority at the receipt horizon. Each argument declares outcome inputs. Their identifiers and verified equivalents must be absent from the feature inventory. Test a late inventory and an unsigned release independently. \\
 Origin & Every argument declares observed, simulated, synthetic or inferred origin. An admitted data-origin authority attests to the argument and its references. The label cites those attestations. A mixed or unauthenticated origin leaves the example ineligible for this contract. Changing a synthetic label to observed must fail. \\
-Partition membership & Group by claim identity and every requested dependency role. Verified format mappings preserve these groups. The first eligible example assigns its groups to a partition. Reject later examples that cross that boundary and exact repeats. A passing result covers these declared dependencies. Unknown links between patients, sites or editions can still hide overlap. \\
+Partition membership & Group by claim identity and every requested dependency role. Verified mappings preserve these groups. Each group belongs to a single partition under the declared rule. Detect cross-partition overlap and repeated examples. A passing result covers these declared dependencies. Unknown links between patients, sites or editions can still hide overlap. \\
 Corrections & Current extraction replays the pinned query at the requested label inventory. It checks the result and applicable notices. An incomplete notice view or a changed result or notice set requires reassessment. Admitted notices can also block a training dependency directly. Historical extraction reproduces the original receipt and marks that mode in the manifest. Both modes check present use permissions. \\
-Use permissions & The local archive supports an optional project and time interval for training. A scoped grant requires the requested project and a local check time at or after \texttt{not\_before} and before \texttt{expires}. The manifest records the project and check time. A generic exchange for training has no such project context. \\
+Use permissions & A training grant can be scoped to a project and validity interval. The recipient checks the intended project and time against the grant. The extraction records the scope and the time at which permission was assessed. \\
 \bottomrule
 \end{tabularx}
 \normalsize
 
 \topic{Typed targets}
-A claim and an outcome reference the same target profile. A named outcome authority signs the outcome. The consumer checks scope, shape, unit and the interpretation declared by the profile. Scalar and interval quantities use integer ticks and an explicit decimal scale. An interval identifies an absolute bound, confidence interval or credible interval. Right-censored time at 30 days stays distinct from an event on day 30. A text target can retain several readings, each with a source reference and a selector. A target can also report explicit missingness such as an unsampled observation. A binary export requires a single unconditional verdict.
+A claim and an outcome reference the same target profile. A named outcome authority signs the outcome. The consumer checks scope, shape, unit and the interpretation declared by the profile. Scalar and interval quantities declare their representation and scale. An interval identifies an absolute bound, confidence interval or credible interval. Right-censored time at 30 days stays distinct from an event on day 30. A text target can retain several readings, each with a source reference and a selector. A target can also report explicit missingness such as an unsampled observation. A binary export requires a single unconditional verdict.
 
 Projects supply the domain mapping from native data, including the scientific assumptions and how selectors refer to the original bytes. The recipient checks declared target types and attestations. Sample selection, instrument calibration, consent authority and the accuracy of scientific interpretation depend on the underlying evidence and the recipient's policy.
 
-\partpage{Archive custody and scaling}\label{sec:pagedcustody}
-A laboratory can retain raw streams alongside individually addressable measurements. An authenticated inventory tree supplies the path to a selected member. An index maps each small record to its location in a bounded segment. A stream descriptor and an index of block positions allow reads of a specified range. Each read requires the applicable access permission. Each manifest binds the inventory root, member count and custody descriptor. The custody descriptor commits to the source, parents, sequence, ancestry references, delta, index root and coverage counters. Migration retains historical manifest bytes under their original identifiers and maps them to current heads with the same members. Payloads, signatures and recorded evaluator rules retain their identities.
+\partpage{Evidence custody and coverage}\label{sec:pagedcustody}
+An archive snapshot identifies a declared evidence set and its place in the custodial history. An assessment across several independent archives binds the snapshot used from each. Different successors of a shared snapshot can coexist. A recipient can reproduce an earlier assessment when its evidence, permissions and interpretation rules remain available. If access changes, the original receipt still records the basis for that judgement.
 
-\topic{Admission and exchange}
-An admission derives membership, dependency and correction keys from verified input bytes and reuses unchanged subtrees. Each laboratory writes to its own shard. Concurrent children of one parent remain addressable. A combined view commits to a sorted vector of independently pinned heads, so payloads can be admitted at each source without a common write transaction. A selective disclosure carries the pages, profiles and permissions needed to verify the requested members against the recipient’s head pin. It establishes membership only for those members. A transfer binds a delta to an independently trusted target through an ancestry proof. The recipient derives the root and coverage before committing the batch. Repeated delivery preserves an admitted head, which also serves as a restart point. A withdrawn grant prevents further exports under that custody. The recipient controls copies it has already received.
+\topic{What an authenticated inventory establishes}
+A commitment to an inventory lets a recipient check whether a disclosed record belongs to the identified snapshot. Selective disclosure establishes membership for the demonstrated records. Using a record also requires permission for the intended purpose and the evidence required by its profile. Withdrawing a grant limits future disclosure by its custodian. Copies already received are subject to their own custody and authorisation.
 
-\topic{Coverage under declared dependencies}
-Deriving every declared key at genesis and at each child establishes coverage by induction over admitted history. A Merkle proof authenticates an entry against its root. Coverage also requires evidence that the root was constructed by those admission rules. Given the required pinned sources and readable indexes, a complete empty result excludes the queried path among recorded dependencies. It leaves unrecorded relationships outside the inference. Candidate notices still require authority, scope and scientific review. Missing coverage, unrecognised semantics or an exhausted budget leaves the result open. A routing receipt binds the source pins, rule, target, budget, result count and digest. Historical scientific receipts retain their original manifests and evaluator identities.
+\topic{When a dependency search can exclude a path}
+A complete search can exclude a path among the declared dependencies if it covers the relevant evidence sources and uses rules that account for every dependency in scope. An authenticated result alone establishes its relation to the committed data. Coverage also requires evidence that the derivation included every eligible input. For an incrementally maintained inventory, a verifier can establish this by checking the initial coverage and its preservation at each admitted change. A missing source, unavailable evidence or exhausted search budget leaves affected obligations open. Candidate corrections still require authority, applicability and scientific review.
 
-\topic{Analytical costs}
-For a tree of height $H$, a key lookup reads at most $H$ logical pages. Inserting one key creates at most $2H+1$ pages, including splits. Updating $k$ keys requires $O(kH)$ logical page work. Along a lineage of $S$ commits, one descriptor adds $O(\log S)$ ancestry references. An incremental frame carries one bounded batch and its ancestry witness. Initial admission verifies and indexes the selected history. Retaining old roots also retains the old pages they reach. A scientific assessment can require traversing the full selected evidence view. These bounds count logical operations. Physical I/O, contention and end-to-end capacity depend on the storage system, workload and deployment.
-
-\topic{Proposed independent scaling study}
-Hold a small edit fixed while increasing the prior inventory. Compare first admission, incremental transfer and historical lookup. Use mixed record and raw-stream sizes, concurrent writers, an interrupted receiver and repeated delivery. Measure pages, retained bytes, peak memory, transfer volume and elapsed time. Verify the same content identifiers and historical reads across implementations. Report generated identifiers, locally stored payloads and transfers between physical laboratories as separate workloads.
-
-\clearpage
-\pdfbookmark[2]{Archive transfer formats}{archivetransfer}
-\subsection*{Archive transfer formats}
-Use the compact JSON and blob identifier rules from page~\pageref{sec:exchangefile}. A canonical tree page is a JSON object with a single field, \texttt{Leaf} or \texttt{Branch}, containing at most 32 key--identifier pairs in ascending ASCII key order. Only an empty root leaf has zero pairs. Each page is at most 16 KiB. Admission partitions overflowing entries into $\lceil n/32\rceil$ contiguous groups, assigning $\lceil\text{remaining entries}/\text{remaining groups}\rceil$ to each successive group. Apply the same rule upwards to obtain one root.
-
-\topic{Portable custody deltas}
-The custody descriptor commits the fields in this order.
-\begin{small}
-\begin{verbatim}
-origins, inventory, count, bootstrap, source, parent, ancestors,
-sequence, tree, delta, missing, unresolved, opaque, restricted
-\end{verbatim}
-\end{small}
-\texttt{origins} matches the manifest parents. The physical parent is the previous batch on the source lineage, or null at sequence one. Ancestor $i$ names the head $2^i$ physical parent steps back. A delta member contains \texttt{id}, \texttt{access}, \texttt{position} and an \texttt{absent} field only when true. Position is null or an object with \texttt{stream} and unsigned \texttt{block}.
-
-The frame begins with the ASCII octets \texttt{NAOF}. Each following field begins with its unsigned 32-bit big-endian byte length. The first field holds the proposed delta descriptor. If its head differs from the independently pinned target, subsequent fields prove ancestry from the target. Each proof step selects the largest power-of-two jump that does not pass the proposed sequence. Verify every head identifier, source and sequence distance. The frame then carries the exact member bytes in delta order. Reject extra or incomplete fields. Require the admitted parent and derive the trees, coverage and head before committing.
-
-\topic{Paged and selective disclosure}
-The \texttt{naome-inventory-page-1} response binds \texttt{manifest}, \texttt{head}, \texttt{after}, \texttt{examined}, \texttt{complete}, \texttt{pages}, \texttt{packets} and \texttt{last}. The proof covers a consecutive range after the cursor, including the first unexamined member if present. Withheld members count as examined. Register the manifest after the verified prefix reaches the end and agrees with its count.
-
-A selective proof carries \texttt{version}, a custody \texttt{descriptor}, \texttt{pages}, \texttt{packets} and the requested \texttt{member} in version one or ordered \texttt{members} in version two. Verify the custody commitment against an external head pin and authenticate each member's inventory and access paths. The disclosure establishes read scope for the supplied members.
-
-A whole release counts member bytes and the canonical bytes of distinct required inventory pages, including linked witnesses, against a shared 16 MiB limit. Publication and replication require an inventory that can be delivered under this limit. Migration preserves the historical membership of previously observed releases. The active catalog excludes releases that exceed the current limit or lack valid linked inventory witnesses.
+\topic{Evaluating the cost of independent custody}
+Vary the size and history of an archive while holding a small change and a scientific question fixed. Compare the effort to verify a first disclosure, update an existing copy and recover an earlier judgement. Exercise concurrent updates, interrupted transfers and repeat delivery. Measure verification effort, retained state and transfer volume while checking whether each system preserves evidence identities, access decisions and justified outcomes. Distinguish simulations from transfers between independently operated laboratories.
 
 \partpage{Sources and design lineage}
 \small
@@ -759,15 +641,12 @@ The linked sources establish the disciplinary practices and interoperability pre
 \source{19}{https://www.w3.org/TR/prov-o/}{W3C. PROV-O: The PROV Ontology. Recommendation, 2013.}
 \source{20}{https://doi.org/10.1038/sdata.2016.18}{Wilkinson and colleagues. The FAIR Guiding Principles for Scientific Data Management and Stewardship. Scientific Data, 2016.}
 \source{21}{https://www.cos.io/initiatives/registered-reports}{Center for Open Science. Registered Reports. Prospective review of research questions, methods and analysis plans.}
-\source{22}{https://www.rfc-editor.org/rfc/rfc8949.html}{Bormann and Hoffman. Concise Binary Object Representation (CBOR). IETF RFC 8949, especially Section 4.2, 2020.}
-\source{23}{https://www.w3.org/TR/vocab-ssn/}{W3C / OGC. Semantic Sensor Network Ontology. Observations, samples and actuations.}
-\source{24}{https://www.rfc-editor.org/info/rfc3161/}{Adams and colleagues. Internet X.509 Public Key Infrastructure Time-Stamp Protocol (TSP). IETF RFC 3161, 2001.}
-\source{25}{https://www.loc.gov/standards/premis/}{Library of Congress / PREMIS Editorial Committee. PREMIS Data Dictionary for Preservation Metadata.}
-\source{26}{https://www.researchobject.org/ro-crate/specification/1.2/introduction}{Research Object community. RO-Crate specification, version 1.2. Aggregation, contextual entities and provenance.}
-\source{27}{https://nanopub.net/docs/guidelines/}{Nanopublication community. Guidelines for nanopublications. Four named graphs and their roles.}
-\source{28}{https://docs.mlcommons.org/croissant/docs/croissant-spec.html}{MLCommons. Croissant Format Specification, version 1.0. Machine-readable descriptions of datasets and their records.}
-\source{29}{https://database.ich.org/sites/default/files/E9-R1_Step4_Guideline_2019_1203.pdf}{ICH. E9(R1) Addendum on Estimands and Sensitivity Analysis in Clinical Trials. 2019.}
-\source{30}{https://www.rfc-editor.org/rfc/rfc8785.html}{Rundgren, Jordan and Erdtman. JSON Canonicalization Scheme (JCS). RFC 8785, Independent Submission, 2020.}
-\source{31}{https://www.rfc-editor.org/rfc/rfc8610.html}{Birkholz, Vigano and Bormann. Concise Data Definition Language (CDDL). IETF RFC 8610, 2019.}
+\source{22}{https://www.w3.org/TR/vocab-ssn/}{W3C / OGC. Semantic Sensor Network Ontology. Observations, samples and actuations.}
+\source{23}{https://www.rfc-editor.org/info/rfc3161/}{Adams and colleagues. Internet X.509 Public Key Infrastructure Time-Stamp Protocol (TSP). IETF RFC 3161, 2001.}
+\source{24}{https://www.loc.gov/standards/premis/}{Library of Congress / PREMIS Editorial Committee. PREMIS Data Dictionary for Preservation Metadata.}
+\source{25}{https://www.researchobject.org/ro-crate/specification/1.2/introduction}{Research Object community. RO-Crate specification, version 1.2. Aggregation, contextual entities and provenance.}
+\source{26}{https://nanopub.net/docs/guidelines/}{Nanopublication community. Guidelines for nanopublications. Four named graphs and their roles.}
+\source{27}{https://docs.mlcommons.org/croissant/docs/croissant-spec.html}{MLCommons. Croissant Format Specification, version 1.0. Machine-readable descriptions of datasets and their records.}
+\source{28}{https://database.ich.org/sites/default/files/E9-R1_Step4_Guideline_2019_1203.pdf}{ICH. E9(R1) Addendum on Estimands and Sensitivity Analysis in Clinical Trials. 2019.}
 \normalsize
 \end{document}

@@ -25,4 +25,4 @@ nao --db receiver.sqlite find reading --head SNAPSHOT_ID
 
 The search result names the snapshot and the captured record. Run `nao --help` to list commands or `nao COMMAND --help` for a command’s options.
 
-The [whitepaper](spec/research-evidence-protocol.pdf) describes claim evaluation, archive manifests, transfer and access rules. A [complete exchange file](spec/examples/exchange.json) and [format A](spec/kits/A.json) and [format B](spec/kits/B.json) bootstrap kits provide machine-readable examples.
+The [whitepaper](spec/research-evidence-protocol.pdf) describes the scientific model, its assumptions and worked examples. A [complete exchange file](spec/examples/exchange.json) and [format A](spec/kits/A.json) and [format B](spec/kits/B.json) bootstrap kits provide machine-readable examples.
