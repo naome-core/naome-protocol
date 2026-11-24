@@ -30,7 +30,7 @@
 \begin{document}
 \thispagestyle{empty}
 \pdfbookmark[1]{Title and abstract}{abstract}
-{\sffamily\small\bfseries\color{accent}PROTOCOL WHITE PAPER \hfill EDITION \edition\enspace / \enspace 23 NOVEMBER 2026\par}
+{\sffamily\small\bfseries\color{accent}PROTOCOL WHITE PAPER \hfill EDITION \edition\enspace / \enspace 24 NOVEMBER 2026\par}
 \vspace{11mm}
 
 {\raggedright\fontsize{28}{33}\selectfont\bfseries\color{ink}NAOME Research\\
@@ -48,7 +48,7 @@ The protocol's guarantee concerns the standing of a particular claim. A conformi
 Recorded dependencies let a recipient trace which arguments and later uses a correction can affect. An evaluator can reassess those arguments, and a recipient can recover the earlier judgement and the grounds for its revision.
 
 \topic{Scope and evidence}
-Each deployment supplies its scientific profiles, trust anchors, access rules, resource limits and connections to research tools. The Rust reference implementation exercises capture, exchange and reassessment in bounded local cases (Appendix~\ref{app:reference-evaluation}). Documentation effort, reuse by independently built agents and performance with physical instruments remain to be measured.
+Each deployment supplies its scientific profiles, trust anchors, access rules and resource limits. Worked examples derive the expected consequences of admitting, correcting and withholding evidence. Section~\ref{sec:tests} proposes an independent evaluation of interoperability, documentation effort and the reuse of evidence from physical instruments.
 
 \clearpage
 \pdfbookmark[1]{Contents and key terms}{contents}
@@ -311,12 +311,12 @@ The reference measurement profile uses a claim with directed calibration endpoin
 \topic{Using an admitted link}
 A recipient follows only a direct, admitted identity assertion when connecting a notice's source calibration to a recorded local dependency. A link does not grant correction authority. The notice retains its original target, scope, signature and evidence. The recipient admits notice keys by original scope and role. It checks the local dependency, effective mode and time on the declared common axes. A source may issue a replacement bias or withdraw the calibration for a scoped use. The reference profile admits cross-scope corrections on this path for a single execution with compatible mode, bias units and event-time basis. Session-level assertions can be recorded for review. Their individual executions need separate warrants.
 
-A current assessment binds the identity evidence and applicable correction in its receipt. A challenged or incomplete identity warrant leaves required foreign-notice applicability open. Keep historical receipts at their original evidence horizon. For the cross-archive qualification case, require exactly the dependent local use in the corrected interval to change standing. Include an unrelated repeat, a use outside the interval, a missing discriminator, and an inadmissible correction issuer. Replay the earlier result and test the later loss of the identity warrant.
+A current assessment binds the identity evidence and applicable correction in its receipt. A challenged or incomplete identity warrant leaves required foreign-notice applicability open. Keep historical receipts at their original evidence horizon. For example, a correction to one execution may affect a reading within its effective interval. A repeat calibration on the same asset is a distinct premise. A reading outside the interval retains its standing under this notice. If the evidence distinguishing the executions later becomes unavailable, a new assessment records the unresolved identity check.
 
 \clearpage
 \pdfbookmark[2]{When archives disagree about a calibration}{rivalnotices}
 \subsection*{When archives disagree about a calibration}\label{sec:rivals}
-Two archives hold the same readings for a bar. Claim $C$ says its displacement exceeded 200 micrometres. Forecast $F$ says it lay between 210 and 300 micrometres, inclusive. Section~\ref{sec:bar} gives the readings and calculation. The two archives differ in which calibration notices they have received. A notice carries a target calibration, affected instrument mode and event interval, issuing authority, replacement value and supporting evidence. Its effective interval can precede its publication. A receipt also binds the archive heads consulted, visible notice identifiers, applicability to the target, policy and the arguments admitted under that policy.
+\textit{Worked example.} Suppose two archives hold the same readings for a bar. Claim $C$ says its displacement exceeded 200 micrometres. Forecast $F$ says it lay between 210 and 300 micrometres, inclusive. Section~\ref{sec:bar} gives the readings and calculation. The two archives differ in which calibration notices they have received. A notice carries a target calibration, affected instrument mode and event interval, issuing authority, replacement value and supporting evidence. Its effective interval can precede its publication. A receipt also binds the archive heads consulted, visible notice identifiers, applicability to the target, policy and the arguments admitted under that policy.
 
 \small
 \begin{tabularx}{\linewidth}{@{}L{.22\linewidth}Y@{}}
@@ -336,7 +336,7 @@ Under $M$ the corrected changes are 250 and 240 micrometres. Their hull is $[210
 Traverse reverse dependencies from $K$ within the affected mode and interval. In the fixture, manifest $T$ draws its two score labels and two claim labels from this transition. Model $D$ was trained on $T$. Return those four labels, their source receipts, $T$ and $D$ within the declared search horizon. Exposure alone cannot establish a change in model behaviour. Preserve historical labels with their snapshots. Flag dependent current uses for review and retain both conditional labels. A separate reading $Z$, taken outside the effective interval and labelled independently of this transition, serves as a negative control. It must acquire no review flag from these notices alone. The scientific question remains open until evidence distinguishes the two calibrations. A designated authority may choose one for a particular use. Record that decision and retain the rival account.
 
 \partpage{A calibration correction changes two conclusions}\label{sec:bar}
-\textit{Synthetic fixture.} Let $x$ be the axial displacement of one bar between two specified measurement windows. The threshold claim is $C: x>0.200$ mm. The plan makes the categorical forecast $F: x\in[0.210,0.300]$ mm. Both gauges measure this same $x$. Conditional on the applicable calibration, each corrected change is guaranteed to lie within $0.030$ mm of $x$, simultaneously. These closed absolute bounds include common error. No assumption of independent errors is required.
+\textit{Worked example with synthetic readings.} Let $x$ be the axial displacement of one bar between two specified measurement windows. The threshold claim is $C: x>0.200$ mm. The plan makes the categorical forecast $F: x\in[0.210,0.300]$ mm. Both gauges measure this same $x$. Conditional on the applicable calibration, each corrected change is guaranteed to lie within $0.030$ mm of $x$, simultaneously. These closed absolute bounds include common error. No assumption of independent errors is required.
 
 \small
 \begin{tabularx}{\linewidth}{@{}L{.17\linewidth}Y@{}}
@@ -453,8 +453,9 @@ Evaluator drift or disagreement & Pin versions and policies by content. Keep riv
 
 A public digest can expose sensitive data when an observer can guess likely values and compare their digests. A deployment may keep the identifier private, encrypt material for authorised custodians or expose a salted commitment with a controlled opening. Withdrawal cannot recall copies already disclosed. A public receipt must describe the available assurance at a level its access policy permits. Autonomous operation includes the ability to decline an action when permission, capacity or essential evidence is unavailable. \src{15}\src{20}
 
-\partpage{How to test this proposal}\label{sec:tests}
+\partpage{Proposed evaluation}\label{sec:tests}
 \topic{Can a second investigator continue the work?}
+The proposed study asks whether a second investigator can recover the grounds for a judgement from the records available to it. The worked examples define expected verdicts under explicit assumptions. Independently built consumers and prospectively collected instrument data would test the same questions under different custodians and profiles.
 Run a documented investigation and retain an independent log of its planned, completed and interrupted steps. Compare the records emitted during the run with that log. Count missing links and entries added by hand. Give a second agent the permitted archive and a new question about the same subject. Withdraw a premise used by one argument. Check the claim with and without a surviving argument, the earlier judgement at its original snapshot, and an unaffected control. Then supply contrary evidence and check the revised standing and the uses flagged for review. Give each baseline on the following page the same task and access rights. Compare handoff time, missed dependencies and manual interventions.
 
 \topic{Can independent consumers interpret the record?}
@@ -569,13 +570,13 @@ Recompute each visited page ID. A leaf holds ordered identifier pairs whose key 
 \clearpage
 \pdfbookmark[2]{A complete offline exchange}{offlinevector}
 \subsection*{A complete offline exchange}
-The instrument at \texttt{bench} deposited the three octets \texttt{4f 4b 0a} (the text \texttt{OK} followed by a newline). Its selected snapshot contains the payload and the public access descriptor it uses. The descriptor permits reading and training and names itself as its access descriptor. This is the complete exchange file distributed as \texttt{spec/examples/exchange.json}.
+In this worked example, an instrument at \texttt{bench} deposits the three octets \texttt{4f 4b 0a} (the text \texttt{OK} followed by a newline). Its selected snapshot contains the payload and the public access descriptor it uses. The descriptor permits reading and training and names itself as its access descriptor. The complete exchange appears below.
 
 \begingroup\fontsize{7.0}{8.0}\selectfont
 \verbatiminput{examples/exchange.json}
 \endgroup
 
-An independent reader can reproduce the displayed \texttt{head} from the snapshot alone, import the two packets and resolve the payload named by the second packet to the three original octets. The reference test also exports this snapshot from a fresh archive and compares the entire JSON value with this example.
+An independent reader can reproduce the displayed \texttt{head} from the snapshot alone, import the two packets and resolve the payload named by the second packet to the three original octets.
 
 \clearpage
 \pdfbookmark[2]{The first readable package}{bootstrap}
@@ -691,75 +692,22 @@ Use permissions & The local archive supports an optional project and time interv
 \topic{Typed targets}
 A claim and an outcome reference the same target profile. A named outcome authority signs the outcome. The consumer checks scope, shape, unit and the interpretation declared by the profile. Scalar and interval quantities use integer ticks and an explicit decimal scale. An interval identifies an absolute bound, confidence interval or credible interval. Right-censored time at 30 days stays distinct from an event on day 30. A text target can retain several readings, each with a source reference and a selector. A target can also report explicit missingness such as an unsampled observation. A binary export requires a single unconditional verdict.
 
-Projects supply the domain mapping from native data, including the scientific assumptions and how selectors refer to the original bytes. The reference implementation validates declared target types and attestations. Sample selection, instrument calibration, consent authority and the accuracy of scientific interpretation still depend on the underlying evidence and the recipient's policy.
+Projects supply the domain mapping from native data, including the scientific assumptions and how selectors refer to the original bytes. The recipient checks declared target types and attestations. Sample selection, instrument calibration, consent authority and the accuracy of scientific interpretation depend on the underlying evidence and the recipient's policy.
 
-\partpage{Reference evaluation}\label{app:reference-evaluation}
-The reference implementation exercises the protocol in local computational cases and a synthetic evidence exchange. The \href{https://github.com/naome-core/naome-protocol#reproduce-the-reference-trial}{reproduction guide} explains how to obtain the source and fixtures accompanying this edition and rerun the exchange.
+\partpage{Archive custody and scaling}\label{sec:pagedcustody}
+A laboratory can retain raw streams alongside individually addressable measurements. An authenticated inventory tree supplies the path to a selected member. An index maps each small record to its location in a bounded segment. A stream descriptor and an index of block positions allow reads of a specified range. Each read requires the applicable access permission. Each manifest binds the inventory root, member count and custody descriptor. The custody descriptor commits to the source, parents, sequence, ancestry references, delta, index root and coverage counters. Migration retains historical manifest bytes under their original identifiers and maps them to current heads with the same members. Payloads, signatures and recorded evaluator rules retain their identities.
 
-\topic{Methods and observations}
-In a local computational case, the executor reads the authorised plan, checks the bytes of a named payload, and writes an occurrence and a signed readback. It then records a closure linking the plan, decision and occurrence. These records are produced by executing the check. The question, plan and authority are inputs supplied to the case.
+\topic{Admission and exchange}
+An admission derives membership, dependency and correction keys from verified input bytes and reuses unchanged subtrees. Each laboratory writes to its own shard. Concurrent children of one parent remain addressable. A combined view commits to a sorted vector of independently pinned heads, so payloads can be admitted at each source without a common write transaction. A selective disclosure carries the pages, profiles and permissions needed to verify the requested members against the recipient’s head pin. It establishes membership only for those members. A transfer binds a delta to an independently trusted target through an ancestry proof. The recipient derives the root and coverage before committing the batch. Repeated delivery preserves an admitted head, which also serves as a restart point. A withdrawn grant prevents further exports under that custody. The recipient controls copies it has already received.
 
-In both native formats, five measurements use the same reference. A withdrawal covers axial events 3 through 5. At events 3 and 5 the physical claim becomes unresolved. Axial events 2 and 6 and radial event 4 retain their original bounds and supported verdict. Further tests cover a stored empty mode and a known mismatch paired with an invalid restriction. A current training label survives an inapplicable withdrawal when its features remain eligible. Earlier receipts identify their evaluator for historical replay.
+\topic{Coverage under declared dependencies}
+Deriving every declared key at genesis and at each child establishes coverage by induction over admitted history. A Merkle proof authenticates an entry against its root. Coverage also requires evidence that the root was constructed by those admission rules. Given the required pinned sources and readable indexes, a complete empty result excludes the queried path among recorded dependencies. It leaves unrecorded relationships outside the inference. Candidate notices still require authority, scope and scientific review. Missing coverage, unrecognised semantics or an exhausted budget leaves the result open. A routing receipt binds the source pins, rule, target, budget, result count and digest. Historical scientific receipts retain their original manifests and evaluator identities.
 
-The same applicability rules govern assessment, impact analysis and training review. In both formats an axial withdrawal leaves the direct radial assessment supported, requires reassessment of a delegated use, and preserves historical replay.
+\topic{Analytical costs}
+For a tree of height $H$, a key lookup reads at most $H$ logical pages. Inserting one key creates at most $2H+1$ pages, including splits. Updating $k$ keys requires $O(kH)$ logical page work. Along a lineage of $S$ commits, one descriptor adds $O(\log S)$ ancestry references. An incremental frame carries one bounded batch and its ancestry witness. Initial admission verifies and indexes the selected history. Retaining old roots also retains the old pages they reach. A scientific assessment can require traversing the full selected evidence view. These bounds count logical operations. Physical I/O, contention and end-to-end capacity depend on the storage system, workload and deployment.
 
-Two local archives use the native encodings of Appendix~\ref{app:exchange}. For the original transition and both calibration notices, the implementation recomputed the scores and scientific results in Sections~\ref{sec:archive} and~\ref{sec:bar}. The projection producer replayed the corrected receipt and signed the permitted hull. A fresh recipient received the hull, scoring predicates and public verification context. The source retained the link to the underlying measurements. The recipient could apply both scoring rules and identified the missing warrant for each physical claim.
-
-\small
-\begin{tabularx}{\linewidth}{@{}L{.24\linewidth}Y@{}}
-\toprule
-\textbf{Reference check} & \textbf{Observable condition} \\ \midrule
-Bootstrap and transport & Each of the two canonical kits supplies six vectors. The structural probe yields the two published digests. A malformed exchange rolls back. A withdrawn payload stays unavailable after re-import. \\
-Public exchange suite & Six isolated inventories exercise four queries each. The 24 expected answers cover the source, its native translation, the later correction, rival notices, the restricted projection and the projection's return. The grading command also detects an incorrect acceptance in an altered submission. \\
-Evidence and learning & Tests cover the release, origin, split and reassessment rules in Appendix~\ref{app:learning}. A censored endpoint, a measurement interval and two text variants survive exchange. The control stays outside the calibration notice scope. \\
-Action and adoption & A restarted executor recognises its earlier reservation. A signed readback reconciles the attempt. A paired-count policy compares a candidate with its frozen parent on a named finite collection and records a rollback reference. \\
-\bottomrule
-\end{tabularx}
-\normalsize
-
-\topic{Limits of the evaluation}
-The implementation supplies a particular research profile, typed training targets and additional signed tests under recipient-selected rules. Its two codec paths share one scientific evaluator. Agreement across those paths tests transport, local interpretation and the stated fixtures. The independent development, blinded baseline comparisons and prospective instrument trial specified in Section~\ref{sec:trial} and the preceding pages remain external validation tasks. The cases provide no estimate of population error rates, physical calibration accuracy or model improvement.
-
-\clearpage
-\pdfbookmark[2]{Large archives and independent laboratory heads}{pagedcustody}
-\subsection*{Large archives and independent laboratory heads}\label{sec:pagedcustody}
-A laboratory may accumulate terabytes of raw payloads and individually addressed measurements. A flat list of ten million native identifiers takes about 710 MB in compact JSON. The active archive uses one compact manifest for snapshots, search, exchange and scientific receipts. A migrated project retains historical manifest bytes under their original IDs and maps them to current heads with the same members. Payloads, signatures and recorded evaluator rules retain their identities.
-
-\topic{What a head commits to}
-Each manifest names an inventory tree, count and custody descriptor. The descriptor commits the source, parents, sequence, ancestry jumps, bounded delta, index root and coverage counters. The tree orders membership, forward and reverse dependencies, correction targets and raw block positions. Canonical, content-addressed pages hold up to 32 entries and 16 KiB. An admission derives its keys from verified member bytes, copies the changed paths and reuses unaffected children. An ordinary batch holds up to 64 members and 4 MiB. A single logical object may use its 16 MiB wire allowance. Large blobs use 256 KiB extents under their original ID. Small records share bounded segments indexed by their original IDs and offsets. A reader can fetch an individual record or a bounded range of 256 KiB raw blocks. Each read checks current local access. Selective disclosure from an unrestricted head carries authenticated paths, profiles and access evidence for one member or up to 64 members sharing a proof. Import verifies the exact union against an independent head pin and records the selected scope atomically.
-
-\topic{Parallel writing and transfer}
-Each laboratory can ingest into its own shard. Concurrent children of one parent remain separate addressable tips. A combined view commits to a sorted vector of up to 64 pinned heads. It needs no common payload transaction. A local grant names an exact tip. A portable frame carries one verified delta and a bounded ancestry proof from the independently trusted target pin. A receiver reconstructs the root and coverage, commits atomically, and can resume at its last admitted head. A direct local pull shares verified ancestry descriptors across batches and checks its saved cursor. Repeated delivery preserves the head. A revoked grant or local withdrawal blocks subsequent transfer under that source's custody. An independent receiver controls its delivered copy. Production identity enrollment and transport scheduling belong to the deployment.
-
-\topic{How coverage is established}
-A root authenticates index contents. Coverage follows from deriving all declared entries at genesis and at every admitted child. An arbitrary pinned index with a missing notice fails this admission check. For a declared-dependency query the evaluator routes a correction to transitive dependents, or finds linked notices on a target and its premises. It checks the named sources, coverage counters, readable custody and query budget. A complete empty result excludes this declared path. Candidate notices require authority and scope review. Missing coverage, opaque records, unsupported mappings and exhausted work budgets leave the result open. A compact routing receipt binds the source pins, rule, target, budget, result count and digest. Scientific evaluation uses the same active manifest. Historical receipts replay against their original manifest and evaluator. An exact-version correction can use a complete reverse index to select candidates for scientific review. Rules 7 name the first unexamined record when the notice budget ends. A missing linked inventory witness leaves replay open.
-
-\clearpage
-\pdfbookmark[2]{Paged custody qualification}{pagedqualification}
-\subsection*{Paged custody qualification}\label{sec:pagedqualification}
-For height $H$, inserting one new key reads at most $H$ logical pages and creates at most $2H+1$, including splits. A batch with $k$ derived keys costs $O(kH)$ logical page work. The current writer stores independent pages, compressed when smaller. Each uncached page needs one backing-row read. Historical splice chains need at most five. Logical IDs and exchange bytes use the canonical uncompressed page. A lineage of $S$ commits adds $O(\log S)$ jump references per commit. The last incremental frame contains its bounded delta and descriptor. First admission verifies and indexes the entire selected ancestry. Old roots retain their changed paths.
-
-\topic{Local experiments}
-Three optimized local runs per configuration used fresh SQLite files and separate processes on arm64 macOS. A generated inventory with virtual payload IDs used the actual tree, hashes and SQLite writes. For 100, 10,000 and one million keys the same inserted key read 2, 3 and 5 logical pages and created 2, 3 and 6. No virtual payload bytes were read or transferred.
-
-Real canonical measurement records exercised the shipping admission and direct local pull. The same 203-byte linked claim was added to each inventory. File growth includes retained history and SQLite overhead. RSS and elapsed time are process medians for the delta phase, which also resolves the old and new views and traces the dependent. Pull bytes include payload and accounted descriptor traffic.
-
-\small
-\begin{tabularx}{\textwidth}{@{}X r r r r r r@{}}
-\toprule
-Records & Pages read & Created & Backing reads & Pull bytes & RSS, MiB & Time, ms\\
-\midrule
-128 & 14 & 10 & 14 & 1,036 & 5.98 & 6.40\\
-1,024 & 23 & 15 & 23 & 1,251 & 6.27 & 8.19\\
-12,800 & 33 & 21 & 33 & 1,466 & 6.94 & 9.80\\
-\bottomrule
-\end{tabularx}
-\normalsize
-
-The 12,800-record first admission verified 1,755,290 payload bytes across 200 batches. The origin database grew by 120.18 MB. Median first admission and direct pull took 7.55 and 10.91 seconds. The pull accounted for 4.64 MB including descriptors and references. A point proof took 70,895 bytes for a record whose full-inventory JSON bundle used 1,980,671. At 128 records the full bundle was smaller. An initial or post-withdrawal full seal may read every available member. Scientific evaluation may materialize the selected inventory. The table measures bounded laboratory admission and lookup.
-
-\topic{Parallelism and limits}
-Two local laboratory writers produced 24 mixed batches. A receiver limited to one batch per service step reopened 24 times, drained its backlog and accepted eight repeated notifications without retransmitting members. Separate controls exercised fork retention, grant withdrawal, failed partial admission, historical receipts and incomplete correction coverage. In a link-only model, 3 TiB requires about 44 minutes of payload transmission at 10 decimal Gbit/s before framing, hashing, storage and contention. This arithmetic and the local measurements do not establish physical terabyte throughput or a production multi-laboratory service rate. A 512-commit lineage of 4,096 real records preserved the prior writer’s final head and verified nine historical cuts. Its file grew by 56.60 MB, compared with 63.07 MB for the prior writer. The archive wire contract is in \texttt{spec/scale/}. The source qualification driver reproduces these workloads.
+\topic{Proposed independent scaling study}
+Hold a small edit fixed while increasing the prior inventory. Compare first admission, incremental transfer and historical lookup. Use mixed record and raw-stream sizes, concurrent writers, an interrupted receiver and repeated delivery. Measure pages, retained bytes, peak memory, transfer volume and elapsed time. Verify the same content identifiers and historical reads across implementations. Report generated identifiers, locally stored payloads and transfers between physical laboratories as separate workloads.
 
 \partpage{Sources and design lineage}
 \small

@@ -1,102 +1,28 @@
-# nao
+# NAOME Research Evidence Protocol
 
-`nao` is the command-line tool in the `naome-protocol` Rust package. It stores, exchanges, and evaluates research evidence. It uses local SQLite archives. Object identifiers are derived from content. Evaluation uses the selected snapshot and the supplied policy.
+NAOME Protocol records the evidence and assumptions behind scientific claims. A recipient can assess a claim against a specific archive snapshot and revisit that assessment when a premise changes. The Rust library and its command-line tool, `nao`, store and exchange content-addressed records.
 
 ## Install
 
-Download the archive for Windows x64, Apple silicon macOS, or Linux x64 (glibc 2.35 or later) from [Releases](https://github.com/naome-core/naome-protocol/releases). Verify it using the matching SHA-256 file, then extract it. Run the executable by its path or add its directory to your PATH. On Windows, use `.\nao.exe` from the extracted directory.
+Download the archive and matching SHA-256 file for your platform from [Releases](https://github.com/naome-core/naome-protocol/releases). Verify the checksum, extract the archive and add its directory to your PATH. To install from a source checkout, run `cargo install --locked --path .` with Rust and a C toolchain available.
 
-To build from a checkout, run `cargo install --locked --path .` with Rust and a C toolchain for SQLite. For Rust library use, set `default-features = false` to omit the CLI and the bundled model integration.
+## Exchange a reading
 
-## Use an archive
-
-In a new directory, create a file named `reading.txt` containing the word `reading`, then run these commands.
+In an empty directory, create a text file named `reading.txt` containing the word `reading`. Capture it in a local archive and take a snapshot.
 
 ```sh
 nao capture reading.txt text/plain
 nao snapshot readings
-nao find reading
 ```
 
-The default database is `evidence.sqlite`. Use `--db FILE` to choose another file. Existing archives and exchange files can be used directly. `nao snapshot` prints the snapshot ID. Use that ID to export the snapshot, then import it into another archive.
+Replace `SNAPSHOT_ID` below with the identifier printed by the second command. Export the snapshot, import it into a separate archive and search the received evidence.
 
 ```sh
 nao export SNAPSHOT_ID exchange.json
 nao --db receiver.sqlite import exchange.json
+nao --db receiver.sqlite find reading --head SNAPSHOT_ID
 ```
 
-Add `--stream` to both commands for streaming exchange. Use `nao --help` and `nao COMMAND --help` for command options. Keep archive files and signing keys in a private directory.
+The search result names the snapshot and the captured record. Run `nao --help` to list commands or `nao COMMAND --help` for a command’s options.
 
-Import keeps the current search context. Use `nao find QUERY --head SNAPSHOT_ID` for a one-off search in a received snapshot, or `nao search-head SNAPSHOT_ID` to pin it. Without a pin, the newest local snapshot is the default. An archive containing only received snapshots starts with the first one it received. On upgrade, existing snapshots keep their prior ordering because older archives did not record how each snapshot arrived.
-
-## Work with large laboratory archives
-
-A snapshot, scientific receipt, search selection and exchange use the same manifest. It commits the source, parents, inventory root, count and custody descriptor. Ordinary writable opens upgrade older catalogs in a transaction. Historical receipts keep their original evidence bytes, record IDs and evaluator rules.
-
-Use these commands for a local instrument archive. Substitute the identifiers printed by the preceding commands.
-
-```sh
-nao --db lab.sqlite custody append LAB --file instrument.txt
-nao --db lab.sqlite custody append LAB --parent HEAD --file reading.rep --record-format a
-nao --db lab.sqlite export HEAD reading.json --member RECORD_ID
-nao --db receiver.sqlite import reading.json --member-head HEAD
-nao --db receiver.sqlite show HEAD RECORD_ID
-```
-
-For an encoded record the CLI derives access from the envelope. Use `--expected ID` to check a file against an independently supplied ID. A batch manifest accepts up to 64 members with individual IDs, access descriptors and optional block positions. A point disclosure includes the readable object, its profile when needed, access descriptors and authenticated paths. Obtain the expected head independently. This read-purpose evidence supports a point lookup. Use a full exchange for an inventory or historical replay.
-
-Use `capture FILE MEDIA` for an atomic, recoverable file descriptor. Use `custody capture LAB STREAM FILE --parent HEAD` for a block-addressed measurement stream whose batches commit independently. For ordinary full snapshots, `snapshot LAB --continue` advances the sole local full tip. It returns the same head when nothing has changed. With competing tips, choose `--parent HEAD` explicitly.
-
-Identify concurrent branches with `custody tips`. A grant from `custody share` permits a bounded pull for that tip. Separate laboratories can exchange portable frames with `custody export-step` and `custody import-step`. A federated review names its sources and checks the coverage available at each one. [Paged custody](spec/scale/paged-custody.md)
-
-### Archive maintenance
-
-Use `nao migrate-archive old.sqlite new.sqlite` to make an upgraded copy at a new path. Use `nao --db new.sqlite migrated-head OLD_ID` to look up its active identifier. The separate `migrate` command converts scientific record representations and produces format-mapping evidence.
-
-## Reproduce the reference trial
-
-Use the [release](https://github.com/naome-core/naome-protocol/releases) that supplies the whitepaper edition you are reading. The matching tag pins the source and the fixtures generated by the trial. To reproduce from source, check out that tag and follow the locked build instructions above.
-
-In a fresh working directory, run these commands in a POSIX shell or Windows Command Prompt.
-
-```sh
-nao trial ./synthetic-trial
-nao suite ./synthetic-trial/conformance > trial-submission.json
-nao grade ./synthetic-trial/conformance/answers.json trial-submission.json
-```
-
-The trial creates separate SQLite archives and six conformance bundles. The grade reports 24 correct answers out of 24. At the original snapshot the two measurement claims are supported. A correction refutes both. Two rival notices make them contested. With only the certified hull and scoring predicates disclosed, the scoring outcome remains checkable and both physical claims are unresolved. The two native encodings share one reference evaluator.
-
-## Search with a local model
-
-Keyword search runs in the CLI. Semantic and hybrid search use a local EmbeddingGemma 2 checkpoint and Python 3.12. Activate a Python 3.12 virtual environment before running these commands. On Windows and Linux, install the CPU PyTorch packages first.
-
-```sh
-python -m pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-search-torch.txt
-```
-
-Then run the following on all three platforms.
-
-```sh
-python -m pip install -r requirements-search.txt
-hf download google/embeddinggemma-2 --revision f9972ac22e696a105c482202646979e33e4b5a1e --local-dir model
-nao find reading --prepare --model model --python python
-```
-
-Once set up, inference runs offline. Use `--input FILE` for a query from a supported media or text file.
-
-Use `nao prepare-search --help` for index preparation and budget options. Exact object ID lookup requires no index preparation.
-
-## Protocol reference
-
-`nao capabilities` reports the supported formats and bootstrap digests. The notice and impact scan budgets count records. Checks that follow a dependency still account for the objects they need, including payload blocks.
-
-Use `nao explain HEAD CLAIM --compact` and `nao impact HEAD NOTICE --compact` to report an unscanned record range separately from individual unavailable dependencies. In these reports, `unscanned: null` means the record scan reached the end of the snapshot. To resume a compact explanation, use its `unscanned.after` with `--after` at the same head. To complete an impact calculation, repeat it with a larger budget at that head so the dependency walk can see the complete inventory. The default impact and explanation JSON can also enumerate the frontier.
-
-New assessment receipts use `rep-rust-rules-7`. When a record or byte budget ends the scan, `unscanned_records_from` gives the first record in the unexamined suffix of the pinned inventory. This keeps the notice horizon open. Rules 6 and 7 verify canonical snapshot manifests for delegated assessments, notice freshness and format mappings. Historical receipts replay with their recorded evaluator. `nao capabilities` lists the supported versions.
-
-- [Whitepaper](spec/research-evidence-protocol.pdf)
-- [Bootstrap kit A](spec/kits/A.json) and [bootstrap kit B](spec/kits/B.json)
-- [Example exchange file](spec/examples/exchange.json)
-
-From a source checkout on Linux x86_64 or Apple silicon, run `python3 tools/ci/whitepaper.py` to rebuild the whitepaper and verify the PDF. The first build downloads the pinned TeX engine and its resources.
+The [whitepaper](spec/research-evidence-protocol.pdf) explains how claims are evaluated. The [archive specification](spec/scale/paged-custody.md) defines manifests, transfer and access rules. A [complete exchange file](spec/examples/exchange.json) and [format A](spec/kits/A.json) and [format B](spec/kits/B.json) bootstrap kits provide machine-readable examples.

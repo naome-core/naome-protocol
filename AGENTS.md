@@ -4,8 +4,10 @@ This repository contains the Rust archive library, the `nao` CLI, the protocol w
 
 ## Documentation
 
-- Keep `README.md` focused on installation, first use and navigation. Edit it when a change makes those instructions inaccurate or changes what a new user needs to do.
-- Put command options and defaults in CLI help. Put wire formats, compatibility rules and evidence semantics in the existing specification. Regenerate the checked-in PDF with `python3 tools/ci/whitepaper.py --write` when the TeX changes.
+- Keep `README.md` to the protocol’s purpose, installation, one working first-use example and pointers to the specification and CLI help. Keep version-specific results, benchmarks, release notes and operational procedures out of the README. Edit it when a change makes those instructions inaccurate or changes what a new user needs to do.
+- Put command options and defaults in CLI help. Put wire formats, compatibility rules and evidence semantics in the existing specification.
+- Keep the whitepaper a standalone research paper about the protocol. Include the problem, model, assumptions, analytical properties, worked examples, related work, limitations and proposed independent evaluation where relevant. Keep benchmark tables, machine-specific measurements, local experiment reports, CI results, release history and troubleshooting out of the paper. Present worked examples and proposed studies as such.
+- Regenerate the checked-in PDF with `python3 tools/ci/whitepaper.py --write` when the TeX changes.
 - Record run-specific timings, test outcomes and investigation notes in chat, CI logs or an explicitly requested research destination. Keep generated reports, sample databases and scratch files outside tracked sources and release packages. Keep reusable qualification code and required protocol vectors beside their existing counterparts.
 
 ## Implementation and verification
