@@ -9,7 +9,8 @@ use naome_protocol::{
 };
 
 fn replica(source: &Archive, s: &Snapshot) -> Result<Replica> {
-    let mut replica = Replica::new(s.id()?, s.clone())?;
+    let wire = serde_json::to_vec(s)?;
+    let mut replica = Replica::new(s.id()?, serde_json::from_slice(&wire)?)?;
     for packet in source.export(s, "read")?.packets {
         replica.accept(
             packet.id,
@@ -34,7 +35,10 @@ fn only_released_readable_members_are_served_and_mirrors_preserve_rights() -> Re
     source.release(head)?;
     let outside = source.blob(b"not released", Id::blob(PUBLIC))?;
     assert!(source.released_member(head, outside).is_err());
-    assert_eq!(replica(&source, &s)?.commit(&dest)?, head);
+    assert_eq!(
+        replica(&source, &source.released_manifest(head)?)?.commit(&dest)?,
+        head
+    );
     assert_eq!(
         dest.released_member(head, id)?.blob_access,
         Some(Id::blob(READ_ONLY))
@@ -161,19 +165,21 @@ fn frames_must_match_the_requested_identity_and_inventory_before_commit() -> Res
     assert!(partial.commit(&dest).is_err());
     assert!(dest.head(head).is_err());
     assert!(dest.resolve(&s, id, "read").is_err());
-    let mut with_parents = s.clone();
-    with_parents.parents = (0..MAX_MANIFEST_PARENTS)
+    let mut parents: std::collections::BTreeSet<_> = (0..MAX_MANIFEST_PARENTS)
         .map(|n| Id::blob(&n.to_le_bytes()))
         .collect();
-    Replica::new(with_parents.id()?, with_parents.clone())?;
-    with_parents.parents.insert(Id::blob(b"additional parent"));
-    assert!(Replica::new(with_parents.id()?, with_parents).is_err());
-    let oversized = Snapshot {
-        objects: (0..=MAX_MEMBERS)
-            .map(|n| Id::blob(&n.to_le_bytes()))
-            .collect(),
-        ..s
-    };
+    let with_parents = source.seal_members("parents", parents.clone(), s.objects.clone())?;
+    Replica::new(with_parents.id()?, with_parents)?;
+    parents.insert(Id::blob(b"additional parent"));
+    assert!(
+        source
+            .seal_members("parents", parents, s.objects.clone())
+            .is_err()
+    );
+    let members = (0..=MAX_MEMBERS)
+        .map(|n| Id::blob(&n.to_le_bytes()))
+        .collect();
+    let oversized = source.seal_members("oversized", Default::default(), members)?;
     assert!(Replica::new(oversized.id()?, oversized).is_err());
     Ok(())
 }

@@ -19,6 +19,114 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 impl Archive {
+    /// Route an exact-version input correction from a pinned head. Other notice types,
+    /// aliases and incompletely indexed horizons retain the general bounded scan.
+    pub fn impact_head(
+        &self,
+        head: Id,
+        notice: Id,
+        mappings: &[Id],
+        budget: usize,
+        policy: Option<Id>,
+        compact: bool,
+    ) -> Result<Value> {
+        self.with_read_view(|| {
+            let head = self.current_head_id(head)?;
+            let (impact, tail) = if let Some(report) =
+                self.indexed_input_impact(head, notice, mappings, budget, policy)?
+            {
+                (report, None)
+            } else {
+                self.scan_impact(
+                    &self.active_head(head)?,
+                    notice,
+                    mappings,
+                    budget,
+                    policy,
+                    compact,
+                )?
+            };
+            impact_json(head, impact, tail, compact)
+        })
+    }
+
+    fn indexed_input_impact(
+        &self,
+        head: Id,
+        notice: Id,
+        mappings: &[Id],
+        budget: usize,
+        policy: Option<Id>,
+    ) -> Result<Option<Impact>> {
+        if !mappings.is_empty()
+            || !(1..=100_000).contains(&budget)
+            || self.custody_head(head).is_err()
+        {
+            return Ok(None);
+        }
+        let n = self.read_head(head, notice, "read")?;
+        if !DependencyCorrection::is_correction(&n) {
+            return Ok(None);
+        }
+        let source = n.one("source-version")?;
+        let route = crate::store::custody::Federation::new([head].into())?.review(
+            &[(self, head)],
+            source,
+            budget,
+        )?;
+        if route.standing == "open" || !route.dependents.contains(&notice) {
+            return Ok(None);
+        }
+        let mut docs = BTreeMap::new();
+        for id in route
+            .dependents
+            .iter()
+            .copied()
+            .filter(|id| id.format().is_some())
+        {
+            docs.insert(id, self.read_head(head, id, "read")?);
+        }
+        // A complete route proves local presence and public/read-only custody for all
+        // declared premises. The field profile separately requires an unambiguous evidence edge.
+        let evidence = n
+            .one("evidence")
+            .ok()
+            .is_some_and(|id| self.resolve_head(head, id, "read").is_ok());
+        let correction = DependencyCorrection::from_evidence(&n, [source].into(), evidence);
+        let authority = if let Some(id) = policy {
+            let policy = self.read_head(head, id, "read")?;
+            ensure!(
+                policy.kind == Kind::Policy && policy.scope == "research-policy-1",
+                "unsupported impact policy"
+            );
+            let keys = correction_keys(&policy)?;
+            keys.get(&n.scope)
+                .and_then(|scopes| scopes.get(&source))
+                .and_then(|trusted| {
+                    docs.iter().find_map(|(&id, d)| {
+                        (d.kind == Kind::Attestation
+                            && crate::profile::verify_attestation(
+                                d,
+                                notice,
+                                &n.scope,
+                                "input-correction",
+                                "research-policy-1",
+                                trusted,
+                            )
+                            .is_ok())
+                        .then_some(id)
+                    })
+                })
+        } else {
+            None
+        };
+        let mut frontier = BTreeSet::new();
+        let impacts = correction.trace_documents(&docs, &mut frontier, |_| true);
+        Ok(Some(input_report(
+            notice, &docs, impacts, frontier, true, authority,
+        )?))
+    }
+
     pub fn impact(
         &self,
         s: &Snapshot,
@@ -53,13 +161,30 @@ impl Archive {
         policy: Option<Id>,
     ) -> Result<Value> {
         let (impact, unscanned) = self.impact_report(s, notice, mappings, budget, policy, true)?;
-        let mut report = serde_json::to_value(impact)?;
-        report["snapshot"] = serde_json::to_value(s.id()?)?;
-        report["unscanned"] = serde_json::to_value(unscanned)?;
-        Ok(report)
+        impact_json(s.id()?, impact, unscanned, true)
     }
 
     fn impact_report(
+        &self,
+        s: &Snapshot,
+        notice: Id,
+        mappings: &[Id],
+        budget: usize,
+        policy: Option<Id>,
+        compact: bool,
+    ) -> Result<(Impact, Option<UnscannedRecords>)> {
+        self.with_read_view(|| {
+            if let Some(impact) =
+                self.indexed_input_impact(s.id()?, notice, mappings, budget, policy)?
+            {
+                Ok((impact, None))
+            } else {
+                self.scan_impact(s, notice, mappings, budget, policy, compact)
+            }
+        })
+    }
+
+    fn scan_impact(
         &self,
         s: &Snapshot,
         notice: Id,
@@ -133,24 +258,15 @@ impl Archive {
         }
         if let Some(correction) = input_correction {
             let impacts = correction.downstream(self, s, &inventory, &mut frontier);
-            let matching = |status| {
-                impacts
-                    .iter()
-                    .filter_map(move |(id, &impact)| (impact == status).then_some(id))
-            };
             return Ok((
-                Impact {
+                input_report(
                     notice,
-                    by_kind: group_impact(docs, matching(CorrectionImpact::Affected))?,
-                    needs_reassessment: group_impact(docs, matching(CorrectionImpact::Open))?,
-                    outside_scope: if unscanned.is_none() && frontier.is_empty() {
-                        group_impact(docs, matching(CorrectionImpact::Outside))?
-                    } else {
-                        BTreeMap::new()
-                    },
-                    correction_authority,
+                    docs,
+                    impacts,
                     frontier,
-                },
+                    unscanned.is_none(),
+                    correction_authority,
+                )?,
                 unscanned,
             ));
         }
@@ -272,6 +388,47 @@ impl Archive {
             unscanned,
         ))
     }
+}
+
+fn impact_json(
+    head: Id,
+    impact: Impact,
+    tail: Option<UnscannedRecords>,
+    compact: bool,
+) -> Result<Value> {
+    let mut value = serde_json::to_value(impact)?;
+    if compact {
+        value["snapshot"] = serde_json::to_value(head)?;
+        value["unscanned"] = serde_json::to_value(tail)?;
+    }
+    Ok(value)
+}
+
+fn input_report(
+    notice: Id,
+    docs: &BTreeMap<Id, Document>,
+    impacts: BTreeMap<Id, CorrectionImpact>,
+    frontier: BTreeSet<Id>,
+    scanned: bool,
+    correction_authority: Option<Id>,
+) -> Result<Impact> {
+    let matching = |status| {
+        impacts
+            .iter()
+            .filter_map(move |(id, &impact)| (impact == status).then_some(id))
+    };
+    Ok(Impact {
+        notice,
+        by_kind: group_impact(docs, matching(CorrectionImpact::Affected))?,
+        needs_reassessment: group_impact(docs, matching(CorrectionImpact::Open))?,
+        outside_scope: if scanned && frontier.is_empty() {
+            group_impact(docs, matching(CorrectionImpact::Outside))?
+        } else {
+            BTreeMap::new()
+        },
+        correction_authority,
+        frontier,
+    })
 }
 
 fn group_impact<'a>(

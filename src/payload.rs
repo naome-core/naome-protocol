@@ -8,6 +8,20 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 
+/// Fill a fixed-size logical block across interrupted or short underlying reads.
+pub(crate) fn read_block(source: &mut impl Read, buffer: &mut [u8]) -> std::io::Result<usize> {
+    let mut count = 0;
+    while count < buffer.len() {
+        match source.read(&mut buffer[count..]) {
+            Ok(0) => break,
+            Ok(n) => count += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(count)
+}
+
 impl Archive {
     /// Stream an exact payload into an ordered chunk descriptor. A failed import rolls back every new object.
     pub fn capture(
@@ -28,15 +42,7 @@ impl Archive {
         let mut offset = 0u64;
         let mut chunks = Vec::new();
         loop {
-            let mut count = 0;
-            while count < buf.len() {
-                match source.read(&mut buf[count..]) {
-                    Ok(0) => break,
-                    Ok(n) => count += n,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e.into()),
-                }
-            }
+            let count = read_block(&mut source, &mut buf)?;
             if count == 0 {
                 break;
             }
@@ -87,6 +93,10 @@ impl Archive {
 }
 
 impl Document {
+    pub(crate) fn is_chunk_descriptor(&self) -> bool {
+        self.kind == Kind::Descriptor && self.scope == "ordered-chunks-1"
+    }
+
     pub(crate) fn materialize(
         &self,
         budget: u64,
@@ -94,8 +104,7 @@ impl Document {
         mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
     ) -> Result<u64> {
         ensure!(
-            self.kind == Kind::Descriptor
-                && self.scope == "ordered-chunks-1"
+            self.is_chunk_descriptor()
                 && self.field::<String>("algorithm")? == "SHA-256"
                 && self.field::<String>("media")? == self.subject,
             "unknown descriptor"

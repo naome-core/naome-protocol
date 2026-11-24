@@ -1,0 +1,36 @@
+{
+  "pages": {
+    "1:1:9610dc8a187c6733d3c56763ba29ec4cd605482c0bc9c4c226a516fe93aeccd1": {
+      "Leaf": [
+        [
+          "1:1:4f1d4ad15e92011997ed709942128761a50c9d4374a50421c279f8ce9b5abae0",
+          "1:1:4f1d4ad15e92011997ed709942128761a50c9d4374a50421c279f8ce9b5abae0"
+        ],
+        [
+          "1:1:58e7be45fbee2fad839787e3aceb676b47053f4569fa79b89e92b8e1b35301f4",
+          "1:1:58e7be45fbee2fad839787e3aceb676b47053f4569fa79b89e92b8e1b35301f4"
+        ]
+      ]
+    }
+  },
+  "snapshot": {
+    "source": "bench",
+    "parents": [],
+    "inventory": "1:1:9610dc8a187c6733d3c56763ba29ec4cd605482c0bc9c4c226a516fe93aeccd1",
+    "count": 2,
+    "custody": "1:1:6bd16ee616f5a6aa1a7b769eed2eeb04c844f49b093cb7003635969a599cfc14"
+  },
+  "head": "1:1:8888e389c49db3249c3d3316468f19563898c6353b5193080792185acc9fe3dd",
+  "packets": [
+    {
+      "id": "1:1:4f1d4ad15e92011997ed709942128761a50c9d4374a50421c279f8ce9b5abae0",
+      "access": "1:1:4f1d4ad15e92011997ed709942128761a50c9d4374a50421c279f8ce9b5abae0",
+      "hex": "7b22707572706f736573223a5b2272656164222c22747261696e225d2c2276657273696f6e223a317d"
+    },
+    {
+      "id": "1:1:58e7be45fbee2fad839787e3aceb676b47053f4569fa79b89e92b8e1b35301f4",
+      "access": "1:1:4f1d4ad15e92011997ed709942128761a50c9d4374a50421c279f8ce9b5abae0",
+      "hex": "4f4b0a"
+    }
+  ]
+}

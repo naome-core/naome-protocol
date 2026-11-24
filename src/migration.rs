@@ -1,6 +1,9 @@
+mod equivalence;
+pub use equivalence::Equivalence;
+
 use crate::{
     profile::{Document, Kind, PROFILE, PUBLIC, link},
-    store::{Archive, Snapshot},
+    store::{Archive, ManifestEncoding, Snapshot},
     wire::{Format, Id, Record},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -15,9 +18,6 @@ pub struct Migration {
     pub exchange_head: Id,
     pub pairs: BTreeMap<Id, Id>,
     pub retained: BTreeSet<Id>,
-}
-fn manifest(store: &Archive, s: &Snapshot) -> Result<Id> {
-    store.blob(&serde_json::to_vec(s)?, Id::blob(PUBLIC))
 }
 fn rewrite(mut r: Record, pairs: &BTreeMap<Id, Id>) -> Result<Record> {
     let doc = Document::decode(&r)?;
@@ -91,19 +91,17 @@ impl Archive {
             }
         }
         ensure!(pending.is_empty(), "cyclic native migration");
-        let source_manifest = manifest(self, s)?;
-        let native = Snapshot {
-            version: 1,
-            source: format!("{}-{:?}", s.source, target),
-            parents: [s.id()?].into(),
-            objects: s
-                .objects
+        let source_manifest = self.deposit_manifest(s)?;
+        let native = self.seal_members(
+            &(format!("{}-{:?}", s.source, target)),
+            [s.id()?].into(),
+            s.objects
                 .iter()
                 .map(|i| pairs.get(i).copied().unwrap_or(*i))
                 .collect(),
-        };
+        )?;
         let native_head = self.save(&native)?;
-        manifest(self, &native)?;
+        self.deposit_manifest(&native)?;
         let mut links = vec![
             link("source-inventory", source_manifest),
             link("target-inventory", native_head),
@@ -126,12 +124,10 @@ impl Archive {
             target,
             Id::blob(PUBLIC),
         )?;
-        let exchange = Snapshot {
-            version: 1,
-            source: native.source,
-            parents: [source_manifest, native_head].into(),
-            objects: s
-                .objects
+        let exchange = self.seal_members(
+            &(native.source),
+            [source_manifest, native_head].into(),
+            s.objects
                 .union(&native.objects)
                 .copied()
                 .chain([
@@ -142,7 +138,7 @@ impl Archive {
                     Id::blob(PUBLIC),
                 ])
                 .collect(),
-        };
+        )?;
         self.verify_mapping(&exchange, mapping)?;
         let exchange_head = self.save(&exchange)?;
         tx.commit()?;
@@ -155,6 +151,15 @@ impl Archive {
         })
     }
     pub fn verify_mapping(&self, s: &Snapshot, id: Id) -> Result<BTreeMap<Id, Id>> {
+        self.verify_mapping_with(s, id, ManifestEncoding::Canonical)
+    }
+
+    pub(crate) fn verify_mapping_with(
+        &self,
+        s: &Snapshot,
+        id: Id,
+        encoding: ManifestEncoding,
+    ) -> Result<BTreeMap<Id, Id>> {
         let d = self.read(s, id, "read")?;
         ensure!(
             d.kind == Kind::Mapping
@@ -172,10 +177,8 @@ impl Archive {
                     }),
             "unknown mapping kit"
         );
-        let source: Snapshot =
-            serde_json::from_slice(&self.resolve(s, d.one("source-inventory")?, "read")?)?;
-        let target: Snapshot =
-            serde_json::from_slice(&self.resolve(s, d.one("target-inventory")?, "read")?)?;
+        let source = self.linked_snapshot(s, d.one("source-inventory")?, encoding)?;
+        let target = self.linked_snapshot(s, d.one("target-inventory")?, encoding)?;
         let old = d.roles("source").collect::<Vec<_>>();
         let new = d.roles("target").collect::<Vec<_>>();
         ensure!(old.len() == new.len(), "unpaired endpoints");
@@ -211,29 +214,5 @@ impl Archive {
             .collect();
         ensure!(expected == target.objects, "incomplete inventory mapping");
         Ok(pairs)
-    }
-}
-#[derive(Default)]
-pub struct Equivalence(BTreeMap<Id, BTreeSet<Id>>);
-impl Equivalence {
-    pub fn add(&mut self, pairs: BTreeMap<Id, Id>) {
-        for (a, b) in pairs {
-            self.0.entry(a).or_default().insert(b);
-            self.0.entry(b).or_default().insert(a);
-        }
-    }
-    pub fn endpoints(&self, id: Id) -> BTreeSet<Id> {
-        let mut seen = BTreeSet::from([id]);
-        let mut queue = vec![id];
-        while let Some(x) = queue.pop() {
-            if let Some(peers) = self.0.get(&x) {
-                for &p in peers {
-                    if seen.insert(p) {
-                        queue.push(p);
-                    }
-                }
-            }
-        }
-        seen
     }
 }

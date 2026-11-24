@@ -96,9 +96,7 @@ impl<'a> Notice<'a> {
     }
 
     pub(crate) fn target_endpoints(self, aliases: &Equivalence) -> BTreeSet<Id> {
-        self.targets()
-            .flat_map(|id| aliases.endpoints(id))
-            .collect()
+        self.targets().flat_map(|id| aliases.members(id)).collect()
     }
 
     pub(crate) fn matching_targets(
@@ -309,7 +307,7 @@ pub(super) fn require_micrometres(doc: &Document) -> Result<()> {
 }
 
 fn touches(id: Id, aliases: &Equivalence, premises: &BTreeSet<Id>) -> bool {
-    !aliases.endpoints(id).is_disjoint(premises)
+    aliases.intersects(id, premises)
 }
 
 pub(crate) struct CalibrationLimits<'a> {

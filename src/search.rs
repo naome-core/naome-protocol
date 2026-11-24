@@ -213,6 +213,8 @@ pub struct SearchHit {
 #[derive(Debug, Serialize)]
 pub struct SearchPreparation {
     pub head: Id,
+    /// Whether unfiltered sparse vector comparisons can seek directly to sample positions.
+    pub sample_positions_ready: Option<bool>,
     pub index_complete: bool,
     pub semantic_index_complete: Option<bool>,
     pub limited_coverage: bool,

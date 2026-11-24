@@ -1,6 +1,6 @@
 use super::{
     Archive, Passage, SearchLocation, Snapshot,
-    extract::{PASSAGE_BYTES, has_oversized_word, ranges},
+    lexical::{PASSAGE_BYTES, has_oversized_word, ranges},
 };
 use crate::{profile::Document, wire::Id};
 use anyhow::{Context, Result, ensure};

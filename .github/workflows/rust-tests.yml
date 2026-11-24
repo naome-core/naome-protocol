@@ -78,6 +78,16 @@ jobs:
       - name: Run protocol and conformance tests
         run: cargo test --workspace --profile "$NAOME_TEST_PROFILE" --all-features --all-targets --locked --no-fail-fast
 
+      - name: Measure 512 successive archive changes and verify historical reads
+        if: ${{ inputs.package_target != '' }}
+        env:
+          NAOME_SAMPLE_DIR: ${{ runner.temp }}/custody-history
+          NAOME_SAMPLE_SIZE: '512'
+          NAOME_SAMPLE_PHASE: history
+        run: |
+          mkdir -p "$NAOME_SAMPLE_DIR"
+          cargo test --lib --release --locked -- store::custody::tests::qualification_sample --exact --ignored --nocapture
+
       - name: Run documentation tests
         run: cargo test --workspace --doc --all-features --locked
 
@@ -87,13 +97,19 @@ jobs:
         with:
           python-version: '3.12.10'
 
+      - name: Rebuild and verify the whitepaper
+        if: ${{ inputs.package_target == 'x86_64-unknown-linux-gnu' }}
+        run: python tools/ci/whitepaper.py
+
       - name: Install the qualified inference runtime
         if: ${{ inputs.model_search }}
         run: |
           if [[ "$RUNNER_OS" != macOS ]]; then
-            python -m pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-search-torch.txt
+            python -m pip install --only-binary=:all: --no-deps --index-url https://download.pytorch.org/whl/cpu -r requirements-search-torch.txt
           fi
           python -m pip install -r requirements-search.txt
+          python -m pip check
+          python tools/ci/audit_search_runtime.py
 
       - name: Package and test the release download
         if: ${{ inputs.package_target != '' }}

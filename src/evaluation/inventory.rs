@@ -6,12 +6,12 @@ use crate::{
     wire::Id,
 };
 use anyhow::{Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Readable records and their indexes for one snapshot in the current archive transaction.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub(crate) struct ReadInventory {
     pub(crate) documents: BTreeMap<Id, Document>,
     pub(crate) notices: BTreeSet<Id>,
@@ -184,8 +184,9 @@ impl ReadInventory {
         snapshot: &Snapshot,
         query: &Query,
         out: &mut Receipt,
-        records_only: bool,
+        budget_rule: &super::NoticeBudget,
     ) -> Result<()> {
+        let records_only = !matches!(budget_rule, super::NoticeBudget::Objects);
         if let Some((records, bytes)) = self.complete_scan
             && (if records_only {
                 records
@@ -209,6 +210,13 @@ impl ReadInventory {
             &mut all_objects
         };
         for (index, id) in objects.enumerate() {
+            if matches!(budget_rule, super::NoticeBudget::CompactRecords)
+                && (index >= query.budget || bytes_left == 0)
+            {
+                out.unscanned_records_from = Some(id);
+                out.frontier.insert(id);
+                break;
+            }
             if index >= query.budget {
                 out.frontier.insert(id);
                 continue;
@@ -368,7 +376,7 @@ impl EvidenceView<'_> {
         role: &str,
         trusted: &BTreeSet<String>,
     ) -> Option<Id> {
-        for endpoint in self.aliases.endpoints(id) {
+        for endpoint in self.aliases.members(id) {
             if self.store.resolve(self.snapshot, endpoint, "read").is_err() {
                 continue;
             }

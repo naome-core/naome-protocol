@@ -1,5 +1,10 @@
 //! Offline inventory packets and atomic import into a custody archive.
-use super::{Archive, Snapshot, insert, save_imported_head, validate};
+use super::{
+    Archive, Manifest, Snapshot, insert,
+    inventory::{self, Pages, witness::Witnesses},
+    snapshot::save_imported_head,
+    validate,
+};
 use crate::{
     profile::allows,
     wire::{Id, MAX_BYTES},
@@ -12,7 +17,11 @@ use std::{
     io::{BufReader, Read},
 };
 
+mod member;
+mod page;
+pub use page::{ExchangePage, ExchangeProgress};
 mod stream;
+pub use member::MemberProof;
 
 #[cfg(test)]
 mod tests;
@@ -25,16 +34,83 @@ pub struct Packet {
     pub hex: String,
 }
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "WireBundle")]
 pub struct Bundle {
+    #[serde(default, skip_serializing_if = "Pages::is_empty")]
+    pub(crate) pages: Pages,
+    #[serde(serialize_with = "serialize_header")]
     pub snapshot: Snapshot,
     pub head: Id,
     pub packets: Vec<Packet>,
+    #[serde(skip_serializing)]
     pub omitted: BTreeSet<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<Id>,
 }
+fn serialize_header<S: serde::Serializer>(
+    s: &Snapshot,
+    out: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    if let Some(m) = &s.manifest {
+        m.serialize(out)
+    } else {
+        s.serialize(out)
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireBundle {
+    snapshot: super::snapshot::StoredHeader,
+    head: Id,
+    packets: Vec<Packet>,
+    omitted: Option<BTreeSet<Id>>,
+    continuation: Option<Id>,
+    #[serde(default)]
+    pages: Pages,
+}
+impl TryFrom<WireBundle> for Bundle {
+    type Error = anyhow::Error;
+    fn try_from(input: WireBundle) -> Result<Self> {
+        let mut snapshot = input.snapshot.into_snapshot();
+        if snapshot.manifest.is_some() {
+            snapshot.hydrate(&input.pages)?;
+        }
+        let packet_ids: BTreeSet<_> = input.packets.iter().map(|p| p.id).collect();
+        let omitted = match input.omitted {
+            Some(s) => s,
+            None => snapshot.objects.difference(&packet_ids).copied().collect(),
+        };
+        Ok(Self {
+            pages: input.pages,
+            snapshot,
+            head: input.head,
+            packets: input.packets,
+            omitted,
+            continuation: input.continuation,
+        })
+    }
+}
 impl Bundle {
+    fn verify_inventory(&self) -> Result<()> {
+        self.snapshot
+            .verify_head(self.head)
+            .context("invalid bundle head")?;
+        let objects = &self.snapshot.objects;
+        ensure!(
+            objects.len().checked_sub(self.omitted.len()) == Some(self.packets.len()),
+            "inventory mismatch"
+        );
+        let expected = objects.difference(&self.omitted).copied();
+        let packet_ids = self.packets.iter().map(|packet| packet.id);
+        if !expected.clone().eq(packet_ids.clone()) {
+            // Legacy bundles may present packets in any order.
+            let mut ordered: Vec<_> = packet_ids.collect();
+            ordered.sort_unstable();
+            ensure!(expected.eq(ordered), "inventory mismatch");
+        }
+        Ok(())
+    }
+
     /// Decode one offline exchange packet within the import byte budget.
     pub fn read(reader: impl Read) -> Result<Self> {
         Self::read_bounded(reader, 256 * 1024 * 1024)
@@ -110,13 +186,27 @@ impl Archive {
         after: Option<Id>,
         limit: usize,
     ) -> Result<Bundle> {
+        if s.manifest.is_none() {
+            let current = self.convert_archived(s.id()?, s)?;
+            return self.export_page(&self.head(current)?, purpose, after, limit);
+        }
+        self.with_read_view(|| self.collect_page(s, purpose, after, limit))
+    }
+
+    fn collect_page(
+        &self,
+        s: &Snapshot,
+        purpose: &str,
+        after: Option<Id>,
+        limit: usize,
+    ) -> Result<Bundle> {
         ensure!(limit > 0, "positive export page limit required");
         let (head, mut used) = {
-            let manifest = serde_json::to_vec(s)?;
-            let used = manifest
-                .len()
-                .checked_mul(3)
-                .context("inventory too large")?;
+            let manifest = s.bytes()?;
+            let mut used = manifest.len() * 3 + 512;
+            for page in s.pages.values() {
+                used += serde_json::to_vec(page)?.len() + 96;
+            }
             ensure!(
                 used < 200 * 1024 * 1024,
                 "inventory exceeds exchange size limit"
@@ -148,13 +238,55 @@ impl Archive {
                 omitted.insert(id);
             }
         }
+        let mut pages = s.pages.clone();
+        for p in &packets {
+            self.collect_linked_pages(p, &mut pages, &mut used, 255 * 1024 * 1024)?;
+        }
         Ok(Bundle {
+            pages,
             head,
             snapshot: s.clone(),
             packets,
             omitted,
             continuation,
         })
+    }
+    fn collect_linked_pages(
+        &self,
+        packet: &Packet,
+        pages: &mut Pages,
+        used: &mut usize,
+        limit: usize,
+    ) -> Result<()> {
+        if packet.id.format().is_some() {
+            return Ok(());
+        }
+        // Snapshot commitments are small. Larger scientific payloads have no witness sidecar.
+        if packet.hex.len() > 65536 {
+            return Ok(());
+        }
+        let Some(manifest) = Manifest::from_packet(packet.id, &hex::decode(&packet.hex)?) else {
+            return Ok(());
+        };
+        let mut tree = super::custody::tree::Tree::new(&self.db);
+        if manifest.walk(|id| tree.read(id), |_| Ok(())).is_ok() {
+            manifest.walk(
+                |id| {
+                    let p = tree.read(id)?;
+                    if let std::collections::btree_map::Entry::Vacant(slot) = pages.entry(id) {
+                        *used += serde_json::to_vec(&p)?.len() + 96;
+                        ensure!(
+                            *used <= limit,
+                            "exchange witnesses exceed JSON budget; use stream export"
+                        );
+                        slot.insert(p.clone());
+                    }
+                    Ok(p)
+                },
+                |_| Ok(()),
+            )?;
+        }
+        Ok(())
     }
     fn exchange_packet(&self, s: &Snapshot, id: Id, purpose: &str) -> Option<Packet> {
         if purpose == "train"
@@ -169,27 +301,33 @@ impl Archive {
     }
 
     pub fn import(&mut self, b: &Bundle) -> Result<Id> {
-        verify_head(b.head, &b.snapshot)?;
-        let tx = self.db.transaction()?;
-        let mut ids = b.omitted.clone();
+        b.verify_inventory()?;
+        let tx = self.db.unchecked_transaction()?;
+        let witnesses = Witnesses::begin(&tx)?;
+        for (&id, page) in &b.pages {
+            witnesses.install(id, page)?;
+        }
+        if let Some(m) = &b.snapshot.manifest {
+            witnesses.walk(m)?;
+        }
         let mut bytes = Vec::new();
         for p in &b.packets {
-            ensure!(ids.insert(p.id), "duplicate packet");
             add_packet(&tx, p, &mut bytes)?;
+            witnesses.link(p.id, &bytes)?;
         }
-        ensure!(ids == b.snapshot.objects, "inventory mismatch");
-        save_imported_head(&tx, b.head, &b.snapshot)?;
+        witnesses.finish()?;
+        let head = if b.snapshot.manifest.is_some() {
+            save_imported_head(&tx, b.head, &b.snapshot)?;
+            b.head
+        } else {
+            if self.current_head_id(b.head)? == b.head {
+                save_imported_head(&tx, b.head, &b.snapshot)?;
+            }
+            self.convert_archived(b.head, &b.snapshot)?
+        };
         tx.commit()?;
-        Ok(b.head)
+        Ok(head)
     }
-}
-
-fn verify_head(head: Id, snapshot: &Snapshot) -> Result<()> {
-    ensure!(
-        snapshot.version == 1 && !snapshot.source.is_empty() && snapshot.id()? == head,
-        "invalid bundle head"
-    );
-    Ok(())
 }
 
 fn add_packet(db: &Connection, packet: &Packet, bytes: &mut Vec<u8>) -> Result<()> {

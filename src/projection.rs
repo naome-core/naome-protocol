@@ -25,10 +25,11 @@ impl Archive {
         key: &ed25519_dalek::SigningKey,
         f: Format,
     ) -> Result<Projection> {
+        let transaction = self.db.unchecked_transaction()?;
         let r = self.read(s, receipt, "read")?;
         ensure!(r.kind == Kind::Assessment, "expected assessment");
         let original: Query = r.field("original_query")?;
-        let horizon = self.head(r.one("snapshot")?)?;
+        let horizon = self.receipt_horizon(s, r.one("snapshot")?)?;
         let evaluator: String = r.field("evaluator")?;
         let verified: Receipt = assess_for_evaluator(self, &horizon, &original, &evaluator)?;
         ensure!(
@@ -100,8 +101,8 @@ impl Archive {
             });
         }
         let projected = archive.snapshot("certified hull", BTreeSet::new())?;
-        let source_head = self.blob(&serde_json::to_vec(s)?, public)?;
-        let target_head = self.blob(&serde_json::to_vec(&projected)?, public)?;
+        let source_head = self.deposit_manifest(s)?;
+        let target_head = self.deposit_manifest(&projected)?;
         let private = self.blob(br#"{"purposes":["custody"],"version":1}"#, public)?;
         let mapping = self.document(
             &Document::new(
@@ -124,8 +125,10 @@ impl Archive {
             f,
             private,
         )?;
+        let packet = archive.export(&projected, "read")?;
+        transaction.commit()?;
         Ok(Projection {
-            packet: archive.export(&projected, "read")?,
+            packet,
             queries,
             private_mapping: mapping,
         })

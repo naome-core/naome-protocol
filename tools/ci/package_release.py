@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,6 +20,13 @@ PUBLISHED_PROFILES = {
 
 
 def verify(nao, directory, version):
+    readme = (directory / "README.md").read_text(encoding="utf-8")
+    for link in re.findall(r"\]\((spec/[^)]+)\)", readme):
+        expected = ROOT / link
+        packaged = directory / link
+        if not packaged.is_file() or packaged.read_bytes() != expected.read_bytes():
+            raise ValueError(f"missing or altered README target in release download: {link}")
+
     version_line = subprocess.check_output([nao, "--version"], cwd=directory, text=True, timeout=60)
     help_text = subprocess.check_output([nao, "--help"], cwd=directory, text=True, timeout=60)
     usage = next((line for line in help_text.splitlines() if line.startswith("Usage: ")), "")
@@ -39,7 +47,7 @@ def verify(nao, directory, version):
     (directory / "Messung µ.txt").write_bytes(reading)
     object_id = run("blob", "Messung µ.txt")
     head = run("snapshot", "release smoke", "--root", object_id)
-    for mode, options in [("json", []), ("stream", ["--stream"])]:
+    for mode, options in [("json", []), ("stream", ["--stream"]), ("paged", ["--paged"])]:
         exchange = f"exchange.{mode}"
         receiver = f"{mode} receiver.sqlite"
         resolved = f"{mode} reading.txt"
@@ -50,10 +58,55 @@ def verify(nao, directory, version):
         if (directory / resolved).read_bytes() != reading:
             raise ValueError(f"{mode} exchange changed the payload")
 
-    run("keygen", "signing seed")
-    if (directory / "signing seed").stat().st_size != 32:
+    (directory / "stream.txt").write_bytes(b"instrument capture stream")
+    stream = run("blob", "stream.txt")
+    manifest = [{"id": stream, "access": capabilities["public"], "file": "stream.txt"}]
+    (directory / "members.json").write_text(json.dumps(manifest), encoding="utf-8")
+    origin = ["--db", "origin.sqlite", "custody"]
+    receiver = ["--db", "receiver.sqlite", "custody"]
+    first = run(*origin, "append", "lab", "members.json")["head"]
+    captured = run(*origin, "capture", "lab", stream, "Messung µ.txt", "--parent", first)
+    tip = captured["head"]
+    subprocess.run([nao, *origin, "share", tip], cwd=directory, check=True, timeout=60)
+    run(*origin, "export-step", tip, "first.frame")
+    assert run(*receiver, "import-step", tip, "first.frame")["head"] == first
+    transfer = run(*receiver, "pull", "origin.sqlite", tip)
+    assert transfer["complete"] and transfer["batches"] == 1
+    subprocess.run([nao, *receiver, "range", tip, stream, "0", str(len(reading)), "range.bin"],
+                   cwd=directory, check=True, timeout=60)
+    assert (directory / "range.bin").read_bytes() == reading
+    (directory / "sources.json").write_text(json.dumps([{"head": tip, "db": "receiver.sqlite"}]))
+    result = run(*receiver, "review", "sources.json", object_id, "--corrections", "--receipt")
+    assert result["report"]["standing"] == "outside"
+    assert run(*receiver, "receipt", result["receipt"])["heads"] == [tip]
+
+    source_bytes = (directory / "evidence.sqlite").read_bytes()
+    run("migrate-archive", "evidence.sqlite", "converted.sqlite")
+    assert (directory / "evidence.sqlite").read_bytes() == source_bytes
+    assert run("--db", "converted.sqlite", "migrated-head", head) == head
+
+    key_directory = directory / "key check"
+    key_directory.mkdir()
+    if os.name == "nt":
+        subprocess.run(["icacls", str(key_directory), "/grant", "*S-1-1-0:(OI)(CI)R"], check=True)
+    seed = key_directory / "signing seed"
+    run("keygen", str(seed))
+    if os.name == "nt":
+        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", """
+            $ErrorActionPreference = 'Stop'
+            $acl = Get-Acl -LiteralPath $env:NAO_KEY_CHECK_PATH
+            $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+            $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+            if (-not $acl.AreAccessRulesProtected -or $rules.Count -ne 1 -or
+                $rules[0].IdentityReference -ne $sid -or $rules[0].IsInherited -or
+                $rules[0].AccessControlType -ne 'Allow' -or
+                $rules[0].FileSystemRights -ne 'FullControl') { throw 'Unexpected key permissions' }
+        """], env={**os.environ, "NAO_KEY_CHECK_PATH": str(seed)}, check=True)
+    elif seed.stat().st_mode & 0o077:
+        raise ValueError("group or other permissions on signing seed")
+    if seed.stat().st_size != 32:
         raise ValueError("key generation did not write a 32-byte seed")
-    print(f"Verified {nao.name}: published profiles, both exchange formats, and key generation")
+    print(f"Verified {nao.name}: published profiles, archive exchange, custody transfer and review, and key generation")
 
 
 def package(target, model):
@@ -63,7 +116,8 @@ def package(target, model):
     if host != target:
         raise ValueError(f"expected a native {target} runner, found {host}")
     with (ROOT / "Cargo.toml").open("rb") as manifest:
-        version = tomllib.load(manifest)["package"]["version"]
+        metadata = tomllib.load(manifest)["package"]
+    version = metadata["version"]
     name = "nao.exe" if os.name == "nt" else "nao"
     archive_format = "zip" if os.name == "nt" else "gztar"
     target_directory = ROOT / "target"
@@ -77,6 +131,12 @@ def package(target, model):
         shutil.copy2(build_directory / "release" / name, staging)
         for path in [ROOT / "LICENSE", ROOT / "README.md", *ROOT.glob("requirements-search*.txt")]:
             shutil.copy2(path, staging)
+        for pattern in metadata["include"]:
+            if pattern.startswith("spec/"):
+                for path in ROOT.glob(pattern):
+                    destination = staging / path.relative_to(ROOT)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, destination)
 
         package_path = Path(shutil.make_archive(
             str(root / f"nao-v{version}-{target}"), archive_format, root_dir=staging

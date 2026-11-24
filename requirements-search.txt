@@ -1,4 +1,5 @@
 -r requirements-search-torch.txt
+setuptools==84.2.1
 transformers==5.24.0
 sentence-transformers==6.3.0
 huggingface-hub==1.33.0

@@ -240,10 +240,14 @@ impl Document {
         }
     }
 
+    /// A declared outcome includes the payload blocks of an ordered chunk descriptor.
     pub(crate) fn outcome_inputs(&self) -> impl Iterator<Item = Id> + '_ {
         self.inputs
             .iter()
-            .filter(|link| self.dependency_role(link) == DependencyRole::Outcome)
+            .filter(move |link| {
+                self.dependency_role(link) == DependencyRole::Outcome
+                    || (self.is_chunk_descriptor() && link.role == "chunk")
+            })
             .map(|link| link.target)
     }
 
