@@ -20,6 +20,47 @@ PUBLISHED_PROFILES = {
 }
 
 
+def transfer_paged(run, head, prefix, receiver, *, sender=None, limit=16):
+    origin = ["--db", sender] if sender else []
+    receive = ["--db", receiver, "import"]
+    pin = ["--paged", "--expected-head", head]
+    cursor = None
+    for index in range(64):
+        page = f"{prefix}-{index}.json"
+        after = ["--after", cursor] if cursor else []
+        sent = run(*origin, "export", head, page, "--paged", "--limit", str(limit), *after)
+        accepted = run(*receive, page, *pin)
+        if accepted != sent:
+            raise ValueError("receiver acknowledged a different exchange range")
+        if index == 1:
+            retry = run(*receive, f"{prefix}-0.json", *pin)
+            if (retry["complete"], retry["continuation"]) != (accepted["complete"], accepted["continuation"]):
+                raise ValueError("repeated delivery changed the exchange checkpoint")
+        if accepted["complete"]:
+            return
+        cursor = accepted["continuation"]
+    raise ValueError("paged transfer never completed")
+
+
+def verify_research_handoff(run):
+    study = run("trial", "research trial")
+    fixture = study["fixture"]
+    origin = Path("research trial") / "east.sqlite"
+    receiver = "research receiver.sqlite"
+    initial = fixture["published"]
+    transfer_paged(run, initial, "initial-research", receiver, sender=origin)
+    replay = ["--db", receiver, "label", initial, fixture["receipts"][2], "synthetic"]
+    if run(*replay) != fixture["labels"][2]:
+        raise ValueError("received archive did not replay the historical receipt")
+
+    current = run("--db", origin, "snapshot", "release correction review")
+    transfer_paged(run, current, "corrected-research", receiver, sender=origin)
+    impact = run("--db", receiver, "impact", current, study["N"], "--mapping", study["mapping"])
+    affected = {item for ids in impact["by_kind"].values() for item in ids}
+    if not set(fixture["labels"]) <= affected or run(*replay) != fixture["labels"][2]:
+        raise ValueError("received correction did not route original labels while preserving replay")
+
+
 def verify(nao, directory, version):
     readme = (directory / "README.md").read_text(encoding="utf-8")
     for link in re.findall(r"\]\((spec/[^)]+)\)", readme):
@@ -63,24 +104,7 @@ def verify(nao, directory, version):
     retired = run("blob", "README.md")
     transfer_head = run("snapshot", "paged release qualification", "--root", object_id, "--root", retired)
     subprocess.run([nao, "withdraw", retired], cwd=directory, check=True, timeout=60)
-    receive = ["--db", "continued receiver.sqlite", "import"]
-    pin = ["--paged", "--expected-head", transfer_head]
-    cursor = None
-    for index in range(8):
-        page = f"transfer-{index}.json"
-        after = ["--after", cursor] if cursor else []
-        sent = run("export", transfer_head, page, "--paged", "--limit", "1", *after)
-        accepted = run(*receive, page, *pin)
-        if accepted != sent:
-            raise ValueError("receiver acknowledged a different exchange range")
-        retry = run(*receive, "transfer-0.json", *pin)
-        if retry["complete"] != accepted["complete"] or retry["continuation"] != accepted["continuation"]:
-            raise ValueError("repeated delivery changed the exchange checkpoint")
-        if accepted["complete"]:
-            break
-        cursor = accepted["continuation"]
-    else:
-        raise ValueError("paged transfer never completed")
+    transfer_paged(run, transfer_head, "transfer", "continued receiver.sqlite", limit=1)
     subprocess.run([nao, "--db", "continued receiver.sqlite", "resolve", transfer_head, object_id,
                     "continued-reading.txt"], cwd=directory, check=True, timeout=60)
     if (directory / "continued-reading.txt").read_bytes() != reading:
@@ -90,9 +114,7 @@ def verify(nao, directory, version):
     if unavailable.returncode == 0 or b"unavailable" not in unavailable.stderr:
         raise ValueError("finished inventory incorrectly supplied withdrawn evidence")
 
-    study = run("trial", "research trial")
-    if not {"historic replay", "correction impact"} <= set(study["verified"]):
-        raise ValueError("research trial omitted replay or correction checks")
+    verify_research_handoff(run)
 
     (directory / "stream.txt").write_bytes(b"instrument capture stream")
     stream = run("blob", "stream.txt")
