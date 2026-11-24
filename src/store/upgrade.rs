@@ -41,6 +41,18 @@ impl Archive {
         Ok(usize::try_from(n)?)
     }
     pub(super) fn upgrade_catalog(&self) -> Result<()> {
+        let old_exchange: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='archive_exchange_progress')",
+            [],
+            |row| row.get(0),
+        )?;
+        if old_exchange {
+            self.db.execute_batch(
+                "INSERT OR IGNORE INTO archive_exchange_sessions(head,verified,cursor,seen,complete)
+                 SELECT head,0,cursor,seen,complete FROM archive_exchange_progress;
+                 DROP TABLE archive_exchange_progress;",
+            )?;
+        }
         if self.db.execute(
             "INSERT OR IGNORE INTO custody_withdrawal_state VALUES(1)",
             [],

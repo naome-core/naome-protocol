@@ -34,3 +34,11 @@ BEGIN INSERT OR IGNORE INTO custody_withdrawal_log(object) VALUES(NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS custody_log_absence AFTER INSERT ON objects WHEN NEW.data IS NULL
 BEGIN INSERT OR IGNORE INTO custody_withdrawal_log(object) VALUES(NEW.id); END;
 CREATE TABLE IF NOT EXISTS archive_member_access(head TEXT NOT NULL,member TEXT NOT NULL,access TEXT NOT NULL,PRIMARY KEY(head,member)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_exchange_sessions(
+    head TEXT NOT NULL, verified INTEGER NOT NULL, cursor TEXT, seen INTEGER NOT NULL,
+    complete INTEGER NOT NULL, descriptor BLOB, PRIMARY KEY(head,verified)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_exchange_packets(
+    head TEXT NOT NULL, verified INTEGER NOT NULL, id TEXT NOT NULL, access TEXT NOT NULL,
+    data BLOB NOT NULL, PRIMARY KEY(head,verified,id)
+) WITHOUT ROWID;

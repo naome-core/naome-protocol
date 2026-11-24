@@ -119,12 +119,21 @@ fn stream_budget_commits_the_complete_input_or_nothing() -> Result<()> {
 #[test]
 fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -> Result<()> {
     use super::ExchangePage;
-    use crate::{profile::PUBLIC, store::Archive, wire::Id};
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::Archive,
+        wire::Id,
+    };
     let origin = Archive::memory()?;
     let public = Id::blob(PUBLIC);
     let mut readings = Vec::new();
     for ordinal in 0..75u32 {
-        readings.push(origin.blob(&ordinal.to_be_bytes(), public)?);
+        let access = if ordinal == 1 {
+            Id::blob(READ_ONLY)
+        } else {
+            public
+        };
+        readings.push(origin.blob(&ordinal.to_be_bytes(), access)?);
     }
     let snapshot = origin.snapshot("paged read", Default::default())?;
     let head = snapshot.id()?;
@@ -139,13 +148,20 @@ fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -
     let first = fetch(None)?;
     let next = fetch(first.progress().continuation)?;
     let mut receiver = Archive::open(&path)?;
+    assert!(
+        receiver
+            .import_pinned_exchange_page(Id::blob(b"other snapshot"), &first)
+            .is_err()
+    );
     assert!(receiver.import_exchange_page(&next).is_err());
     assert!(receiver.head(head).is_err());
-    let initial = receiver.import_exchange_page(&first)?;
+    let initial = receiver.import_pinned_exchange_page(head, &first)?;
     assert_eq!(initial.continuation, first.progress().continuation);
     assert!(receiver.head(head).is_err());
     drop(receiver);
     let mut receiver = Archive::open(&path)?;
+    let local = receiver.snapshot("local research", Default::default())?;
+    assert!(readings.iter().all(|id| !local.objects.contains(id)));
     let mut progress = receiver.import_exchange_page(&next)?;
     assert_eq!(
         receiver.import_exchange_page(&first)?.continuation,
@@ -158,6 +174,15 @@ fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -
     assert!(receiver.import_exchange_page(&next)?.complete);
     assert!(progress.continuation.is_none());
     assert_eq!(receiver.head(head)?.objects, snapshot.objects);
+    assert!(receiver.resolve_head(head, readings[1], "train").is_err());
+    let mut relay = Archive::memory()?;
+    let forwarded = receiver.export_exchange_page(head, None, 6)?;
+    assert_eq!(
+        relay
+            .import_pinned_exchange_page(head, &forwarded)?
+            .continuation,
+        first.progress().continuation
+    );
     for (ordinal, id) in readings.into_iter().enumerate() {
         if id == withheld {
             assert!(receiver.resolve_head(head, id, "read").is_err());
@@ -168,6 +193,50 @@ fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn historical_ranges_require_trusted_compatibility_mode() -> Result<()> {
+    use crate::{profile::PUBLIC, store::Archive, wire::Id};
+    let source = Archive::memory()?;
+    let reading = source.blob(b"historical reading", Id::blob(PUBLIC))?;
+    let snapshot =
+        source.selected_snapshot("historic sender", Default::default(), [reading].into())?;
+    let head = snapshot.id()?;
+    let mut receiver = Archive::memory()?;
+    let first = source.export_legacy_exchange_page(head, None, 1)?;
+    assert!(receiver.import_pinned_exchange_page(head, &first).is_err());
+    let progress = receiver.import_legacy_exchange_page(head, &first)?;
+    assert!(!progress.complete);
+    let next = source.export_legacy_exchange_page(head, progress.continuation, 1)?;
+    assert!(receiver.import_legacy_exchange_page(head, &next)?.complete);
+    assert_eq!(
+        receiver.resolve_head(head, reading, "read")?,
+        b"historical reading"
+    );
+    Ok(())
+}
+
+#[test]
+fn custody_witness_distinguishes_read_only_and_public_evidence() -> Result<()> {
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::{Archive, custody::tree::Tree},
+        wire::Id,
+    };
+    let archive = Archive::memory()?;
+    let read_only = Id::blob(READ_ONLY);
+    let reading = archive.blob(b"permitted for reading", read_only)?;
+    let snapshot =
+        archive.selected_snapshot("access check", Default::default(), [reading].into())?;
+    let descriptor = archive.custody_head(snapshot.id()?)?;
+    let mut tree = Tree::new(&archive.db);
+    super::page::verify_access(&descriptor, reading, read_only, |id| tree.read(id))?;
+    assert!(
+        super::page::verify_access(&descriptor, reading, Id::blob(PUBLIC), |id| tree.read(id))
+            .is_err()
+    );
     Ok(())
 }
 

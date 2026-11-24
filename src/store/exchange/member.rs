@@ -72,6 +72,14 @@ pub(super) fn path(
     anyhow::bail!("membership proof depth limit")
 }
 
+pub(super) fn committed_access(
+    head: &Head,
+    member: Id,
+    load: impl FnMut(Id) -> Result<Page>,
+) -> Result<Id> {
+    path(head.tree, &format!("o/{member}"), load)
+}
+
 impl MemberProof {
     pub fn requested(&self) -> Result<&[Id]> {
         match (self.version, &self.member, &self.members) {
@@ -140,7 +148,7 @@ impl Archive {
                     path(h.inventory, &key.to_string(), &mut load)? == key,
                     "invalid inventory membership"
                 );
-                let access = path(h.tree, &format!("o/{key}"), &mut load)?;
+                let access = committed_access(&h, key, &mut load)?;
                 let bytes = self.custody_resolve(head, key, "read")?;
                 if let Some(record) = validate(key, &bytes, access)? {
                     pending.push(record.profile);
@@ -202,15 +210,15 @@ impl Archive {
             };
             ensure!(
                 path(h.inventory, &p.id.to_string(), &mut load)? == p.id
-                    && path(h.tree, &format!("o/{}", p.id), &mut load)? == p.access,
+                    && committed_access(h, p.id, &mut load)? == p.access,
                 "unbound packet"
             );
             ensure!(p.hex.len() <= 2 * MAX_BYTES, "oversized member");
             remaining = remaining
                 .checked_sub(p.hex.len())
                 .context("member proof byte limit")?;
-            let bytes = hex::decode(&p.hex)?;
-            if let Some(r) = validate(p.id, &bytes, p.access)? {
+            let mut bytes = Vec::new();
+            if let Some(r) = p.decode(&mut bytes)? {
                 ensure!(
                     requested.binary_search(&p.id).is_ok(),
                     "unexpected additional record"

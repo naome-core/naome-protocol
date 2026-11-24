@@ -118,16 +118,27 @@ impl Archive {
     }
 
     pub fn custody_head(&self, id: Id) -> Result<Head> {
-        let data = self.custody_head_bytes(id)?;
-        let h: Head = serde_json::from_slice(&data)?;
-        h.manifest()?.verify(id)?;
-        Ok(h)
+        self.custody_head_if_present(id)?
+            .context("unadmitted paged head")
     }
-    fn custody_head_bytes(&self, id: Id) -> Result<Vec<u8>> {
+    pub(super) fn custody_head_if_present(&self, id: Id) -> Result<Option<Head>> {
+        self.custody_head_data(id)?
+            .map(|data| {
+                let h: Head = serde_json::from_slice(&data)?;
+                h.manifest()?.verify(id)?;
+                Ok(h)
+            })
+            .transpose()
+    }
+    fn custody_head_data(&self, id: Id) -> Result<Option<Vec<u8>>> {
         self.db
             .prepare_cached("SELECT data FROM custody_heads WHERE id=?")?
             .query_row([id.to_string()], |r| r.get(0))
-            .context("unadmitted paged head")
+            .optional()
+            .map_err(Into::into)
+    }
+    fn custody_head_bytes(&self, id: Id) -> Result<Vec<u8>> {
+        self.custody_head_data(id)?.context("unadmitted paged head")
     }
 
     /// Independently authored children of the same parent each retain an addressable head.

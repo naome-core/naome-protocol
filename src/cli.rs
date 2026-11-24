@@ -65,7 +65,7 @@ pub enum ArchiveCommand {
     },
     /// Create or open a custody database.
     Init,
-    /// Release a complete, readable inventory to the configured replicas.
+    /// Register a complete, readable inventory in the local replica release catalog.
     Publish { head: Id },
     /// List the complete inventories available for replication.
     Heads,
@@ -199,6 +199,9 @@ pub enum ArchiveCommand {
         /// Send the next read-only range with witnesses shared across acknowledged pages.
         #[arg(long, conflicts_with = "stream")]
         paged: bool,
+        /// Write a page for v0.1.8 recipients, without custody access witnesses.
+        #[arg(long, requires = "paged")]
+        legacy_page: bool,
         /// Write the inventory once, followed by an ordered stream of packets.
         #[arg(long, conflicts_with_all = ["after", "limit"])]
         stream: bool,
@@ -206,12 +209,18 @@ pub enum ArchiveCommand {
         #[arg(long, default_value = "read")]
         purpose: String,
     },
-    /// Verify and reconcile an exchange file atomically.
+    /// Verify an exchange file and commit it to the archive.
     Import {
         file: PathBuf,
-        /// Accept the next verified range from a paged read exchange.
+        /// Stage the next range and publish the inventory after the final range.
         #[arg(long, conflicts_with_all = ["stream", "member_head"])]
         paged: bool,
+        /// Accept a v0.1.8 page without custody access witnesses from a trusted sender.
+        #[arg(long, requires = "paged")]
+        legacy_page: bool,
+        /// Independently obtained snapshot ID for a paged read exchange.
+        #[arg(long, requires = "paged")]
+        expected_head: Option<Id>,
         /// Interpret a point disclosure against this independently obtained head.
         #[arg(long, conflicts_with = "stream")]
         member_head: Option<Id>,
@@ -594,12 +603,18 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             limit,
             stream,
             paged,
+            legacy_page,
         } => {
             let db = reader()?;
             let head = db.current_head_id(head)?;
             if paged {
                 ensure!(purpose == "read", "incremental pages require read purpose");
-                let page = db.export_exchange_page(head, after, limit.unwrap_or(64))?;
+                let limit = limit.unwrap_or(64);
+                let page = if legacy_page {
+                    db.export_legacy_exchange_page(head, after, limit)?
+                } else {
+                    db.export_exchange_page(head, after, limit)?
+                };
                 output_json(&path, &page)?;
                 return print(page.progress());
             }
@@ -641,12 +656,20 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             max_bytes,
             paged,
             member_head,
+            legacy_page,
+            expected_head,
         } => {
             let mut db = open()?;
             let file = File::open(file)?;
             if paged {
                 let page = crate::store::ExchangePage::read(file)?;
-                return print(db.import_exchange_page(&page)?);
+                let head = expected_head.unwrap_or_else(|| page.progress().head);
+                let progress = if legacy_page {
+                    db.import_legacy_exchange_page(head, &page)?
+                } else {
+                    db.import_pinned_exchange_page(head, &page)?
+                };
+                return print(progress);
             }
             if let Some(head) = member_head {
                 let ids = db.import_members(head, &crate::store::MemberProof::read(file)?)?;

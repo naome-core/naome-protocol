@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     profile::allows,
-    wire::{Id, MAX_BYTES},
+    wire::{Id, MAX_BYTES, Record},
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::Connection;
@@ -32,6 +32,14 @@ pub struct Packet {
     pub id: Id,
     pub access: Id,
     pub hex: String,
+}
+
+impl Packet {
+    fn decode(&self, bytes: &mut Vec<u8>) -> Result<Option<Record>> {
+        ensure!(self.hex.len() <= 2 * MAX_BYTES, "oversized packet");
+        decode_packet_hex(&self.hex, bytes)?;
+        validate(self.id, bytes, self.access)
+    }
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(try_from = "WireBundle")]
@@ -331,9 +339,7 @@ impl Archive {
 }
 
 fn add_packet(db: &Connection, packet: &Packet, bytes: &mut Vec<u8>) -> Result<()> {
-    ensure!(packet.hex.len() <= 2 * MAX_BYTES, "oversized packet");
-    decode_packet_hex(&packet.hex, bytes)?;
-    validate(packet.id, bytes, packet.access)?;
+    packet.decode(bytes)?;
     insert(db, packet.id, bytes, packet.access)?;
     Ok(())
 }
