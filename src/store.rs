@@ -67,27 +67,25 @@ impl Archive {
         }
         Self::init(Connection::open(path)?)
     }
-    /// Open a current archive without taking a writer lock. Older or new archives still
-    /// initialize through the transactional upgrade path.
+    /// Open an existing, current archive without initialization or migration.
     pub fn open_for_read(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        if path.is_file() {
-            let reader = Self::custody_reader(path)?;
-            let current: bool = reader.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='archive_member_access' AND type='table')",
-                [], |r| r.get(0),
-            )?;
-            if current
-                && reader
-                    .db
-                    .query_row("SELECT EXISTS(SELECT 1 FROM archive_layout)", [], |r| {
-                        r.get::<_, bool>(0)
-                    })?
-            {
-                return Ok(reader);
-            }
-        }
-        Self::open(path)
+        let reader = Self::custody_reader(path)?;
+        let has_layout: bool = reader.db.query_row(
+            "SELECT count(*)=2 FROM sqlite_schema
+             WHERE type='table' AND name IN ('archive_layout','archive_member_access')",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            has_layout
+                && reader.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM archive_layout)",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )?,
+            "archive needs initialization or upgrade; use nao init or nao migrate-archive"
+        );
+        Ok(reader)
     }
     pub fn memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)

@@ -523,6 +523,42 @@ fn flat_head(
 }
 
 #[test]
+fn read_commands_preserve_legacy_and_missing_archives() -> Result<()> {
+    use std::process::Command;
+
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join("old.sqlite");
+    let missing = dir.path().join("missing.sqlite");
+    let destination = dir.path().join("upgraded.sqlite");
+    let output = dir.path().join("export.json");
+    let old = flat_archive(&source)?;
+    let (head, _) = flat_head(&old, "legacy", &BTreeSet::new(), &[Id::blob(PUBLIC)].into())?;
+    drop(old);
+    let original = fs::read(&source)?;
+
+    let export = |archive: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_nao"))
+            .arg("--db")
+            .arg(archive)
+            .arg("export")
+            .arg(head.to_string())
+            .arg(&output)
+            .output()
+    };
+    let result = export(&source)?;
+    assert!(!result.status.success());
+    assert!(String::from_utf8(result.stderr)?.contains("nao migrate-archive"));
+    assert_eq!(fs::read(&source)?, original);
+    assert!(!export(&missing)?.status.success());
+    assert!(!missing.exists() && !output.exists());
+
+    Archive::migrate_archive_file(&source, &destination)?;
+    assert!(export(&destination)?.status.success());
+    assert_eq!(fs::read(&source)?, original);
+    Ok(())
+}
+
+#[test]
 fn migration_preserves_a_flat_review_with_more_than_64_parents() -> Result<()> {
     use naome_protocol::store::sharing::MAX_MANIFEST_PARENTS;
 
