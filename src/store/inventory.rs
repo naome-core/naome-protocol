@@ -1,4 +1,5 @@
 //! Public snapshot commitment. The custody proof can travel separately from its inventory.
+pub(super) mod witness;
 use crate::wire::Id;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,15 @@ pub struct Manifest {
     pub custody: Id,
 }
 impl Manifest {
+    /// A disclosed blob can name a historical inventory only under its canonical head ID.
+    pub(super) fn from_packet(id: Id, bytes: &[u8]) -> Option<Self> {
+        if id.blob_digest().is_none() || bytes.len() > 32768 {
+            return None;
+        }
+        let manifest: Self = serde_json::from_slice(bytes).ok()?;
+        manifest.verify(id).ok()?;
+        Some(manifest)
+    }
     pub fn bytes(&self) -> Result<Vec<u8>> {
         Ok(serde_json::to_vec(self)?)
     }
@@ -98,9 +108,18 @@ impl Manifest {
         &self,
         db: &Connection,
         after: Option<Id>,
-        mut member: impl FnMut(Id) -> Result<bool>,
+        member: impl FnMut(Id) -> Result<bool>,
     ) -> Result<bool> {
         let mut tree = Tree::new(db);
+        self.scan_with(after, |id| tree.read(id), member)
+    }
+
+    pub(in crate::store) fn scan_with(
+        &self,
+        after: Option<Id>,
+        mut page: impl FnMut(Id) -> Result<Page>,
+        mut member: impl FnMut(Id) -> Result<bool>,
+    ) -> Result<bool> {
         let cursor = after.map(|id| id.to_string());
         visit(
             self.inventory,
@@ -108,7 +127,7 @@ impl Manifest {
             None,
             None,
             cursor.as_deref(),
-            &mut |id| tree.read(id),
+            &mut page,
             &mut member,
         )
     }
@@ -172,15 +191,23 @@ impl Manifest {
     }
 }
 pub(super) fn install(db: &Connection, pages: &Pages) -> Result<()> {
-    for (id, page) in pages {
-        let bytes = serde_json::to_vec(page)?;
-        ensure!(bytes.len() <= 16384, "oversized witness page");
-        id.verify(&bytes)?;
-        db.prepare_cached("INSERT OR IGNORE INTO custody_pages VALUES(?,?)")?
-            .execute(params![
-                id.to_string(),
-                super::custody::tree::encode_page(bytes)
-            ])?;
+    for (&id, page) in pages {
+        install_page(db, id, page)?;
     }
+    Ok(())
+}
+
+pub(super) fn install_page(db: &Connection, id: Id, page: &Page) -> Result<()> {
+    let bytes = serde_json::to_vec(page)?;
+    ensure!(
+        bytes.len() <= 16384 && id.blob_digest().is_some(),
+        "invalid witness page"
+    );
+    id.verify(&bytes)?;
+    db.prepare_cached("INSERT OR IGNORE INTO custody_pages VALUES(?,?)")?
+        .execute(params![
+            id.to_string(),
+            super::custody::tree::encode_page(bytes)
+        ])?;
     Ok(())
 }

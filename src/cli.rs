@@ -1,5 +1,7 @@
 mod custody;
 mod search;
+#[cfg(windows)]
+mod windows_key;
 pub use search::{FindArguments, LocalSearch, PrepareSearchArguments, SearchRequest};
 
 use crate::{
@@ -187,12 +189,15 @@ pub enum ArchiveCommand {
     Export {
         head: Id,
         /// Disclose selected readable objects with shared membership and access proofs. Repeat for multiple IDs.
-        #[arg(long,conflicts_with_all=["after","limit","stream"])]
+        #[arg(long,conflicts_with_all=["after","limit","stream","paged"])]
         member: Vec<Id>,
         #[arg(long)]
         after: Option<Id>,
         #[arg(long)]
         limit: Option<usize>,
+        /// Send the next read-only range with witnesses shared across acknowledged pages.
+        #[arg(long, conflicts_with = "stream")]
+        paged: bool,
         /// Write the inventory once, followed by an ordered stream of packets.
         #[arg(long, conflicts_with_all = ["after", "limit"])]
         stream: bool,
@@ -203,9 +208,15 @@ pub enum ArchiveCommand {
     /// Verify and reconcile an exchange file atomically.
     Import {
         file: PathBuf,
+        /// Accept the next verified range from a paged read exchange.
+        #[arg(long, conflicts_with_all = ["stream", "member_head"])]
+        paged: bool,
         /// Interpret a point disclosure against this independently obtained head.
         #[arg(long, conflicts_with = "stream")]
         member_head: Option<Id>,
+        /// Maximum stream input in bytes, including metadata (default 256 MiB).
+        #[arg(long, requires = "stream")]
+        max_bytes: Option<u64>,
         /// Read the streaming exchange format.
         #[arg(long)]
         stream: bool,
@@ -394,6 +405,9 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             getrandom::fill(&mut seed)
                 .map_err(|e| anyhow::anyhow!("operating system randomness: {e}"))?;
             let key = SigningKey::from_bytes(&seed);
+            #[cfg(windows)]
+            windows_key::publish_seed(&path, &seed)?;
+            #[cfg(not(windows))]
             output(&path, &seed)?;
             print(hex::encode(key.verifying_key().to_bytes()))
         }
@@ -578,9 +592,16 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             after,
             limit,
             stream,
+            paged,
         } => {
             let db = reader()?;
             let head = db.current_head_id(head)?;
+            if paged {
+                ensure!(purpose == "read", "incremental pages require read purpose");
+                let page = db.export_exchange_page(head, after, limit.unwrap_or(64))?;
+                output_json(&path, &page)?;
+                return print(page.progress());
+            }
             if !member.is_empty() {
                 ensure!(
                     purpose == "read",
@@ -616,10 +637,16 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         ArchiveCommand::Import {
             file,
             stream,
+            max_bytes,
+            paged,
             member_head,
         } => {
             let mut db = open()?;
             let file = File::open(file)?;
+            if paged {
+                let page = crate::store::ExchangePage::read(file)?;
+                return print(db.import_exchange_page(&page)?);
+            }
             if let Some(head) = member_head {
                 let ids = db.import_members(head, &crate::store::MemberProof::read(file)?)?;
                 match ids.as_slice() {
@@ -627,7 +654,12 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                     _ => print(ids),
                 }
             } else if stream {
-                print(db.import_stream(BufReader::new(file))?)
+                let limit = max_bytes.unwrap_or(256 * 1024 * 1024);
+                ensure!(
+                    file.metadata()?.len() <= limit,
+                    "stream exceeds receiver byte limit"
+                );
+                print(db.import_stream_with_limit(BufReader::new(file), limit)?)
             } else {
                 print(db.import(&Bundle::read(file)?)?)
             }

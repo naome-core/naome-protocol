@@ -1,7 +1,7 @@
 //! Offline inventory packets and atomic import into a custody archive.
 use super::{
     Archive, Manifest, Snapshot, insert,
-    inventory::{self, Pages},
+    inventory::{self, Pages, witness::Witnesses},
     snapshot::save_imported_head,
     validate,
 };
@@ -18,6 +18,8 @@ use std::{
 };
 
 mod member;
+mod page;
+pub use page::{ExchangePage, ExchangeProgress};
 mod stream;
 pub use member::MemberProof;
 
@@ -238,7 +240,7 @@ impl Archive {
         }
         let mut pages = s.pages.clone();
         for p in &packets {
-            self.collect_linked_pages(p, &mut pages, &mut used)?;
+            self.collect_linked_pages(p, &mut pages, &mut used, 255 * 1024 * 1024)?;
         }
         Ok(Bundle {
             pages,
@@ -254,6 +256,7 @@ impl Archive {
         packet: &Packet,
         pages: &mut Pages,
         used: &mut usize,
+        limit: usize,
     ) -> Result<()> {
         if packet.id.format().is_some() {
             return Ok(());
@@ -262,7 +265,7 @@ impl Archive {
         if packet.hex.len() > 65536 {
             return Ok(());
         }
-        let Ok(manifest) = serde_json::from_slice::<Manifest>(&hex::decode(&packet.hex)?) else {
+        let Some(manifest) = Manifest::from_packet(packet.id, &hex::decode(&packet.hex)?) else {
             return Ok(());
         };
         let mut tree = super::custody::tree::Tree::new(&self.db);
@@ -273,7 +276,7 @@ impl Archive {
                     if let std::collections::btree_map::Entry::Vacant(slot) = pages.entry(id) {
                         *used += serde_json::to_vec(&p)?.len() + 96;
                         ensure!(
-                            *used <= 255 * 1024 * 1024,
+                            *used <= limit,
                             "exchange witnesses exceed JSON budget; use stream export"
                         );
                         slot.insert(p.clone());
@@ -300,19 +303,27 @@ impl Archive {
     pub fn import(&mut self, b: &Bundle) -> Result<Id> {
         b.verify_inventory()?;
         let tx = self.db.unchecked_transaction()?;
-        inventory::install(&tx, &b.pages)?;
+        let witnesses = Witnesses::begin(&tx)?;
+        for (&id, page) in &b.pages {
+            witnesses.install(id, page)?;
+        }
+        if let Some(m) = &b.snapshot.manifest {
+            witnesses.walk(m)?;
+        }
         let mut bytes = Vec::new();
         for p in &b.packets {
             add_packet(&tx, p, &mut bytes)?;
+            witnesses.link(p.id, &bytes)?;
         }
-        let head = if b.snapshot.manifest.is_none() {
+        witnesses.finish()?;
+        let head = if b.snapshot.manifest.is_some() {
+            save_imported_head(&tx, b.head, &b.snapshot)?;
+            b.head
+        } else {
             if self.current_head_id(b.head)? == b.head {
                 save_imported_head(&tx, b.head, &b.snapshot)?;
             }
             self.convert_archived(b.head, &b.snapshot)?
-        } else {
-            save_imported_head(&tx, b.head, &b.snapshot)?;
-            b.head
         };
         tx.commit()?;
         Ok(head)

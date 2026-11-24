@@ -188,7 +188,9 @@ impl Archive {
         let mut references = BTreeSet::new();
         let mut pack = Vec::new();
         let mut slots = Vec::new();
-        let mut total = 0;
+        // The wire budget covers submitted bytes. Genesis derives its bootstrap locally.
+        let total: usize = items.iter().map(|item| item.bytes.len()).sum();
+        ensure!(items.len() == 1 || total <= BATCH_BYTES, "paged byte limit");
         let mut edges = 0_usize;
         let public = Id::blob(PUBLIC);
         let read_only = Id::blob(READ_ONLY);
@@ -216,12 +218,6 @@ impl Archive {
                 position: slot,
                 absent,
             } = item.member;
-            total += item.bytes.len();
-            ensure!(
-                item.bytes.len() <= crate::wire::MAX_BYTES
-                    && (total <= BATCH_BYTES || items.len() == 1),
-                "paged byte limit"
-            );
             if absent {
                 ensure!(
                     item.bytes.is_empty() && slot.is_none(),
@@ -413,7 +409,13 @@ impl Archive {
     fn custody_raw(&self, id: Id) -> Result<(Vec<u8>, Id)> {
         self.raw(id)?.context("unavailable archive member")
     }
-    fn read_member(&self, tree: &mut Tree<'_>, h: &Head, id: Id, purpose: &str) -> Result<Vec<u8>> {
+    fn read_member(
+        &self,
+        tree: &mut Tree<'_>,
+        h: &Head,
+        id: Id,
+        purpose: &str,
+    ) -> Result<(Vec<u8>, Id)> {
         let access = tree
             .get(h.tree, &object(id))?
             .context("outside inventory")?;
@@ -424,7 +426,16 @@ impl Archive {
         self.check_access(access, |p| allows(p, purpose))?;
         let (data, actual) = self.custody_raw(id)?;
         ensure!(actual == access, "inconsistent custody descriptor");
-        Ok(data)
+        Ok((data, access))
+    }
+    /// Read permission and policy of the stream descriptor used for new measurement blocks.
+    pub fn custody_stream_access(&self, head: Id, stream: Id) -> Result<Id> {
+        self.with_read_view(|| {
+            let h = self.custody_head(head)?;
+            let mut tree = Tree::new(&self.db);
+            let (_, access) = self.read_member(&mut tree, &h, stream, "read")?;
+            Ok(access)
+        })
     }
     pub fn custody_resolve(&self, head: Id, id: Id, purpose: &str) -> Result<Vec<u8>> {
         Ok(self.custody_resolve_counted(head, id, purpose)?.0)
@@ -437,7 +448,7 @@ impl Archive {
     ) -> Result<(Vec<u8>, PageIo)> {
         self.with_read_view(|| {
             let mut tree = Tree::new(&self.db);
-            let bytes = self.read_member(&mut tree, &self.custody_head(head)?, id, purpose)?;
+            let (bytes, _) = self.read_member(&mut tree, &self.custody_head(head)?, id, purpose)?;
             Ok((bytes, tree.io))
         })
     }
@@ -458,7 +469,7 @@ impl Archive {
                 let id = tree
                     .get(h.tree, &position(&slot))?
                     .context("unavailable raw block")?;
-                let data = self.read_member(&mut tree, &h, id, "read")?;
+                let (data, _) = self.read_member(&mut tree, &h, id, "read")?;
                 let start = (cursor % BLOCK as u64) as usize;
                 let n = (BLOCK - start).min((end - cursor) as usize);
                 out.extend_from_slice(

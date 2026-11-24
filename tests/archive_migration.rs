@@ -331,6 +331,8 @@ fn cli_captures_sixteen_blocks_in_one_child_and_exchanges_a_single_member() -> R
             "lab",
             "--file",
             "stream",
+            "--access",
+            &Id::blob(READ_ONLY).to_string(),
             "--expected",
             &stream.to_string(),
         ],
@@ -357,6 +359,11 @@ fn cli_captures_sixteen_blocks_in_one_child_and_exchanges_a_single_member() -> R
     let h = db.custody_head(head.parse()?)?;
     assert_eq!(h.parent, Some(parent.parse()?));
     assert_eq!(h.delta.len(), 16);
+    assert!(h.delta.iter().all(|m| m.access == Id::blob(READ_ONLY)));
+    assert!(
+        db.custody_resolve(head.parse()?, h.delta[0].id, "train")
+            .is_err()
+    );
     assert_eq!(
         db.custody_range(head.parse()?, stream, 0, data.len())?,
         data

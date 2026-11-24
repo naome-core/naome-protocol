@@ -122,10 +122,7 @@ impl Archive {
                     let Ok((bytes, access)) = resolved else {
                         return Ok(());
                     };
-                    if id.format().is_none()
-                        && bytes.len() <= 32768
-                        && let Ok(linked) = serde_json::from_slice::<super::Manifest>(&bytes)
-                    {
+                    if let Some(linked) = super::Manifest::from_packet(id, &bytes) {
                         // A missing linked horizon is evidence of an incomplete replay. Send
                         // it only when every page is available, without retaining its membership.
                         let mut tree = Tree::new(&self.db);
@@ -152,7 +149,13 @@ impl Archive {
         })
     }
     /// Verify a stream incrementally and commit the entire inventory atomically.
-    pub fn import_stream(&mut self, mut input: impl BufRead) -> Result<Id> {
+    pub fn import_stream(&mut self, input: impl BufRead) -> Result<Id> {
+        self.import_stream_with_limit(input, 256 * 1024 * 1024)
+    }
+
+    /// Limit all incoming wire bytes, including witnesses, before committing any part.
+    pub fn import_stream_with_limit(&mut self, input: impl BufRead, max_bytes: u64) -> Result<Id> {
+        let mut input = input.take(max_bytes);
         let mut line = Vec::new();
         read_line(&mut input, &mut line, MAX_HEADER)?;
         let incoming: Header<super::super::snapshot::StoredHeader> = serde_json::from_slice(&line)?;
@@ -173,6 +176,7 @@ impl Archive {
         let mut bytes = Vec::new();
         let mut previous = None;
         let tx = self.db.unchecked_transaction()?;
+        let witnesses = super::Witnesses::begin(&tx)?;
         let mut inventory = super::super::custody::tree::Tree::new(&tx);
         loop {
             read_line(&mut input, &mut line, MAX_PACKET)?;
@@ -184,7 +188,7 @@ impl Archive {
                         header.format == FORMAT,
                         "unexpected page in historical stream"
                     );
-                    inventory::install(&tx, &[(w.page, w.data)].into())?;
+                    witnesses.install(w.page, &w.data)?;
                     continue;
                 }
             };
@@ -198,19 +202,25 @@ impl Archive {
                 "unordered, duplicate or unexpected exchange packet"
             );
             add_packet(&tx, &packet, &mut bytes)?;
+            witnesses.link(packet.id, &bytes)?;
             previous = Some(packet.id);
         }
         ensure!(
             input.fill_buf()?.is_empty(),
             "trailing data in exchange stream"
         );
+        ensure!(
+            input.into_inner().fill_buf()?.is_empty(),
+            "stream exceeds receiver byte limit"
+        );
         if let Some(m) = &header.snapshot.manifest {
             m.verify(header.head)?;
-            m.walk(|id| inventory.read(id), |_| Ok(()))?;
+            witnesses.walk(m)?;
         } else {
             header.snapshot.verify_head(header.head)?
         }
 
+        witnesses.finish()?;
         let head = if header.snapshot.manifest.is_none() {
             if self.current_head_id(header.head)? == header.head {
                 save_imported_head(&tx, header.head, &header.snapshot)?;

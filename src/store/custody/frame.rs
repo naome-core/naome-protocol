@@ -149,7 +149,7 @@ impl Archive {
             let mut tree = Tree::new(&self.db);
             let mut count = 0;
             for m in &delta.delta {
-                let data = self.read_member(&mut tree, &delta, m.id, "read")?;
+                let (data, _) = self.read_member(&mut tree, &delta, m.id, "read")?;
                 count += data.len();
                 put(&mut out, &data)?;
             }
@@ -242,7 +242,7 @@ impl Archive {
             let mut payload = 0usize;
             let mut items = Vec::with_capacity(delta.delta.len());
             for member in &delta.delta {
-                let bytes = origin.read_member(&mut tree, &delta, member.id, "read")?;
+                let (bytes, _) = origin.read_member(&mut tree, &delta, member.id, "read")?;
                 payload = payload
                     .checked_add(bytes.len())
                     .context("payload overflow")?;

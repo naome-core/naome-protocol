@@ -34,7 +34,11 @@ pub struct MemberProof {
 }
 
 /// Verify just the selected search path, including each inherited key interval.
-fn path(mut root: Id, key: &str, mut load: impl FnMut(Id) -> Result<Page>) -> Result<Id> {
+pub(super) fn path(
+    mut root: Id,
+    key: &str,
+    mut load: impl FnMut(Id) -> Result<Page>,
+) -> Result<Id> {
     let (mut low, mut high) = (None::<String>, None::<String>);
     for _ in 0..=32 {
         let page = load(root)?;

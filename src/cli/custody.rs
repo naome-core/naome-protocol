@@ -51,6 +51,7 @@ pub enum Command {
         file: PathBuf,
         #[arg(long)]
         parent: Id,
+        /// Block access policy. Defaults to the stream descriptor’s policy at the parent head.
         #[arg(long)]
         access: Option<Id>,
     },
@@ -133,14 +134,15 @@ fn capture(
     initial: Id,
     stream: Id,
     file: &Path,
-    access: Id,
+    access: Option<Id>,
 ) -> Result<()> {
     let mut reader = BufReader::new(File::open(file)?);
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
     let mut length = 0_u64;
     let mut parent = Some(initial);
-    db.custody_resolve(initial, stream, "read")?;
+    let stream_access = db.custody_stream_access(initial, stream)?;
+    let access = access.unwrap_or(stream_access);
     let mut block = 0_u64;
     let mut items = Vec::new();
     loop {
@@ -285,14 +287,7 @@ pub(super) fn run(db_path: &Path, command: Command) -> Result<()> {
             stream,
             file,
             access,
-        } => capture(
-            &db,
-            &source,
-            parent,
-            stream,
-            &file,
-            access.unwrap_or_else(|| Id::blob(PUBLIC)),
-        ),
+        } => capture(&db, &source, parent, stream, &file, access),
         Command::ExportStep {
             head,
             after,

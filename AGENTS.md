@@ -8,7 +8,8 @@ This repository contains the Rust archive library, the `nao` CLI, the protocol w
 - Put command options and defaults in CLI help. Put wire formats, compatibility rules and evidence semantics in the existing specification.
 - Keep the whitepaper a standalone research paper about the protocol. Include the problem, model, assumptions, analytical properties, worked examples, related work, limitations and proposed independent evaluation where relevant. Keep benchmark tables, machine-specific measurements, local experiment reports, CI results, release history and troubleshooting out of the paper. Present worked examples and proposed studies as such.
 - Regenerate the checked-in PDF with `python3 tools/ci/whitepaper.py --write` when the TeX changes.
-- Record run-specific timings, test outcomes and investigation notes in chat, CI logs or an explicitly requested research destination. Keep generated reports, sample databases and scratch files outside tracked sources and release packages. Keep reusable qualification code and required protocol vectors beside their existing counterparts.
+- Do not add standalone Markdown documentation, implementation notes, handoffs, test reports, benchmark results, logs, sample databases or other run artifacts to the repository or release packages. Put run results in chat, CI logs or an explicitly requested external research record.
+- Keep test fixtures to the minimum bytes that an automated test actually needs. Generate disposable inputs during the test. Check in fixed inputs or expected bytes only when the test depends on that exact historical, compatibility or reference vector. Keep test-only fixtures out of release downloads.
 
 ## Implementation and verification
 

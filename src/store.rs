@@ -7,7 +7,7 @@ pub mod custody;
 mod search_index;
 pub mod sharing;
 mod snapshot;
-pub use exchange::{Bundle, MemberProof, Packet};
+pub use exchange::{Bundle, ExchangePage, ExchangeProgress, MemberProof, Packet};
 #[cfg(feature = "cli")]
 pub(crate) use search_index::IndexPreparation;
 pub(crate) use snapshot::ManifestEncoding;

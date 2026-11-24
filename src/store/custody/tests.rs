@@ -196,6 +196,40 @@ fn raw_ranges_restrictions_and_failed_admissions() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn submitted_byte_budget_is_identical_at_genesis_and_on_a_child() -> Result<()> {
+    let archive = store()?;
+    let half = BATCH_BYTES / 2;
+    let inputs = [
+        Item::blob(vec![1; half], public()),
+        Item::blob(vec![2; half], public()),
+    ];
+    let genesis = archive.custody_append("batch limit", None, &inputs)?.head;
+    let child = archive
+        .custody_append("batch limit", Some(genesis), &inputs)?
+        .head;
+    for head in [genesis, child] {
+        for input in &inputs {
+            assert_eq!(
+                archive.custody_resolve(head, input.member.id, "read")?,
+                input.bytes
+            );
+        }
+    }
+    let outside = [
+        Item::blob(vec![1; half], public()),
+        Item::blob(vec![2; half + 1], public()),
+    ];
+    for parent in [None, Some(genesis)] {
+        assert!(
+            archive
+                .custody_append("batch limit", parent, &outside)
+                .is_err()
+        );
+    }
+    Ok(())
+}
+
 /// Successive small commits force repeated changes to formerly shared upper pages.
 fn history_sample(archive: &Archive, commits: usize) -> Result<serde_json::Value> {
     let mut parent = None;

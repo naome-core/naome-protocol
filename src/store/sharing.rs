@@ -115,9 +115,16 @@ impl Replica {
     pub fn commit(self, archive: &Archive) -> Result<Id> {
         ensure!(self.missing.is_empty(), "incomplete release");
         let tx = Transaction::new_unchecked(&archive.db, TransactionBehavior::Immediate)?;
+        let witnesses = super::inventory::witness::Witnesses::begin(&tx)?;
+        for (&id, page) in &self.snapshot.pages {
+            witnesses.install(id, page)?;
+        }
+        witnesses.walk(self.snapshot.manifest()?)?;
         for (id, (access, bytes)) in self.members {
             insert(&tx, id, &bytes, access)?;
+            witnesses.link(id, &bytes)?;
         }
+        witnesses.finish()?;
         save_imported_head(&tx, self.head, &self.snapshot)?;
         archive.register_release(self.head, &self.snapshot)?;
         tx.commit()?;
@@ -250,7 +257,7 @@ impl Archive {
             for &id in &snapshot.objects {
                 if id.format().is_none() && self.size(id)? <= 32768 {
                     let bytes = self.resolve(&snapshot, id, "read")?;
-                    if let Ok(m) = serde_json::from_slice::<super::Manifest>(&bytes) {
+                    if let Some(m) = super::Manifest::from_packet(id, &bytes) {
                         include(&m)?;
                     }
                 }

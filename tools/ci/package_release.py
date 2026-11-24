@@ -47,7 +47,7 @@ def verify(nao, directory, version):
     (directory / "Messung µ.txt").write_bytes(reading)
     object_id = run("blob", "Messung µ.txt")
     head = run("snapshot", "release smoke", "--root", object_id)
-    for mode, options in [("json", []), ("stream", ["--stream"])]:
+    for mode, options in [("json", []), ("stream", ["--stream"]), ("paged", ["--paged"])]:
         exchange = f"exchange.{mode}"
         receiver = f"{mode} receiver.sqlite"
         resolved = f"{mode} reading.txt"
@@ -85,8 +85,26 @@ def verify(nao, directory, version):
     assert (directory / "evidence.sqlite").read_bytes() == source_bytes
     assert run("--db", "converted.sqlite", "migrated-head", head) == head
 
-    run("keygen", "signing seed")
-    if (directory / "signing seed").stat().st_size != 32:
+    key_directory = directory / "key check"
+    key_directory.mkdir()
+    if os.name == "nt":
+        subprocess.run(["icacls", str(key_directory), "/grant", "*S-1-1-0:(OI)(CI)R"], check=True)
+    seed = key_directory / "signing seed"
+    run("keygen", str(seed))
+    if os.name == "nt":
+        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", """
+            $ErrorActionPreference = 'Stop'
+            $acl = Get-Acl -LiteralPath $env:NAO_KEY_CHECK_PATH
+            $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+            $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+            if (-not $acl.AreAccessRulesProtected -or $rules.Count -ne 1 -or
+                $rules[0].IdentityReference -ne $sid -or $rules[0].IsInherited -or
+                $rules[0].AccessControlType -ne 'Allow' -or
+                $rules[0].FileSystemRights -ne 'FullControl') { throw 'Unexpected key permissions' }
+        """], env={**os.environ, "NAO_KEY_CHECK_PATH": str(seed)}, check=True)
+    elif seed.stat().st_mode & 0o077:
+        raise ValueError("group or other permissions on signing seed")
+    if seed.stat().st_size != 32:
         raise ValueError("key generation did not write a 32-byte seed")
     print(f"Verified {nao.name}: published profiles, archive exchange, custody transfer and review, and key generation")
 

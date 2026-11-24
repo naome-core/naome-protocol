@@ -105,9 +105,11 @@ jobs:
         if: ${{ inputs.model_search }}
         run: |
           if [[ "$RUNNER_OS" != macOS ]]; then
-            python -m pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-search-torch.txt
+            python -m pip install --only-binary=:all: --no-deps --index-url https://download.pytorch.org/whl/cpu -r requirements-search-torch.txt
           fi
           python -m pip install -r requirements-search.txt
+          python -m pip check
+          python tools/ci/audit_search_runtime.py
 
       - name: Package and test the release download
         if: ${{ inputs.package_target != '' }}

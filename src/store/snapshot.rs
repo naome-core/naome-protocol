@@ -219,8 +219,8 @@ impl ManifestEncoding {
 }
 
 // A caller owns the write transaction. A previously known head retains its local status.
+/// Call after verifying and installing every supplied witness in the admission transaction.
 pub(super) fn save_imported_head(db: &Connection, head: Id, snapshot: &Snapshot) -> Result<()> {
-    inventory::install(db, &snapshot.pages)?;
     let id = head.to_string();
     if db.execute(
         "INSERT OR IGNORE INTO heads VALUES(?,?)",
@@ -499,8 +499,11 @@ impl Archive {
         if s.manifest.is_none() {
             return self.convert_archived(s.id()?, s);
         }
-        s.verify_head(s.id()?)?;
-        inventory::install(&self.db, &s.pages)?;
+        s.validate_header()?;
+        // A standalone snapshot supplies no historical manifest packets. Store its main proof.
+        let (members, pages) = s.manifest()?.witness(&s.pages)?;
+        ensure!(members == s.objects, "inconsistent snapshot inventory");
+        inventory::install(&self.db, &pages)?;
         let bytes = s.bytes()?;
         let id = Id::blob(&bytes);
         self.db.execute(
