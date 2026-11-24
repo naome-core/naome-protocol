@@ -196,6 +196,42 @@ fn raw_ranges_restrictions_and_failed_admissions() -> Result<()> {
     Ok(())
 }
 
+/// Successive small commits force repeated changes to formerly shared upper pages.
+fn history_sample(archive: &Archive, commits: usize) -> Result<serde_json::Value> {
+    let mut parent = None;
+    let mut checkpoints = Vec::new();
+    let mut io = PageIo::default();
+    for step in 0..commits {
+        let items: Vec<_> = (0..8)
+            .map(|i| specimen((8 * step + i) as u64, Kind::Occurrence, None))
+            .collect();
+        let admission = archive.custody_append("history-lab", parent, &items)?;
+        io += admission.io;
+        parent = Some(admission.head);
+        if step % 64 == 0 || step + 1 == commits {
+            checkpoints.push((admission.head, items[0].member.id, items[0].bytes.clone()));
+        }
+    }
+    if commits == 512 {
+        // Independently reproduced with the preceding writer at 64b0435.
+        assert_eq!(
+            parent.unwrap().to_string(),
+            "1:1:82a08723ed490826c109bb94c4ccfe8dd0c9f0f90420bc8f7bee0512a9487e5d"
+        );
+        assert_eq!(io.backing_reads, io.reads);
+    }
+    for (index, (head, member, bytes)) in checkpoints.iter().enumerate() {
+        assert_eq!(archive.custody_resolve(*head, *member, "read")?, *bytes);
+        if let Some((_, later, _)) = checkpoints.get(index + 1) {
+            assert!(archive.custody_resolve(*head, *later, "read").is_err());
+        }
+    }
+    Ok(
+        json!({"head":parent,"commits":commits,"records":commits * 8,
+              "checked_heads":checkpoints.len(),"io":io}),
+    )
+}
+
 // The published driver runs each phase in a new process to measure whole-process RSS.
 #[test]
 #[ignore = "run with tools/scale/qualify.py"]
@@ -211,6 +247,7 @@ fn qualification_sample() -> Result<()> {
     let tip_file = directory.join("tip");
     let result = match phase.as_str() {
         "mixed" => mixed_bursts(&directory)?,
+        "history" => history_sample(&a, n)?,
         "inventory" => {
             let tx = a.db.unchecked_transaction()?;
             let mut tree = Tree::new(&a.db);
@@ -557,7 +594,7 @@ fn a_pinned_but_incomplete_index_cannot_exclude_a_notice() -> Result<()> {
 }
 
 #[test]
-fn physical_page_splices_preserve_roots_and_bound_backing_reads() -> Result<()> {
+fn independent_pages_preserve_roots_and_need_one_backing_read() -> Result<()> {
     let a = store()?;
     let mut tree = Tree::new(&a.db);
     let keys: Vec<_> = (0_u64..100)
@@ -582,7 +619,7 @@ fn physical_page_splices_preserve_roots_and_bound_backing_reads() -> Result<()> 
         assert_eq!(tree.get(head, &object(id))?, Some(id));
         assert!(tree.get(base, &object(id))?.is_none());
     }
-    assert!(tree.io.backing_reads > tree.io.reads && tree.io.backing_reads <= 5 * tree.io.reads);
+    assert_eq!(tree.io.backing_reads, tree.io.reads);
     assert!(tree.io.backing_written_bytes < tree.io.written_bytes);
     Ok(())
 }
@@ -668,5 +705,102 @@ fn confirmed_grant_checks_only_later_withdrawals_and_competing_cursors_recover()
     a.withdraw(member)?;
     assert!(b.custody_pull(&a, second, 1).is_err());
     assert!(a.custody_share(second, true).is_err());
+    Ok(())
+}
+
+#[test]
+fn reads_historical_spliced_pages_by_their_original_hash() -> Result<()> {
+    use super::tree::Page;
+    let a = store()?;
+    let old = Id::blob(b"old leaf");
+    let new = Id::blob(b"new leaf");
+    let page = |key: Id| Page::Leaf(vec![(key.to_string(), key)]);
+    let original = serde_json::to_vec(&page(old))?;
+    let changed = serde_json::to_vec(&page(new))?;
+    let base = Id::blob(&original);
+    let head = Id::blob(&changed);
+    // A prior writer represented a replacement as prefix + literal + suffix.
+    let prefix = 8;
+    let suffix = 4;
+    let mut splice = vec![2];
+    splice.extend_from_slice(&base.blob_digest().unwrap());
+    splice.extend_from_slice(&(prefix as u16).to_be_bytes());
+    splice.extend_from_slice(&(suffix as u16).to_be_bytes());
+    splice.extend_from_slice(&changed[prefix..changed.len() - suffix]);
+    for (id, data) in [(base, original), (head, splice)] {
+        a.db.execute(
+            "INSERT INTO custody_pages VALUES(?,?)",
+            params![id.to_string(), data],
+        )?;
+    }
+    let mut tree = Tree::new(&a.db);
+    assert_eq!(tree.read(head)?, page(new));
+    assert_eq!(tree.io.backing_reads, 2);
+    Ok(())
+}
+
+#[test]
+fn grouped_member_proof_commits_only_the_verified_union() -> Result<()> {
+    let origin = store()?;
+    let receiver = store()?;
+    let raw = Item::blob(b"group raw".to_vec(), public());
+    let raw_id = raw.member.id;
+    let records: Vec<_> = (0..16).map(|i| specimen(i, Kind::Claim, None)).collect();
+    let mut keys: Vec<_> = records.iter().map(|r| r.member.id).collect();
+    let head = origin.custody_append("group proof", None, &records)?.head;
+    let head = origin
+        .custody_append("group proof", Some(head), &[raw])?
+        .head;
+    let excluded = keys.pop().unwrap();
+    keys.push(raw_id);
+    let proof = origin.export_members(head, &keys)?;
+    keys.sort();
+    assert_eq!(proof.requested()?, keys);
+    assert!(origin.export_members(head, &[raw_id, raw_id]).is_err());
+    assert!(receiver.import_member(head, &proof).is_err());
+    let wire = serde_json::to_value(&proof)?;
+    for field in ["members", "pages", "packets"] {
+        let mut changed = wire.clone();
+        match field {
+            "members" => {
+                changed["members"].as_array_mut().unwrap().pop();
+            }
+            "pages" => {
+                let pages = changed["pages"].as_object_mut().unwrap();
+                let missing = pages.keys().next().unwrap().clone();
+                pages.remove(&missing);
+            }
+            _ => {
+                changed["packets"].as_array_mut().unwrap().pop();
+            }
+        }
+        assert!(
+            receiver
+                .import_members(head, &serde_json::from_value(changed)?)
+                .is_err()
+        );
+    }
+    let proof = crate::store::MemberProof::read(serde_json::to_vec(&proof)?.as_slice())?;
+    assert_eq!(receiver.import_members(head, &proof)?, keys);
+    assert!(receiver.head(head).is_err());
+    assert!(receiver.resolve_head(head, excluded, "read").is_err());
+    for id in &keys {
+        assert_eq!(
+            receiver.resolve_head(head, *id, "read")?,
+            origin.resolve_head(head, *id, "read")?
+        );
+    }
+    let other = store()?;
+    other.blob(b"group raw", public())?;
+    other.withdraw(raw_id)?;
+    assert!(other.import_members(head, &proof).is_err());
+    assert!(other.raw(keys[0])?.is_none());
+    assert_eq!(
+        other
+            .db
+            .query_row("SELECT count(*) FROM archive_member_access", [], |r| r
+                .get::<_, i64>(0))?,
+        0
+    );
     Ok(())
 }

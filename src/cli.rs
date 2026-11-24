@@ -186,9 +186,9 @@ pub enum ArchiveCommand {
     /// Serialize a bounded inventory with its permitted objects for offline exchange.
     Export {
         head: Id,
-        /// Disclose one readable object with independently verifiable membership and access paths.
+        /// Disclose selected readable objects with shared membership and access proofs. Repeat for multiple IDs.
         #[arg(long,conflicts_with_all=["after","limit","stream"])]
-        member: Option<Id>,
+        member: Vec<Id>,
         #[arg(long)]
         after: Option<Id>,
         #[arg(long)]
@@ -507,8 +507,8 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             let kind = kind
                 .map(|s| serde_json::from_value::<Kind>(s.into()))
                 .transpose()?;
-            print(db.discover(
-                &db.active_head(head)?,
+            print(db.discover_head(
+                head,
                 kind,
                 subject.as_deref(),
                 scope.as_deref(),
@@ -518,7 +518,12 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             )?)
         }
         ArchiveCommand::Find(DeferredArgs(arguments)) => {
-            print(LocalSearch::default().find(&open()?, arguments)?)
+            let db = if arguments.exact_lookup() {
+                reader()?
+            } else {
+                open()?
+            };
+            print(LocalSearch::default().find(&db, arguments)?)
         }
         ArchiveCommand::SearchHead { head, clear } => {
             let db = if head.is_some() || clear {
@@ -529,7 +534,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             if head.is_some() || clear {
                 db.set_search_head(head)?;
             }
-            print(db.search_head(None)?.id()?)
+            print(db.search_head_id(None)?)
         }
         ArchiveCommand::PrepareSearch(DeferredArgs(arguments)) => {
             print(LocalSearch::default().prepare(&open()?, arguments)?)
@@ -576,13 +581,17 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         } => {
             let db = reader()?;
             let head = db.current_head_id(head)?;
-            if let Some(id) = member {
+            if !member.is_empty() {
                 ensure!(
                     purpose == "read",
                     "member proofs are read-purpose disclosures"
                 );
-                output_json(&path, &db.export_member(head, id)?)?;
-                return print(json!({"head":head,"member":id}));
+                let proof = db.export_members(head, &member)?;
+                output_json(&path, &proof)?;
+                return print(match proof.requested()? {
+                    [id] => json!({"head":head,"member":id}),
+                    ids => json!({"head":head,"members":ids}),
+                });
             }
             if stream {
                 let count = publish(&path, |file| {
@@ -612,7 +621,11 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             let mut db = open()?;
             let file = File::open(file)?;
             if let Some(head) = member_head {
-                print(db.import_member(head, &crate::store::MemberProof::read(file)?)?)
+                let ids = db.import_members(head, &crate::store::MemberProof::read(file)?)?;
+                match ids.as_slice() {
+                    [id] => print(id),
+                    _ => print(ids),
+                }
             } else if stream {
                 print(db.import_stream(BufReader::new(file))?)
             } else {

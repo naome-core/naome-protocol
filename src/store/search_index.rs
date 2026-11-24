@@ -18,7 +18,7 @@ use crate::{
     wire::Id,
 };
 use anyhow::{Context, Result, ensure};
-use cache::{INDEX_VERSION, coverage, prepared_cache_available};
+use cache::{INDEX_VERSION, coverage, prepared_cache_version};
 use rusqlite::params;
 use std::collections::BTreeSet;
 use vectors::{embed_query, missing_vectors};
@@ -61,6 +61,10 @@ struct IndexedSection {
 impl Archive {
     /// Resolve an explicit head, the pinned head, or the archive's stable default for search.
     pub fn search_head(&self, head: Option<Id>) -> Result<Snapshot> {
+        self.head(self.selected_search_id(head)?)
+    }
+
+    fn selected_search_id(&self, head: Option<Id>) -> Result<Id> {
         let head = match head {
             Some(head) => head,
             None => self
@@ -79,14 +83,36 @@ impl Archive {
                 .context("no archive snapshot; create one with snapshot or specify --head")?
                 .parse()?,
         };
-        self.head(self.current_head_id(head)?)
+        self.current_head_id(head)
+    }
+
+    /// Return the authenticated selected header without loading its inventory.
+    pub fn search_head_id(&self, head: Option<Id>) -> Result<Id> {
+        self.active_manifest_id(self.selected_search_id(head)?)
+    }
+
+    /// Resolve an exact query and its visible links within one read transaction.
+    #[cfg(feature = "cli")]
+    pub(crate) fn find_id(
+        &self,
+        head: Option<Id>,
+        id: Id,
+        options: SearchOptions,
+    ) -> Result<SearchReport> {
+        self.with_read_view(|| {
+            let m = self.active_manifest(self.selected_search_id(head)?)?;
+            let report = SearchReport::start(m.id()?, options, false)?;
+            let mut tree = super::custody::tree::Tree::new(&self.db);
+            Self::exact_report(report, id, options, |key| {
+                Ok(self.resolve_member_in(&m, key, "read", &mut tree)?.0)
+            })
+        })
     }
 
     /// Pin a search snapshot independently of cache preparation. None restores the default.
     pub fn set_search_head(&self, head: Option<Id>) -> Result<()> {
         if let Some(head) = head {
-            let head = self.current_head_id(head)?;
-            self.head(head)?;
+            let head = self.search_head_id(Some(head))?;
             self.db.execute(
                 "INSERT OR REPLACE INTO rep_search_selection VALUES(1,?)",
                 [head.to_string()],
@@ -253,64 +279,14 @@ impl Archive {
                 (Vec::new(), Some(media), false)
             }
         };
-        ensure!(
-            (1..=100).contains(&options.limit),
-            "search limit must be between 1 and 100"
-        );
-        ensure!(
-            options.index_budget > 0 && options.vector_budget > 0,
-            "positive search budgets required"
-        );
-        let head = snapshot.id()?;
-        let mut report = SearchReport {
-            head,
-            mode: options.mode,
-            index_version: INDEX_VERSION,
-            model: None,
-            minimum_similarity: None,
-            index_complete: false,
-            semantic_index_complete: None,
-            vector_budget_exhausted: false,
-            vector_products: 0,
-            vector_rows_examined: 0,
-            vector_rows_loaded: 0,
-            limited_coverage: false,
-            query_limited: limited,
-            hits: Vec::new(),
-        };
-
+        let mut report = SearchReport::start(snapshot.id()?, options, limited)?;
+        let head = report.head;
         if let Some(id) = input.exact_id() {
-            let read = self.db.unchecked_transaction()?;
-            if let Ok(bytes) = self.resolve(snapshot, id, "read") {
-                let document = id.format().and_then(|format| {
-                    Self::decode_document(format, &bytes, |profile| {
-                        self.resolve(snapshot, profile, "read")
-                    })
-                    .ok()
-                });
-                if options
-                    .kind
-                    .is_none_or(|kind| document.as_ref().is_some_and(|d| d.kind == kind))
-                    && options.subject.is_none_or(|subject| {
-                        document.as_ref().is_some_and(|d| d.subject == subject)
-                    })
-                    && options
-                        .scope
-                        .is_none_or(|scope| document.as_ref().is_some_and(|d| d.scope == scope))
-                {
-                    report.hits.push(self.search_hit(
-                        snapshot,
-                        id,
-                        document.as_ref(),
-                        SearchLocation::Object,
-                        None,
-                        true,
-                    ));
-                }
-            }
-            read.commit()?;
-            report.index_complete = true;
-            return Ok(report);
+            return self.with_read_view(|| {
+                Self::exact_report(report, id, options, |key| {
+                    self.resolve(snapshot, key, "read")
+                })
+            });
         }
 
         let mode = options.mode;
@@ -320,10 +296,12 @@ impl Archive {
             Some(model.context("semantic search requires a configured local embedding model")?)
         };
         let head = head.to_string();
-        if matches!(preparation, IndexPreparation::Existing) && !prepared_cache_available(&self.db)?
-        {
-            report.semantic_index_complete = model.as_ref().map(|_| false);
-            return Ok(report);
+        if matches!(preparation, IndexPreparation::Existing) {
+            let Some(version) = prepared_cache_version(&self.db)? else {
+                report.semantic_index_complete = model.as_ref().map(|_| false);
+                return Ok(report);
+            };
+            report.index_version = version;
         }
         let query_vectors = if let Some(model) = model.as_deref_mut() {
             report.model = Some(model.id());
@@ -427,8 +405,8 @@ impl Archive {
                 };
                 Some(snippet)
             };
-            let mut hit = self.search_hit(
-                snapshot,
+            let mut hit = Self::search_hit(
+                |key| self.resolve(snapshot, key, "read").is_ok(),
                 candidate.id,
                 Some(&document),
                 location,
@@ -444,9 +422,42 @@ impl Archive {
         Ok(report)
     }
 
+    fn exact_report(
+        mut report: SearchReport,
+        id: Id,
+        options: SearchOptions,
+        mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
+    ) -> Result<SearchReport> {
+        if let Ok(bytes) = resolve(id) {
+            let document = id
+                .format()
+                .and_then(|format| Self::decode_document(format, &bytes, &mut resolve).ok());
+            if options
+                .kind
+                .is_none_or(|kind| document.as_ref().is_some_and(|d| d.kind == kind))
+                && options
+                    .subject
+                    .is_none_or(|subject| document.as_ref().is_some_and(|d| d.subject == subject))
+                && options
+                    .scope
+                    .is_none_or(|scope| document.as_ref().is_some_and(|d| d.scope == scope))
+            {
+                report.hits.push(Self::search_hit(
+                    |key| resolve(key).is_ok(),
+                    id,
+                    document.as_ref(),
+                    SearchLocation::Object,
+                    None,
+                    true,
+                ));
+            }
+        }
+        report.index_complete = true;
+        Ok(report)
+    }
+
     fn search_hit(
-        &self,
-        snapshot: &Snapshot,
+        mut readable: impl FnMut(Id) -> bool,
         id: Id,
         document: Option<&Document>,
         location: SearchLocation,
@@ -474,10 +485,39 @@ impl Archive {
                 .flat_map(|d| &d.inputs)
                 .filter(|link| link.role != "chunk")
                 .take(8)
-                .filter(|link| self.resolve(snapshot, link.target, "read").is_ok())
+                .filter(|link| readable(link.target))
                 .cloned()
                 .collect(),
         }
+    }
+}
+
+impl SearchReport {
+    fn start(head: Id, options: SearchOptions, limited: bool) -> Result<Self> {
+        ensure!(
+            (1..=100).contains(&options.limit),
+            "search limit must be between 1 and 100"
+        );
+        ensure!(
+            options.index_budget > 0 && options.vector_budget > 0,
+            "positive search budgets required"
+        );
+        Ok(Self {
+            head,
+            mode: options.mode,
+            index_version: INDEX_VERSION,
+            model: None,
+            minimum_similarity: None,
+            index_complete: false,
+            semantic_index_complete: None,
+            vector_budget_exhausted: false,
+            vector_products: 0,
+            vector_rows_examined: 0,
+            vector_rows_loaded: 0,
+            limited_coverage: false,
+            query_limited: limited,
+            hits: Vec::new(),
+        })
     }
 }
 

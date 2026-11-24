@@ -95,6 +95,14 @@ struct ModelArguments {
     python: Option<PathBuf>,
 }
 
+impl FindArguments {
+    pub(super) fn exact_lookup(&self) -> bool {
+        self.query
+            .as_deref()
+            .is_some_and(|text| text.trim().parse::<Id>().is_ok())
+    }
+}
+
 impl ModelArguments {
     fn directory(&self) -> Option<PathBuf> {
         self.model
@@ -178,7 +186,6 @@ impl LocalSearch {
     }
 
     pub fn find(&mut self, archive: &Archive, args: FindArguments) -> Result<SearchReport> {
-        let snapshot = archive.search_head(args.head)?;
         let bytes;
         let input = match (args.query.as_deref(), args.input.as_deref()) {
             (Some(query), None) => {
@@ -235,7 +242,11 @@ impl LocalSearch {
             !(exact_id && (args.prepare || args.rebuild_index)),
             "exact ID lookups cannot prepare or rebuild the index; use prepare-search"
         );
-        let model = if mode == SearchMode::Lexical || exact_id {
+        if let Some(id) = input.exact_id() {
+            return archive.find_id(args.head, id, options);
+        }
+        let snapshot = archive.search_head(args.head)?;
+        let model = if mode == SearchMode::Lexical {
             None
         } else {
             let directory =

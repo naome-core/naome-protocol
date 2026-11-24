@@ -85,6 +85,9 @@ pub enum Command {
         head: Id,
         #[arg(long, default_value_t = 1)]
         batches: usize,
+        /// Pull to this exact target, committing each batch and retaining a resumable cursor.
+        #[arg(long, conflicts_with = "batches")]
+        until_complete: bool,
     },
     /// Read exactly the selected byte range into a new file.
     Range {
@@ -315,9 +318,15 @@ pub(super) fn run(db_path: &Path, command: Command) -> Result<()> {
             origin,
             head,
             batches,
+            until_complete,
         } => {
             ensure!(origin.is_file(), "missing origin archive");
-            print(db.custody_pull(&Archive::custody_reader(origin)?, head, batches)?)
+            let origin = Archive::custody_reader(origin)?;
+            print(if until_complete {
+                db.custody_pull_until_complete(&origin, head)?
+            } else {
+                db.custody_pull(&origin, head, batches)?
+            })
         }
         Command::Range {
             head,

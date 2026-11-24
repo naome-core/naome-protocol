@@ -173,6 +173,7 @@ impl Archive {
         let mut bytes = Vec::new();
         let mut previous = None;
         let tx = self.db.unchecked_transaction()?;
+        let mut inventory = super::super::custody::tree::Tree::new(&tx);
         loop {
             read_line(&mut input, &mut line, MAX_PACKET)?;
             let packet = match serde_json::from_slice::<StreamRow>(&line)? {
@@ -190,9 +191,7 @@ impl Archive {
             ensure!(
                 previous.is_none_or(|id| id < packet.id)
                     && if let Some(m) = &header.snapshot.manifest {
-                        super::super::custody::tree::Tree::new(&tx)
-                            .get(m.inventory, &packet.id.to_string())?
-                            == Some(packet.id)
+                        inventory.get(m.inventory, &packet.id.to_string())? == Some(packet.id)
                     } else {
                         header.snapshot.objects.contains(&packet.id)
                     },
@@ -207,8 +206,7 @@ impl Archive {
         );
         if let Some(m) = &header.snapshot.manifest {
             m.verify(header.head)?;
-            let mut tree = super::super::custody::tree::Tree::new(&tx);
-            m.walk(|id| tree.read(id), |_| Ok(()))?;
+            m.walk(|id| inventory.read(id), |_| Ok(()))?;
         } else {
             header.snapshot.verify_head(header.head)?
         }

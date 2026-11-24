@@ -50,6 +50,7 @@ INVENTORY_ROOTS = {
 PAYLOAD_BYTES = {128: 17298, 1024: 139178, 12800: 1755290}
 WORKLOADS = [
     (["mixed"], [24]),
+    (["history"], [512]),
     (["inventory"], list(INVENTORY_ROOTS)),
     (["first", "point", "pull-first", "delta", "pull-delta"], list(PAYLOAD_BYTES)),
 ]
@@ -75,6 +76,9 @@ def verify(report):
     if report.get("qualification_version", 1) == 1:
         full = {key for key in full if key[0] != "point"}
         quick = {key for key in quick if key[0] != "point"}
+    if report.get("qualification_version", 1) < 3:
+        full = {key for key in full if key[0] != "history"}
+        quick = {key for key in quick if key[0] != "history"}
     for row in samples:
         phase, size = key = row["phase"], row["size"]
         seen = by_trial.setdefault(row["repetition"], set())
@@ -89,6 +93,9 @@ def verify(report):
             assert result["payload_bytes"] > 0 and result["point_json_bytes"] < 256 * 1024
             if size >= 1024:
                 assert result["point_json_bytes"] < result["full_json_bytes"]
+        elif phase == "history":
+            assert result["commits"] == 512 and result["records"] == 4096 and result["checked_heads"] == 9
+            assert result["io"]["backing_reads"] == result["io"]["reads"]
         elif phase == "mixed":
             assert result["writers"] == len(set(result["federated_tips"])) == 2
             assert result["batches"] == result["receiver_reopens"] == size
@@ -133,7 +140,7 @@ def main():
                         row["repetition"] = trial
                         rows.append(row)
                         print(size, phase, row["process_ms"], flush=True)
-    report = {"qualification_version": 2, "archive_format": "manifest", "platform": platform.platform(), "build": "cargo test --lib --release --locked",
+    report = {"qualification_version": 3, "archive_format": "manifest", "platform": platform.platform(), "build": "cargo test --lib --release --locked",
               "rustc": subprocess.check_output(["rustc", "-V"], text=True).strip(),
               "samples": rows}
     verify(report)

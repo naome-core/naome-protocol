@@ -10,12 +10,6 @@ CREATE TABLE rep_search_positions(
     ordinal INTEGER NOT NULL, passage INTEGER NOT NULL, part INTEGER NOT NULL,
     PRIMARY KEY(sample,ordinal)
 ) WITHOUT ROWID;
-CREATE TRIGGER rep_search_sample_new_vector AFTER INSERT ON rep_search_vectors BEGIN
-    UPDATE rep_search_samples SET invalid=1 WHERE model=NEW.model AND NOT invalid;
-END;
-CREATE TRIGGER rep_search_sample_lost_vector AFTER DELETE ON rep_search_vectors BEGIN
-    UPDATE rep_search_samples SET invalid=1 WHERE model=OLD.model AND NOT invalid;
-END;
 CREATE TRIGGER rep_search_sample_new_entry AFTER INSERT ON rep_search_set_entries BEGIN
     UPDATE rep_search_samples SET invalid=1 WHERE head IN(SELECT head FROM rep_search_head_sets WHERE set_id=NEW.set_id) AND NOT invalid;
 END;

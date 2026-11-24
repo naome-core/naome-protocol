@@ -4,7 +4,7 @@ use crate::{
     profile::{PUBLIC, allows},
     store::{
         ObjectAvailability,
-        custody::{Head, tree::Tree},
+        custody::{Head, MEMBERS, tree::Tree},
         insert,
         inventory::{Page, Pages},
     },
@@ -18,11 +18,16 @@ use std::{
     io::{BufReader, Read},
 };
 
+const MAX_PROOF_BYTES: usize = 4 * MAX_BYTES + 8 * 1024 * 1024;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemberProof {
     version: u8,
-    member: Id,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    member: Option<Id>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    members: Option<Vec<Id>>,
     descriptor: Head,
     pages: Pages,
     packets: Vec<Packet>,
@@ -64,9 +69,20 @@ fn path(mut root: Id, key: &str, mut load: impl FnMut(Id) -> Result<Page>) -> Re
 }
 
 impl MemberProof {
+    pub fn requested(&self) -> Result<&[Id]> {
+        match (self.version, &self.member, &self.members) {
+            (1, Some(id), None) => Ok(std::slice::from_ref(id)),
+            (2, None, Some(ids))
+                if (2..=MEMBERS).contains(&ids.len()) && ids.windows(2).all(|w| w[0] < w[1]) =>
+            {
+                Ok(ids)
+            }
+            _ => anyhow::bail!("invalid member proof selection"),
+        }
+    }
+
     pub fn read(reader: impl Read) -> Result<Self> {
-        // One bounded member plus its profile, access descriptors and path witnesses.
-        let mut limited = reader.take(4 * MAX_BYTES as u64 + 8 * 1024 * 1024 + 1);
+        let mut limited = reader.take(MAX_PROOF_BYTES as u64 + 1);
         let value = serde_json::from_reader(BufReader::new(&mut limited))?;
         ensure!(limited.limit() > 0, "member proof byte limit");
         Ok(value)
@@ -75,6 +91,21 @@ impl MemberProof {
 
 impl Archive {
     pub fn export_member(&self, head: Id, id: Id) -> Result<MemberProof> {
+        self.export_members(head, &[id])
+    }
+
+    /// The union of authenticated paths for an explicit selection from a single cut.
+    pub fn export_members(&self, head: Id, ids: &[Id]) -> Result<MemberProof> {
+        ensure!(
+            (1..=MEMBERS).contains(&ids.len()),
+            "invalid member selection size"
+        );
+        let mut ids = ids.to_vec();
+        ids.sort_unstable();
+        ensure!(
+            ids.windows(2).all(|w| w[0] != w[1]),
+            "duplicate requested member"
+        );
         self.with_read_view(|| {
             let h = self.custody_head(head)?;
             ensure!(
@@ -84,7 +115,9 @@ impl Archive {
             let mut tree = Tree::new(&self.db);
             let mut pages = Pages::new();
             let mut packets = BTreeMap::new();
-            let mut pending = vec![id];
+            let mut pending = ids.clone();
+            // Conservative envelope allowance, including member IDs, names and punctuation.
+            let mut wire_bytes = serde_json::to_vec(&h)?.len() + ids.len() * 80 + 256;
             while let Some(key) = pending.pop() {
                 if packets.contains_key(&key) {
                     continue;
@@ -94,6 +127,8 @@ impl Archive {
                         return Ok(p.clone());
                     }
                     let p = tree.read(page)?;
+                    wire_bytes += serde_json::to_vec(&p)?.len() + 80;
+                    ensure!(wire_bytes <= MAX_PROOF_BYTES, "member proof byte limit");
                     pages.insert(page, p.clone());
                     Ok(p)
                 };
@@ -107,6 +142,8 @@ impl Archive {
                     pending.push(record.profile);
                 }
                 pending.push(access);
+                wire_bytes += bytes.len() * 2 + 192;
+                ensure!(wire_bytes <= MAX_PROOF_BYTES, "member proof byte limit");
                 packets.insert(
                     key,
                     Packet {
@@ -116,9 +153,11 @@ impl Archive {
                     },
                 );
             }
+            let single = ids.len() == 1;
             Ok(MemberProof {
-                version: 1,
-                member: id,
+                version: if single { 1 } else { 2 },
+                member: single.then(|| ids[0]),
+                members: (!single).then_some(ids),
                 descriptor: h,
                 pages,
                 packets: packets.into_values().collect(),
@@ -126,17 +165,27 @@ impl Archive {
         })
     }
     pub fn import_member(&self, head: Id, proof: &MemberProof) -> Result<Id> {
+        let [id] = proof.requested()? else {
+            anyhow::bail!("expected one requested member");
+        };
+        self.import_members(head, proof)?;
+        Ok(*id)
+    }
+
+    /// Verify the exact requested union before committing all authorized bytes atomically.
+    pub fn import_members(&self, head: Id, proof: &MemberProof) -> Result<Vec<Id>> {
+        let requested = proof.requested()?;
         let h = &proof.descriptor;
         h.manifest()?.verify(head)?;
         ensure!(
-            proof.version == 1
-                && !h.restricted
-                && (1..=5).contains(&proof.packets.len())
-                && proof.pages.len() <= 330,
+            !h.restricted
+                && (1..=5 * requested.len()).contains(&proof.packets.len())
+                && proof.pages.len() <= 330 * requested.len(),
             "invalid point disclosure"
         );
         let mut used = BTreeSet::new();
-        let mut expected = BTreeSet::from([proof.member]);
+        let mut expected: BTreeSet<Id> = requested.iter().copied().collect();
+        let mut remaining = MAX_PROOF_BYTES;
         let mut contents = BTreeMap::new();
         for p in &proof.packets {
             let mut load = |id| {
@@ -153,9 +202,15 @@ impl Archive {
                 "unbound packet"
             );
             ensure!(p.hex.len() <= 2 * MAX_BYTES, "oversized member");
+            remaining = remaining
+                .checked_sub(p.hex.len())
+                .context("member proof byte limit")?;
             let bytes = hex::decode(&p.hex)?;
             if let Some(r) = validate(p.id, &bytes, p.access)? {
-                ensure!(p.id == proof.member, "unexpected additional record");
+                ensure!(
+                    requested.binary_search(&p.id).is_ok(),
+                    "unexpected additional record"
+                );
                 expected.insert(r.profile);
             }
             ensure!(
@@ -201,7 +256,7 @@ impl Archive {
             )?;
         }
         tx.commit()?;
-        Ok(proof.member)
+        Ok(requested.to_vec())
     }
 
     pub(in crate::store) fn point_bytes(&self, head: Id, id: Id, purpose: &str) -> Result<Vec<u8>> {

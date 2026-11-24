@@ -402,46 +402,111 @@ impl Archive {
         budget: usize,
         after: Option<Id>,
     ) -> Result<Page> {
-        ensure!(budget > 0, "positive page budget required");
-        let mut ids = Vec::new();
-        let mut examined = 0;
-        let mut excluded = 0;
-        let mut last = None;
-        let mut more = false;
+        let mut page = Page::start(s.id()?, &s.source, budget)?;
         let bound = after.map_or(Unbounded, Excluded);
-        for &id in s.objects.range((bound, Unbounded)) {
-            if examined == budget {
-                more = true;
-                break;
-            }
-            examined += 1;
-            last = Some(id);
-            if id.format().is_none() {
-                continue;
-            }
-            match self.read(s, id, purpose) {
+        let finished = s.objects.range((bound, Unbounded)).all(|&id| {
+            page.examine(
+                id,
+                budget,
+                || self.read(s, id, purpose),
+                kind,
+                subject,
+                scope,
+            )
+        });
+        Ok(page.finish(finished))
+    }
+
+    /// Enumerate the requested part of the authenticated inventory without hydrating the cut.
+    #[allow(clippy::too_many_arguments)]
+    pub fn discover_head(
+        &self,
+        head: Id,
+        kind: Option<Kind>,
+        subject: Option<&str>,
+        scope: Option<&str>,
+        purpose: &str,
+        budget: usize,
+        after: Option<Id>,
+    ) -> Result<Page> {
+        self.with_read_view(|| {
+            let manifest = self.active_manifest(head)?;
+            let mut page = Page::start(manifest.id()?, &manifest.source, budget)?;
+            let mut tree = custody::tree::Tree::new(&self.db);
+            let finished = manifest.scan_after(&self.db, after, |id| {
+                Ok(page.examine(
+                    id,
+                    budget,
+                    || {
+                        let format = id.format().context("expected record")?;
+                        let (bytes, _) =
+                            self.resolve_inventory_member(&manifest, id, purpose, &mut tree)?;
+                        Self::decode_document(format, &bytes, |profile| {
+                            Ok(self
+                                .resolve_member_in(&manifest, profile, purpose, &mut tree)?
+                                .0)
+                        })
+                    },
+                    kind,
+                    subject,
+                    scope,
+                ))
+            })?;
+            Ok(page.finish(finished))
+        })
+    }
+}
+
+impl Page {
+    fn start(head: Id, source: &str, budget: usize) -> Result<Self> {
+        ensure!(budget > 0, "positive page budget required");
+        Ok(Self {
+            head,
+            ids: Vec::new(),
+            after: None,
+            examined: 0,
+            excluded: 0,
+            ranking: "ascending content identifier",
+            source: source.to_owned(),
+        })
+    }
+    fn examine(
+        &mut self,
+        id: Id,
+        budget: usize,
+        read: impl FnOnce() -> Result<Document>,
+        kind: Option<Kind>,
+        subject: Option<&str>,
+        scope: Option<&str>,
+    ) -> bool {
+        if self.examined == budget {
+            return false;
+        }
+        self.examined += 1;
+        self.after = Some(id);
+        if id.format().is_some() {
+            match read() {
                 Ok(d)
                     if kind.is_none_or(|k| k == d.kind)
                         && subject.is_none_or(|t| t == d.subject)
                         && scope.is_none_or(|t| t == d.scope) =>
                 {
-                    ids.push(id)
+                    self.ids.push(id)
                 }
-                Err(_) => excluded += 1,
-                _ => (),
+                Err(_) => self.excluded += 1,
+                _ => {}
             }
         }
-        Ok(Page {
-            head: s.id()?,
-            ids,
-            after: if more { last } else { None },
-            examined,
-            excluded,
-            ranking: "ascending content identifier",
-            source: s.source.clone(),
-        })
+        true
+    }
+    fn finish(mut self, complete: bool) -> Self {
+        if complete {
+            self.after = None;
+        }
+        self
     }
 }
+
 fn check_object_bounds(bytes: &[u8], access: Id) -> Result<()> {
     ensure!(
         bytes.len() <= MAX_BYTES && access.format().is_none(),

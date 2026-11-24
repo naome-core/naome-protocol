@@ -1,5 +1,5 @@
-CREATE TABLE rep_search_schema(version INTEGER PRIMARY KEY CHECK(version=6));
-INSERT INTO rep_search_schema VALUES(6);
+CREATE TABLE rep_search_schema(version INTEGER PRIMARY KEY CHECK(version=7));
+INSERT INTO rep_search_schema VALUES(7);
 CREATE TABLE rep_search_revision(value INTEGER NOT NULL);
 INSERT INTO rep_search_revision VALUES(0);
 CREATE TABLE rep_search_heads(

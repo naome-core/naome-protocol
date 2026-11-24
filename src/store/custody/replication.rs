@@ -100,6 +100,16 @@ impl Archive {
     /// An operator supplies an independently pinned origin head. No socket or discovery authority is implied.
     pub fn custody_pull(&self, origin: &Archive, target: Id, budget: usize) -> Result<Pull> {
         ensure!((1..=256).contains(&budget), "invalid batch budget");
+        self.pull_to(origin, target, budget as u64)
+    }
+
+    /// Follow one immutable target to completion. Each step independently checks its grant
+    /// and commits its cursor, so interruption can resume with either pull entry point.
+    pub fn custody_pull_until_complete(&self, origin: &Archive, target: Id) -> Result<Pull> {
+        self.pull_to(origin, target, u64::MAX)
+    }
+
+    fn pull_to(&self, origin: &Archive, target: Id, budget: u64) -> Result<Pull> {
         let tip = origin.custody_head(target)?;
         ensure!(
             !tip.restricted,
@@ -152,7 +162,7 @@ impl Archive {
         let mut batches = 0;
         let mut payload_bytes = 0;
         let mut descriptor_bytes = 0;
-        while seq < tip.sequence && batches < budget {
+        while seq < tip.sequence && (batches as u64) < budget {
             let after = (seq != 0).then_some(cursor);
             let (receipt, payload, descriptors, io) =
                 self.direct_step(origin, target, &tip, after, seq + 1, &mut cache)?;

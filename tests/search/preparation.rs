@@ -304,3 +304,41 @@ fn child_search_views_share_parent_entries_across_parent_rebuilds() -> Result<()
     );
     Ok(())
 }
+
+#[test]
+fn positional_invalidation_respects_visibility_across_heads() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("views.sqlite");
+    let a = Archive::open(&path)?;
+    let public = Id::blob(PUBLIC);
+    let left = claim(&a, "left", "left specimen", public, Format::A)?;
+    let right = claim(&a, "right", "right specimen", public, Format::A)?;
+    let head = |name, roots| a.selected_snapshot(name, BTreeSet::new(), roots);
+    let first = head("left", [left].into())?;
+    let second = head("right", [right].into())?;
+    let both = head("both", [left, right].into())?;
+    let mut model = TestEmbedder {
+        id: Id::blob(b"positional scope"),
+        embedded_passages: 0,
+    };
+    for view in [&first, &second, &both] {
+        assert_eq!(
+            a.prepare_search(view, 100, Some(&mut model))?
+                .sample_positions_ready,
+            Some(true)
+        );
+    }
+    let db = rusqlite::Connection::open(path)?;
+    let state = |id: Id| -> rusqlite::Result<bool> {
+        db.query_row(
+            "SELECT complete AND NOT invalid FROM rep_search_samples WHERE head=?",
+            [id.to_string()],
+            |r| r.get(0),
+        )
+    };
+    assert!(state(first.id()?)? && state(second.id()?)? && state(both.id()?)?);
+    db.execute("DELETE FROM rep_search_vectors WHERE passage IN (
+        SELECT p.id FROM rep_search_passages p JOIN rep_search_entries e ON e.id=p.entry WHERE e.object=?)",[left.to_string()])?;
+    assert!(!state(first.id()?)? && state(second.id()?)? && !state(both.id()?)?);
+    Ok(())
+}

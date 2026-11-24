@@ -298,7 +298,7 @@ fn previous_caches_are_rebuilt_without_changing_the_archive() -> Result<()> {
             .map(serde_json::from_str)
             .collect::<serde_json::Result<_>>()?;
         assert_eq!(lines[0]["ok"]["index_complete"], true);
-        assert_eq!(lines[1]["ok"]["index_version"], 6);
+        assert_eq!(lines[1]["ok"]["index_version"], 7);
         assert_eq!(lines[1]["ok"]["hits"][0]["id"], V012_CLAIM);
 
         let archive = Archive::open(database)?;

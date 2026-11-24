@@ -85,7 +85,7 @@ nao find reading --prepare --model model --python python
 
 Once set up, inference runs offline. Use `--input FILE` for a query from a supported media or text file.
 
-The current search index upgrades version 5 in place and reuses its extracted entries and embeddings. Older caches rebuild on first preparation. Explicit model preparation reports `sample_positions_ready`. Repeat preparation to finish a large unfiltered positional index. Filtered semantic queries retain their canonical filtered sample order. Repeat preparation if the report shows incomplete coverage. For an exact object ID, use `nao find ID` and prepare the index separately.
+Use `nao prepare-search --help` for index preparation and budget options. Exact object ID lookup requires no index preparation.
 
 ## Protocol reference
 

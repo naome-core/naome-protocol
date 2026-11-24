@@ -47,9 +47,10 @@ fn visit(
     depth: usize,
     upper: Option<&str>,
     lower: Option<&str>,
+    after: Option<&str>,
     page: &mut impl FnMut(Id) -> Result<Page>,
-    member: &mut impl FnMut(Id) -> Result<()>,
-) -> Result<()> {
+    member: &mut impl FnMut(Id) -> Result<bool>,
+) -> Result<bool> {
     ensure!(depth <= 32, "inventory depth limit");
     let node = page(id)?;
     let (leaf, entries) = match &node {
@@ -72,21 +73,46 @@ fn visit(
                 key == &value.to_string(),
                 "invalid or repeated inventory member"
             );
-            member(*value)?;
+            if after.is_none_or(|cursor| key.as_str() > cursor) && !member(*value)? {
+                return Ok(false);
+            }
         } else {
-            visit(
-                *value,
-                depth + 1,
-                entries.get(i + 1).map(|e| e.0.as_str()).or(upper),
-                Some(key),
-                page,
-                member,
-            )?;
+            let end = entries.get(i + 1).map(|e| e.0.as_str()).or(upper);
+            if after
+                .zip(end)
+                .is_some_and(|(cursor, limit)| cursor >= limit)
+            {
+                continue;
+            }
+            if !visit(*value, depth + 1, end, Some(key), after, page, member)? {
+                return Ok(false);
+            }
         }
     }
-    Ok(())
+    Ok(true)
 }
 impl Manifest {
+    /// Seek strictly after the cursor and stop when the caller has enough members.
+    /// This validates the visited intervals; complete inventory verification uses walk().
+    pub(super) fn scan_after(
+        &self,
+        db: &Connection,
+        after: Option<Id>,
+        mut member: impl FnMut(Id) -> Result<bool>,
+    ) -> Result<bool> {
+        let mut tree = Tree::new(db);
+        let cursor = after.map(|id| id.to_string());
+        visit(
+            self.inventory,
+            0,
+            None,
+            None,
+            cursor.as_deref(),
+            &mut |id| tree.read(id),
+            &mut member,
+        )
+    }
+
     pub(super) fn walk(
         &self,
         mut page: impl FnMut(Id) -> Result<Page>,
@@ -98,6 +124,7 @@ impl Manifest {
             0,
             None,
             None,
+            None,
             &mut |id| {
                 let p = page(id)?;
                 id.verify(&serde_json::to_vec(&p)?)?;
@@ -106,7 +133,8 @@ impl Manifest {
             &mut |id| {
                 ensure!(count < self.count, "inventory exceeds declared size");
                 count += 1;
-                member(id)
+                member(id)?;
+                Ok(true)
             },
         )?;
         ensure!(count == self.count, "inventory count mismatch");
@@ -149,7 +177,10 @@ pub(super) fn install(db: &Connection, pages: &Pages) -> Result<()> {
         ensure!(bytes.len() <= 16384, "oversized witness page");
         id.verify(&bytes)?;
         db.prepare_cached("INSERT OR IGNORE INTO custody_pages VALUES(?,?)")?
-            .execute(params![id.to_string(), bytes])?;
+            .execute(params![
+                id.to_string(),
+                super::custody::tree::encode_page(bytes)
+            ])?;
     }
     Ok(())
 }

@@ -534,6 +534,9 @@ impl Archive {
             m.verify(head)?;
             return Ok(m);
         }
+        if let Ok(h) = self.custody_head(head) {
+            return h.manifest();
+        }
         Ok(self.active_head(head)?.manifest()?.clone())
     }
     pub(super) fn resolve_member(
@@ -542,12 +545,25 @@ impl Archive {
         id: Id,
         purpose: &str,
     ) -> Result<(Vec<u8>, Id)> {
-        let mut tree = super::custody::tree::Tree::new(&self.db);
+        self.resolve_member_in(
+            m,
+            id,
+            purpose,
+            &mut super::custody::tree::Tree::new(&self.db),
+        )
+    }
+    pub(super) fn resolve_member_in(
+        &self,
+        m: &Manifest,
+        id: Id,
+        purpose: &str,
+        tree: &mut super::custody::tree::Tree<'_>,
+    ) -> Result<(Vec<u8>, Id)> {
         ensure!(
             tree.get(m.inventory, &id.to_string())? == Some(id),
             "outside snapshot"
         );
-        self.resolve_inventory_member(m, id, purpose, &mut tree)
+        self.resolve_inventory_member(m, id, purpose, tree)
     }
     /// The caller has just visited this member in a verified membership walk.
     pub(super) fn resolve_inventory_member(

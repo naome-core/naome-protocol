@@ -3,7 +3,7 @@ use anyhow::Result;
 use naome_protocol::{
     profile::{PUBLIC, READ_ONLY},
     store::{Archive, Bundle},
-    wire::Id,
+    wire::{Format, Id},
 };
 use rusqlite::{Connection, params};
 use std::{collections::BTreeSet, fs};
@@ -284,7 +284,7 @@ fn migrates_stored_page_bytes_and_reads_during_a_writer_reservation() -> Result<
             .collect()
     };
     let before = stored()?;
-    assert!(before.iter().any(|(_, bytes)| bytes.first() == Some(&2)));
+    assert!(before.iter().any(|(_, bytes)| bytes.first() == Some(&3)));
     drop(Archive::open(&file)?);
     assert_eq!(before, stored()?);
     assert_eq!(
@@ -376,7 +376,74 @@ fn cli_captures_sixteen_blocks_in_one_child_and_exchanges_a_single_member() -> R
         serde_json::to_value(stream)?
     );
     let b = Archive::open_for_read(dir.path().join("b.sqlite"))?;
+    let block = h.delta[0].id.to_string();
+    let stream_id = stream.to_string();
+    let exported = run(
+        "a.sqlite",
+        &[
+            "export",
+            head,
+            "group.json",
+            "--member",
+            &stream_id,
+            "--member",
+            &block,
+        ],
+    )?;
+    let imported = run("b.sqlite", &["import", "group.json", "--member-head", head])?;
+    assert_eq!(imported, exported["members"]);
+    let origin = Archive::open(dir.path().join("a.sqlite"))?;
+    origin.custody_share(head.parse()?, true)?;
+    let pull = run(
+        "c.sqlite",
+        &["custody", "pull", "a.sqlite", head, "--until-complete"],
+    )?;
+    assert_eq!(pull["cursor"], head);
+    assert_eq!(pull["batches"], 2);
+    let repeat = run(
+        "c.sqlite",
+        &["custody", "pull", "a.sqlite", head, "--until-complete"],
+    )?;
+    assert_eq!(repeat["batches"], 0);
     assert_eq!(b.resolve_head(head.parse()?, stream, "read")?, payload);
     assert!(b.head(head.parse()?).is_err());
+    Ok(())
+}
+
+#[test]
+fn bounded_discovery_matches_the_materialized_inventory_at_every_cursor() -> Result<()> {
+    let db = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    for i in 0_u32..80 {
+        db.blob(&i.to_le_bytes(), public)?;
+        let d = naome_protocol::profile::Document::new(
+            naome_protocol::profile::Kind::Claim,
+            "point page",
+            "test",
+            serde_json::json!({"i":i}),
+            vec![],
+        )?;
+        let format = if i % 2 == 0 { Format::A } else { Format::B };
+        db.document(&d, format, public)?;
+    }
+    let snapshot = db.snapshot("page comparison", Default::default())?;
+    let mut cursor = None;
+    loop {
+        let full = db.discover(&snapshot, None, Some("point page"), None, "read", 7, cursor)?;
+        let page = db.discover_head(
+            snapshot.id()?,
+            None,
+            Some("point page"),
+            None,
+            "read",
+            7,
+            cursor,
+        )?;
+        assert_eq!(serde_json::to_value(&full)?, serde_json::to_value(&page)?);
+        cursor = page.after;
+        if cursor.is_none() {
+            break;
+        }
+    }
     Ok(())
 }

@@ -7,7 +7,7 @@ use crate::{profile::Document, wire::Id};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-pub(super) const INDEX_VERSION: u32 = 6;
+pub(super) const INDEX_VERSION: u32 = 7;
 const BATCH: usize = 16;
 const TEXT_BATCH: usize = 4;
 const ADD_MEDIA_PASSAGE_INDEX: &str = "CREATE INDEX IF NOT EXISTS rep_search_media_passages
@@ -40,10 +40,10 @@ impl Archive {
         let previous = installed_version(&tx)?;
         match previous {
             Some(INDEX_VERSION) => {}
-            Some(5) => tx.execute_batch(
+            Some(5 | 6) => tx.execute_batch(
                 "DROP TABLE rep_search_schema;
-                CREATE TABLE rep_search_schema(version INTEGER PRIMARY KEY CHECK(version=6));
-                INSERT INTO rep_search_schema VALUES(6);",
+                CREATE TABLE rep_search_schema(version INTEGER PRIMARY KEY CHECK(version=7));
+                INSERT INTO rep_search_schema VALUES(7);",
             )?,
             Some(1) => {
                 tx.execute_batch(include_str!("replace_v1.sql"))?;
@@ -56,7 +56,7 @@ impl Archive {
             None => tx.execute_batch(include_str!("schema.sql"))?,
             Some(_) => anyhow::bail!("unsupported local search index version"),
         }
-        if previous != Some(INDEX_VERSION) {
+        if !matches!(previous, Some(6 | INDEX_VERSION)) {
             tx.execute_batch(include_str!("visibility.sql"))?;
             if previous == Some(5) {
                 // Preserve extracted text and vectors while changing ownership of the mappings.
@@ -69,6 +69,15 @@ impl Archive {
                 )?;
             }
             tx.execute_batch(include_str!("positions.sql"))?;
+        }
+        if previous == Some(6) {
+            tx.execute_batch(
+                "DROP TRIGGER rep_search_sample_new_vector;
+                              DROP TRIGGER rep_search_sample_lost_vector;",
+            )?;
+        }
+        if previous != Some(INDEX_VERSION) {
+            tx.execute_batch(include_str!("vector_visibility.sql"))?;
         }
         tx.execute_batch(ADD_MEDIA_PASSAGE_INDEX)?;
         tx.commit()?;
@@ -199,10 +208,10 @@ impl Archive {
     }
 }
 
-pub(super) fn prepared_cache_available(db: &Connection) -> Result<bool> {
+pub(super) fn prepared_cache_version(db: &Connection) -> Result<Option<u32>> {
     match installed_version(db)? {
-        Some(INDEX_VERSION) => Ok(true),
-        None | Some(1..=5) => Ok(false),
+        version @ Some(6 | INDEX_VERSION) => Ok(version),
+        None | Some(1..=5) => Ok(None),
         Some(_) => anyhow::bail!("unsupported local search index version"),
     }
 }
