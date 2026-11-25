@@ -48,13 +48,22 @@ fn charge_member(total: usize, size: usize) -> Result<usize> {
     Ok(total)
 }
 
-fn check_manifest(head: Id, snapshot: &Snapshot) -> Result<()> {
+fn check_manifest_bounds(snapshot: &Snapshot) -> Result<()> {
+    let count = snapshot
+        .manifest
+        .as_ref()
+        .map_or(snapshot.objects.len() as u64, |manifest| manifest.count);
     ensure!(
         snapshot.source.len() <= 256
             && snapshot.parents.len() <= MAX_MANIFEST_PARENTS
-            && (1..=MAX_MEMBERS).contains(&snapshot.objects.len()),
+            && (1..=MAX_MEMBERS as u64).contains(&count),
         "invalid or oversized release manifest"
     );
+    Ok(())
+}
+
+fn check_manifest(head: Id, snapshot: &Snapshot) -> Result<()> {
+    check_manifest_bounds(snapshot)?;
     snapshot
         .verify_head(head)
         .context("invalid or oversized release manifest")
@@ -327,7 +336,9 @@ impl Archive {
     pub fn release(&self, head: Id) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let head = self.current_head_id(head)?;
-        let snapshot = self.head(head)?;
+        let mut snapshot = self.snapshot_header(head)?;
+        check_manifest_bounds(&snapshot)?;
+        snapshot.load_pages(&self.db)?;
         self.save(&snapshot)?;
         self.register_release(head, &snapshot)?;
         tx.commit()?;
@@ -468,5 +479,28 @@ impl Archive {
             review_receipt,
             extraction,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::PUBLIC;
+
+    #[test]
+    fn oversized_publication_is_rejected_before_inventory_loading() -> Result<()> {
+        let archive = Archive::memory()?;
+        for index in 0..=MAX_MEMBERS {
+            archive.blob(&index.to_be_bytes(), Id::blob(PUBLIC))?;
+        }
+        let head = archive.snapshot_id("oversized release", BTreeSet::new())?;
+        let root = archive.custody_head(head)?.inventory;
+        archive
+            .db
+            .execute("DELETE FROM custody_pages WHERE id=?", [root.to_string()])?;
+        let error = archive.release(head).unwrap_err();
+        assert_eq!(error.to_string(), "invalid or oversized release manifest");
+        assert!(archive.observed_releases()?.is_empty());
+        Ok(())
     }
 }
