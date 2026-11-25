@@ -171,8 +171,7 @@ fn decode_packet_hex(encoded: &str, decoded: &mut Vec<u8>) -> Result<(), hex::Fr
 
 impl Archive {
     fn packet(&self, s: &Snapshot, id: Id, purpose: &str) -> Result<Packet> {
-        let (bytes, access) =
-            self.resolve_with(s, id, purpose == "read", |policy| allows(policy, purpose))?;
+        let (bytes, access) = self.resolve_with(s, id, false, |policy| allows(policy, purpose))?;
         Ok(Packet {
             id,
             access,

@@ -122,12 +122,17 @@ impl Snapshot {
         }
         Ok(())
     }
-    pub(crate) fn replay_header(&self) -> Result<Vec<u8>> {
-        self.bytes()
+    pub(crate) fn replay_header(&self) -> Result<(Vec<u8>, &[Id])> {
+        Ok((self.bytes()?, &self.inherited_access))
     }
-    pub(crate) fn restore_replay(header: &[u8], pages: &Pages) -> Result<Self> {
+    pub(crate) fn restore_replay(
+        header: &[u8],
+        inherited_access: Vec<Id>,
+        pages: &Pages,
+    ) -> Result<Self> {
         let mut cut = serde_json::from_slice::<StoredHeader>(header)?.into_snapshot();
         cut.hydrate(pages)?;
+        cut.inherited_access = inherited_access;
         Ok(cut)
     }
     pub(crate) fn ensure_hydrated(&self) -> Result<()> {
@@ -366,6 +371,8 @@ impl<'a> InventoryReader<'a> {
                 |key| Ok(self.tree.get(manifest.inventory, &key.to_string())? == Some(key)),
                 |access| {
                     self.archive
+                        .require_point_scope(id, access, Some(manifest.id()?))?;
+                    self.archive
                         .require_exchange_access(manifest.id()?, id, access, true)
                 },
             ),
@@ -587,7 +594,8 @@ impl Archive {
         }
         let mut q = self.db.prepare(
             "SELECT d.id FROM archive_deposits d JOIN objects o ON o.id=d.id
-             WHERE d.serial>? AND d.serial<=? AND o.data IS NOT NULL ORDER BY d.serial",
+             WHERE d.serial>? AND d.serial<=? AND o.data IS NOT NULL
+               AND NOT EXISTS(SELECT 1 FROM archive_point_only WHERE id=d.id) ORDER BY d.serial",
         )?;
         let rows = q.query_map(params![after, water], |r| r.get::<_, String>(0))?;
         let ids = rows.map(|r| r?.parse());
@@ -725,7 +733,8 @@ impl Archive {
             let search_head = self.default_search_head(pin, full.as_ref().map(|seal| seal.0))?;
             let pending_objects: i64 = self.db.query_row(
                 "SELECT count(*) FROM archive_deposits d JOIN objects o ON o.id=d.id
-                 WHERE d.serial>? AND o.data IS NOT NULL",
+                 WHERE d.serial>? AND o.data IS NOT NULL
+                   AND NOT EXISTS(SELECT 1 FROM archive_point_only WHERE id=d.id)",
                 [full.as_ref().map_or(0, |seal| seal.2)],
                 |row| row.get(0),
             )?;
@@ -942,7 +951,7 @@ impl Archive {
             tree.get(m.inventory, &id.to_string())? == Some(id),
             "outside snapshot"
         );
-        self.resolve_inventory_member(m, id, purpose, tree)
+        self.resolve_inventory_member(m, id, purpose, purpose == "read", tree)
     }
     /// The caller has just visited this member in a verified membership walk.
     pub(super) fn resolve_inventory_member(
@@ -950,14 +959,17 @@ impl Archive {
         m: &Manifest,
         id: Id,
         purpose: &str,
+        point_read: bool,
         tree: &mut super::custody::tree::Tree<'_>,
     ) -> Result<(Vec<u8>, Id)> {
-        let (bytes, access) = self.raw(id)?.context("unavailable")?;
+        let (bytes, access) = self.raw_catalog_bytes(id)?.context("unavailable")?;
         ensure!(
             tree.get(m.inventory, &access.to_string())? == Some(access),
             "missing access descriptor"
         );
-        self.require_exchange_access(m.id()?, id, access, purpose == "read")?;
+        let head = m.id()?;
+        self.require_point_scope(id, access, point_read.then_some(head))?;
+        self.require_exchange_access(head, id, access, point_read)?;
         self.check_access(access, |policy| crate::profile::allows(policy, purpose))?;
         Ok((bytes, access))
     }

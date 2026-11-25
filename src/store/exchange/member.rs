@@ -5,8 +5,9 @@ use crate::{
     store::{
         ObjectAvailability,
         custody::{Head, MEMBERS, tree::Tree},
-        insert,
+        insert_bytes,
         inventory::{Page, Pages},
+        point,
     },
     wire::{Id, MAX_BYTES},
 };
@@ -260,8 +261,9 @@ impl Archive {
         let head_key = head.to_string();
         let mut added_grant = false;
         for (key, (access, bytes)) in contents {
+            point::mark_new(&tx, key)?;
             ensure!(
-                insert(&tx, key, &bytes, access)? == ObjectAvailability::Available,
+                insert_bytes(&tx, key, &bytes, access)? == ObjectAvailability::Available,
                 "locally withdrawn point disclosure"
             );
             added_grant |= tx.execute(
@@ -287,7 +289,9 @@ impl Archive {
                 purpose == "read",
                 "point disclosure authorizes reading only"
             );
-            let (bytes, access) = self.raw(id)?.context("unavailable point member")?;
+            let (bytes, access) = self
+                .raw_catalog_bytes(id)?
+                .context("unavailable point member")?;
             ensure!(access == proved, "point access changed");
             self.check_access(access, |p| allows(p, purpose))?;
             return Ok(bytes);

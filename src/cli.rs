@@ -214,7 +214,7 @@ pub enum ArchiveCommand {
     },
     /// Import an exchange file into the archive.
     #[command(
-        long_about = "Import an exchange file into the archive.\n\nFor independent senders, use --paged with an independently obtained --expected-head to verify membership and committed access policies. JSON bundles, --stream and --legacy-page rely on the sender for blob access policies."
+        long_about = "Import an exchange file into the archive.\n\nVerified paged imports require an independently obtained --expected-head. JSON bundles, --stream and --legacy-page rely on the sender for blob access policies."
     )]
     Import {
         file: PathBuf,
@@ -224,7 +224,7 @@ pub enum ArchiveCommand {
         /// Accept a v0.1.8 page without custody access witnesses from a trusted sender.
         #[arg(long, requires = "paged")]
         legacy_page: bool,
-        /// Independently obtained snapshot ID for a paged read exchange.
+        /// Independently obtained snapshot ID. Required for verified paged imports.
         #[arg(long, requires = "paged")]
         expected_head: Option<Id>,
         /// Interpret a point disclosure against this independently obtained head.
@@ -737,11 +737,19 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             legacy_page,
             expected_head,
         } => {
-            let mut db = open()?;
             let file = File::open(file)?;
             if paged {
                 let page = crate::store::ExchangePage::read(file)?;
-                let head = expected_head.unwrap_or_else(|| page.progress().head);
+                let head = expected_head
+                    .or_else(|| legacy_page.then(|| page.progress().head))
+                    .context(
+                        "verified paged import requires an independently obtained --expected-head",
+                    )?;
+                ensure!(
+                    page.progress().head == head,
+                    "exchange page does not match expected head"
+                );
+                let mut db = open()?;
                 let progress = if legacy_page {
                     db.import_legacy_exchange_page(head, &page)?
                 } else {
@@ -749,6 +757,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 };
                 return print(progress);
             }
+            let mut db = open()?;
             if let Some(head) = member_head {
                 let ids = db.import_members(head, &crate::store::MemberProof::read(file)?)?;
                 match ids.as_slice() {

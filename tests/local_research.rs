@@ -207,6 +207,19 @@ fn verified_page_import_keeps_question_links_at_the_same_budget() -> Result<()> 
             export.extend(["--after", identifier(cursor)]);
         }
         let sent = run(&sender, root, &export)?;
+        if index == 0 {
+            let unpinned = invoke(&receiver, root, &["import", &file, "--paged"])?;
+            assert!(!unpinned.status.success());
+            assert!(String::from_utf8_lossy(&unpinned.stderr).contains("--expected-head"));
+            let wrong = Id::blob(b"another snapshot").to_string();
+            let substituted = invoke(
+                &receiver,
+                root,
+                &["import", &file, "--paged", "--expected-head", &wrong],
+            )?;
+            assert!(!substituted.status.success());
+            assert!(!receiver.exists());
+        }
         let received = run(
             &receiver,
             root,

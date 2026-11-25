@@ -254,7 +254,7 @@ impl Archive {
         Ok(())
     }
 
-    pub(super) fn point_access(&self, head: Id, member: Id) -> Result<Option<Id>> {
+    pub(in crate::store) fn point_access(&self, head: Id, member: Id) -> Result<Option<Id>> {
         if let Some(access) = self.stored_member_access("archive_point_access", head, member)? {
             return Ok(Some(access));
         }
@@ -345,7 +345,7 @@ impl Archive {
             let mut packets = Vec::new();
             for &id in &ids {
                 if let Ok((bytes, policy)) =
-                    self.resolve_inventory_member(&m, id, "read", &mut access)
+                    self.resolve_inventory_member(&m, id, "read", false, &mut access)
                 {
                     if let Some(descriptor) = &descriptor {
                         verify_access(descriptor, id, policy, |key| {
@@ -383,8 +383,13 @@ impl Archive {
         })
     }
 
+    /// Accept a historical page from a trusted sender using its stated head.
+    /// Use [Self::import_pinned_exchange_page] for the verified format.
     pub fn import_exchange_page(&mut self, page: &ExchangePage) -> Result<ExchangeProgress> {
-        self.import_pinned_exchange_page(page.head, page)
+        if page.format == FORMAT {
+            anyhow::bail!("verified exchange requires an independently obtained head");
+        }
+        self.import_legacy_exchange_page(page.head, page)
     }
 
     /// Verify the page at a head the caller obtained independently of the transfer.
@@ -693,6 +698,7 @@ fn publish_packets(db: &Connection, head: &str, verified: bool) -> Result<i64> {
          SELECT id,x'',access FROM archive_exchange_staged WHERE head=? AND verified=? ORDER BY id",
         params![head, verified],
     )?;
+    crate::store::point::promote_staged(db, head, verified)?;
     db.execute(
         "DELETE FROM archive_exchange_staged WHERE head=? AND verified=?",
         params![head, verified],

@@ -93,7 +93,8 @@ impl Archive {
         }
         let tx = &self.db;
         tx.execute(
-            "INSERT OR IGNORE INTO archive_deposits(id) SELECT id FROM objects ORDER BY rowid",
+            "INSERT OR IGNORE INTO archive_deposits(id) SELECT id FROM objects
+             WHERE NOT EXISTS(SELECT 1 FROM archive_point_only p WHERE p.id=objects.id) ORDER BY rowid",
             [],
         )?;
         // A payload may never have belonged to a stored cut.

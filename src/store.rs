@@ -2,6 +2,7 @@ mod backlinks;
 mod exchange;
 mod extents;
 mod inventory;
+mod point;
 mod upgrade;
 pub use inventory::Manifest;
 pub mod custody;
@@ -128,6 +129,7 @@ impl Archive {
         CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, request BLOB NOT NULL, state TEXT NOT NULL, witness TEXT);")?;
         archive.init_custody()?;
         extents::upgrade(&archive.db)?;
+        point::upgrade(&archive.db)?;
         for bytes in [PUBLIC, READ_ONLY, PROFILE] {
             archive.blob(bytes, Id::blob(PUBLIC))?;
         }
@@ -203,6 +205,13 @@ impl Archive {
         )?)
     }
     pub(crate) fn raw(&self, id: Id) -> Result<Option<(Vec<u8>, Id)>> {
+        if self.point_only(id)? {
+            return Ok(None);
+        }
+        self.raw_catalog_bytes(id)
+    }
+
+    fn raw_catalog_bytes(&self, id: Id) -> Result<Option<(Vec<u8>, Id)>> {
         // Project the extent row so read-only handles also work before and across layout upgrades.
         let item: Option<(Vec<u8>, String, Option<i64>)> = self
             .db
@@ -261,8 +270,9 @@ impl Archive {
         allows: impl FnOnce(&[u8]) -> bool,
     ) -> Result<(Vec<u8>, Id)> {
         ensure!(s.objects.contains(&id), "outside snapshot");
-        let (b, acl) = self.raw(id)?.context("unavailable")?;
+        let (b, acl) = self.raw_catalog_bytes(id)?.context("unavailable")?;
         ensure!(s.objects.contains(&acl), "missing access descriptor");
+        self.require_point_scope(id, acl, point_read.then(|| s.id()).transpose()?)?;
         self.require_snapshot_exchange_access(s, id, acl, point_read)?;
         self.check_access(acl, allows)?;
         Ok((b, acl))
@@ -272,7 +282,10 @@ impl Archive {
         self.readable_with(
             id,
             |key| Ok(s.objects.contains(&key)),
-            |acl| self.require_snapshot_exchange_access(s, id, acl, true),
+            |acl| {
+                self.require_point_scope(id, acl, Some(s.id()?))?;
+                self.require_snapshot_exchange_access(s, id, acl, true)
+            },
         )
     }
 
@@ -488,8 +501,13 @@ impl Archive {
                     budget,
                     || {
                         let format = id.format().context("expected record")?;
-                        let (bytes, _) =
-                            self.resolve_inventory_member(&manifest, id, purpose, &mut tree)?;
+                        let (bytes, _) = self.resolve_inventory_member(
+                            &manifest,
+                            id,
+                            purpose,
+                            purpose == "read",
+                            &mut tree,
+                        )?;
                         Self::decode_document(format, &bytes, |profile| {
                             Ok(self
                                 .resolve_member_in(&manifest, profile, purpose, &mut tree)?
@@ -580,6 +598,25 @@ pub(crate) enum ObjectAvailability {
 }
 
 fn insert(db: &Connection, id: Id, b: &[u8], access: Id) -> Result<ObjectAvailability> {
+    let tx = if db.is_autocommit() {
+        Some(rusqlite::Transaction::new_unchecked(
+            db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    } else {
+        None
+    };
+    let available = insert_bytes(db, id, b, access)?;
+    if available == ObjectAvailability::Available {
+        point::promote(db, &id.to_string())?;
+    }
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
+    Ok(available)
+}
+
+fn insert_bytes(db: &Connection, id: Id, b: &[u8], access: Id) -> Result<ObjectAvailability> {
     if id.format().is_some()
         && db
             .prepare_cached("SELECT EXISTS(SELECT 1 FROM custody_records WHERE id=? AND access=?)")?

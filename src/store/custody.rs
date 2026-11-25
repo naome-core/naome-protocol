@@ -337,6 +337,8 @@ impl Archive {
                 if !exists {
                     slots.push((id, access, pack.len(), item.bytes.len()));
                     pack.extend_from_slice(&item.bytes);
+                } else {
+                    super::point::promote(&self.db, &id.to_string())?;
                 }
             } else {
                 ensure!(
@@ -378,6 +380,7 @@ impl Archive {
                  WHERE objects.data IS NOT NULL AND objects.access=excluded.access")?
                     .execute(params![key, access.to_string()])?;
                 ensure!(catalog == 1, "conflicting custody for packed record");
+                super::point::promote(&self.db, &key)?;
                 self.db
                     .prepare_cached("INSERT INTO custody_records VALUES(?,?,?,?,?)")?
                     .execute(params![

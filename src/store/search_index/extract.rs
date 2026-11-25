@@ -316,6 +316,9 @@ impl Archive {
         if !available || !inventory.contains(access)? {
             return Ok(None);
         }
+        if self.point_only(id)? {
+            return Ok(Some(id));
+        }
         let known: bool = self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM objects WHERE id=?)",
             [access.to_string()],
