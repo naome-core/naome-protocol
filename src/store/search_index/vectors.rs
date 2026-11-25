@@ -6,11 +6,12 @@ use crate::{
     store::{Archive, InventoryReader},
     wire::Id,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const VECTOR_BATCH: usize = 16;
+const VECTOR_PREFETCH: usize = VECTOR_BATCH * 16;
 const MAX_MEDIA_PARTS: usize = 48;
 const RETRY_SECONDS: i64 = 30;
 
@@ -63,41 +64,50 @@ impl Archive {
         let mut cursor = 0;
         let now = unix_seconds()?;
         while budget > 0 {
-            let pending =
-                self.pending_vectors(head, &key, cursor, now, budget.min(VECTOR_BATCH))?;
-            if pending.is_empty() {
+            // Reuse one ordered selection across model batches. Fetch passage text
+            // just before embedding so an intervening withdrawal takes effect.
+            let selected =
+                self.pending_vector_ids(head, &key, cursor, now, budget.min(VECTOR_PREFETCH))?;
+            let Some(&last) = selected.last() else {
                 break;
-            }
-            let indexed = Self::embed_passages(inventory, &pending, model);
-            let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-            {
-                let mut state = tx.prepare_cached(
-                    "INSERT INTO rep_search_vector_state(passage,model,limited,retry_after)
-                     SELECT id,?2,?3,?4 FROM rep_search_passages WHERE id=?1
-                     ON CONFLICT(passage,model) DO UPDATE SET limited=excluded.limited,retry_after=excluded.retry_after
-                     WHERE rep_search_vector_state.retry_after IS NOT NULL",
-                )?;
-                let mut insert = tx.prepare_cached(
-                    "INSERT OR IGNORE INTO rep_search_vectors(passage,model,part,span,vector)
-                     VALUES(?1,?2,?3,?4,?5)",
-                )?;
-                for (passage, indexed) in pending.iter().zip(indexed) {
-                    let retry = indexed.retry.then_some(now.saturating_add(RETRY_SECONDS));
-                    if state.execute(params![passage.id, key, indexed.limited, retry])? == 0 {
-                        continue;
-                    }
-                    for (part, (span, vector)) in indexed.parts.into_iter().enumerate() {
-                        let bytes: Vec<_> = vector.into_iter().flat_map(f32::to_le_bytes).collect();
-                        let span = span.map(|span| serde_json::to_string(&span)).transpose()?;
-                        insert.execute(params![passage.id, key, part as i64, span, bytes])?;
+            };
+            for batch in selected.chunks(VECTOR_BATCH) {
+                let pending = self.pending_vectors(head, &key, batch, now)?;
+                if pending.is_empty() {
+                    continue;
+                }
+                let indexed = Self::embed_passages(inventory, &pending, model);
+                let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
+                {
+                    let mut state = tx.prepare_cached(
+                        "INSERT INTO rep_search_vector_state(passage,model,limited,retry_after)
+                         SELECT id,?2,?3,?4 FROM rep_search_passages WHERE id=?1
+                         ON CONFLICT(passage,model) DO UPDATE
+                         SET limited=excluded.limited,retry_after=excluded.retry_after
+                         WHERE rep_search_vector_state.retry_after IS NOT NULL",
+                    )?;
+                    let mut insert = tx.prepare_cached(
+                        "INSERT OR IGNORE INTO rep_search_vectors(passage,model,part,span,vector)
+                         VALUES(?1,?2,?3,?4,?5)",
+                    )?;
+                    for (passage, indexed) in pending.iter().zip(indexed) {
+                        let retry = indexed.retry.then_some(now.saturating_add(RETRY_SECONDS));
+                        if state.execute(params![passage.id, key, indexed.limited, retry])? == 0 {
+                            continue;
+                        }
+                        for (part, (span, vector)) in indexed.parts.into_iter().enumerate() {
+                            let bytes: Vec<_> =
+                                vector.into_iter().flat_map(f32::to_le_bytes).collect();
+                            let span = span.map(|span| serde_json::to_string(&span)).transpose()?;
+                            insert.execute(params![passage.id, key, part as i64, span, bytes])?;
+                        }
                     }
                 }
+                tx.commit()?;
+                budget -= pending.len();
             }
-            // A removed passage cannot receive an embedding. The database assigns
-            // monotonically increasing passage IDs, including after a rebuild.
-            cursor = pending.last().context("empty embedding batch")?.id;
-            tx.commit()?;
-            budget -= pending.len();
+            // Passage IDs are monotone, including after a rebuild.
+            cursor = last;
         }
         if !super::positions::ready(&self.db, head, &key)?
             && super::coverage(&self.db, head)?.0
@@ -108,31 +118,59 @@ impl Archive {
         Ok(())
     }
 
-    fn pending_vectors(
+    fn pending_vector_ids(
         &self,
         head: &str,
         model: &str,
         cursor: i64,
         now: i64,
         limit: usize,
+    ) -> Result<Vec<i64>> {
+        self.db
+            .prepare_cached(
+                "SELECT p.id FROM rep_search_visible v
+                 JOIN rep_search_passages p ON p.entry=v.entry
+                 LEFT JOIN rep_search_vector_state st ON st.passage=p.id AND st.model=?2
+                 WHERE v.head=?1 AND p.semantic AND p.id>?3
+                   AND (st.passage IS NULL OR st.retry_after<=?4) ORDER BY p.id LIMIT ?5",
+            )?
+            .query_map(params![head, model, cursor, now, limit as i64], |row| {
+                row.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(Into::into)
+    }
+
+    fn pending_vectors(
+        &self,
+        head: &str,
+        model: &str,
+        ids: &[i64],
+        now: i64,
     ) -> Result<Vec<Pending>> {
         self.db
             .prepare_cached(
-                "SELECT p.id,e.object,p.location,p.text FROM rep_search_visible v
-             JOIN rep_search_entries e ON e.id=v.entry
-             JOIN rep_search_passages p ON p.entry=e.id
-             LEFT JOIN rep_search_vector_state st ON st.passage=p.id AND st.model=?2
-             WHERE v.head=?1 AND p.semantic AND p.id>?3
-               AND (st.passage IS NULL OR st.retry_after<=?4) ORDER BY p.id LIMIT ?5",
+                "SELECT p.id,e.object,p.location,p.text FROM json_each(?3) ids
+                 CROSS JOIN rep_search_passages p ON p.id=ids.value
+                 JOIN rep_search_entries e ON e.id=p.entry
+                 LEFT JOIN rep_search_vector_state st ON st.passage=p.id AND st.model=?2
+                 WHERE p.semantic AND (st.passage IS NULL OR st.retry_after<=?4)
+                   AND EXISTS (
+                       SELECT 1 FROM rep_search_visible v WHERE v.head=?1 AND v.entry=p.entry
+                   )
+                 ORDER BY p.id",
             )?
-            .query_map(params![head, model, cursor, now, limit as i64], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get(3)?,
-                ))
-            })?
+            .query_map(
+                params![head, model, serde_json::to_string(ids)?, now],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get(3)?,
+                    ))
+                },
+            )?
             .map(|row| {
                 let (id, object, location, text) = row?;
                 Ok(Pending {

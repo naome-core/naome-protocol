@@ -342,3 +342,66 @@ fn positional_invalidation_respects_visibility_across_heads() -> Result<()> {
     assert!(!state(first.id()?)? && state(second.id()?)? && !state(both.id()?)?);
     Ok(())
 }
+
+#[test]
+fn withdrawals_between_embedding_batches_exclude_later_passages() -> Result<()> {
+    const WITHDRAWN: &str = "superseded independent text";
+    struct WithdrawFirst {
+        archive: std::path::PathBuf,
+        chunk: Id,
+        inner: TestEmbedder,
+        batches: usize,
+    }
+
+    impl Embedder for WithdrawFirst {
+        fn id(&self) -> Id {
+            self.inner.id()
+        }
+
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+
+        fn embed(&mut self, input: EmbeddingInput, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            if self.batches == 0 {
+                Archive::open(&self.archive)?.withdraw(self.chunk)?;
+            }
+            self.batches += 1;
+            assert!(texts.iter().all(|text| !text.contains(WITHDRAWN)));
+            self.inner.embed(input, texts)
+        }
+    }
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("preparation.sqlite");
+    let archive = Archive::open(&path)?;
+    let public = Id::blob(PUBLIC);
+    for n in 0..20 {
+        claim(
+            &archive,
+            &format!("independent observation {n}"),
+            "prepare before the later format",
+            public,
+            Format::A,
+        )?;
+    }
+    let descriptor =
+        archive.capture(WITHDRAWN.as_bytes(), "text/plain", 1024, public, Format::B)?;
+    let snapshot = archive.snapshot("withdraw while preparing", BTreeSet::new())?;
+    let chunk = archive.read(&snapshot, descriptor, "read")?.one("chunk")?;
+    archive.prepare_search(&snapshot, 256, None)?;
+    let mut model = WithdrawFirst {
+        archive: path,
+        chunk,
+        inner: TestEmbedder {
+            id: Id::blob(b"bounded semantic preparation"),
+            embedded_passages: 0,
+        },
+        batches: 0,
+    };
+    let state = archive.prepare_search(&snapshot, 256, Some(&mut model))?;
+    assert!(model.batches > 1);
+    assert!(state.limited_coverage);
+    assert_eq!(state.semantic_index_complete, Some(true));
+    Ok(())
+}
