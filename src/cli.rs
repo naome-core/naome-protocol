@@ -640,7 +640,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         })) => {
             let db = reader()?;
             let report = match head {
-                Some(head) => db.replay_assessment(&db.search_head(Some(head))?, receipt)?,
+                Some(head) => db.replay_assessment_at(head, receipt)?,
                 None => db.replay_local_assessment(receipt)?,
             };
             let matches = report.matches;

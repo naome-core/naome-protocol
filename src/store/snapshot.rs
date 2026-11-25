@@ -222,7 +222,7 @@ impl<'a> InventoryReader<'a> {
         }
     }
 
-    pub(super) fn paged(archive: &'a Archive, manifest: Manifest) -> Self {
+    pub(crate) fn paged(archive: &'a Archive, manifest: Manifest) -> Self {
         Self {
             archive,
             view: InventoryView::Paged(manifest),
@@ -251,6 +251,58 @@ impl<'a> InventoryReader<'a> {
                 Ok(self.tree.get(manifest.inventory, &id.to_string())? == Some(id))
             }
         }
+    }
+
+    fn covers(&mut self, required: &Snapshot) -> Result<bool> {
+        let manifest = match &self.view {
+            InventoryView::Materialized(view) => {
+                return Ok(required.objects.is_subset(&view.objects));
+            }
+            InventoryView::Paged(manifest) => manifest,
+        };
+        let count = required.objects.len() as u64;
+        if count == 0 {
+            return Ok(true);
+        }
+        if count > manifest.count {
+            return Ok(false);
+        }
+        if required
+            .manifest
+            .as_ref()
+            .is_some_and(|m| m.inventory == manifest.inventory)
+        {
+            return Ok(count == manifest.count);
+        }
+
+        // Sparse horizons are cheaper to verify by authenticated point lookup.
+        // For similarly sized cuts, merge the ordered stream without retaining the selected cut.
+        if count <= manifest.count / 8 {
+            for &id in &required.objects {
+                if self.tree.get(manifest.inventory, &id.to_string())? != Some(id) {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        let mut wanted = required.objects.iter().copied();
+        let mut next = wanted.next();
+        manifest.scan_with(
+            None,
+            |id| self.tree.read(id),
+            |id| {
+                if let Some(target) = next {
+                    if id > target {
+                        return Ok(false);
+                    }
+                    if id == target {
+                        next = wanted.next();
+                    }
+                }
+                Ok(next.is_some())
+            },
+        )?;
+        Ok(next.is_none())
     }
 
     pub(crate) fn resolve(&mut self, id: Id) -> Result<(Vec<u8>, Id)> {
@@ -377,7 +429,16 @@ impl Archive {
         id: Id,
         encoding: ManifestEncoding,
     ) -> Result<Snapshot> {
-        self.load_snapshot_packet(id, &self.resolve(view, id, "read")?, encoding)
+        self.linked_snapshot_in(&mut InventoryReader::materialized(self, view), id, encoding)
+    }
+
+    pub(crate) fn linked_snapshot_in(
+        &self,
+        view: &mut InventoryReader<'_>,
+        id: Id,
+        encoding: ManifestEncoding,
+    ) -> Result<Snapshot> {
+        self.load_snapshot_packet(id, &view.resolve(id)?.0, encoding)
     }
 
     fn load_snapshot_packet(
@@ -862,6 +923,12 @@ impl Archive {
         self.with_read_view(|| self.point_bytes(head, id, purpose))
     }
     pub fn head(&self, id: Id) -> Result<Snapshot> {
+        let mut snapshot = self.snapshot_header(id)?;
+        snapshot.load_pages(&self.db)?;
+        Ok(snapshot)
+    }
+
+    pub(crate) fn snapshot_header(&self, id: Id) -> Result<Snapshot> {
         let b: Option<Vec<u8>> = self
             .db
             .query_row(
@@ -873,9 +940,7 @@ impl Archive {
         if b.is_none()
             && let Ok(h) = self.custody_head(id)
         {
-            let m = h.manifest()?;
-            let (objects, pages) = m.read(&self.db)?;
-            return Ok(Snapshot::current(m, objects, pages));
+            return Ok(StoredHeader::Current(h.manifest()?).into_snapshot());
         }
         let b = match b {
             Some(b) => b,
@@ -887,16 +952,22 @@ impl Archive {
             }
         };
         id.verify(&b)?;
-        let mut s = ManifestEncoding::Canonical.decode(id, &b)?;
-        s.load_pages(&self.db)?;
-        Ok(s)
+        ManifestEncoding::Canonical.decode(id, &b)
     }
 
     /// Resolve a linked receipt inventory using only evidence in the caller's view.
     pub(crate) fn receipt_horizon(&self, view: &Snapshot, id: Id) -> Result<Snapshot> {
-        let snapshot = self.linked_snapshot(view, id, ManifestEncoding::Canonical)?;
+        self.receipt_horizon_in(&mut InventoryReader::materialized(self, view), id)
+    }
+
+    pub(crate) fn receipt_horizon_in(
+        &self,
+        view: &mut InventoryReader<'_>,
+        id: Id,
+    ) -> Result<Snapshot> {
+        let snapshot = self.linked_snapshot_in(view, id, ManifestEncoding::Canonical)?;
         ensure!(
-            snapshot.objects.is_subset(&view.objects),
+            view.covers(&snapshot)?,
             "receipt inventory outside the selected horizon"
         );
         Ok(snapshot)

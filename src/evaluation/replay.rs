@@ -5,7 +5,7 @@ use super::{
 use crate::{
     migration::Equivalence,
     profile::{Document, Kind, PUBLIC},
-    store::{Archive, Snapshot},
+    store::{Archive, InventoryReader, Snapshot},
     wire::{Format, Id},
 };
 use anyhow::{Result, ensure};
@@ -108,7 +108,19 @@ fn assessment_document(document: Document) -> Result<Document> {
 impl Archive {
     /// Re-run the recorded evaluator on the original evidence horizon without storing anything.
     pub fn replay_assessment(&self, view: &Snapshot, id: Id) -> Result<ReceiptReplay> {
-        self.replay_receipt(Some(view), id)
+        self.replay_receipt(Some(InventoryReader::materialized(self, view)), id)
+    }
+
+    #[cfg(feature = "cli")]
+    pub(crate) fn replay_assessment_at(&self, head: Id, id: Id) -> Result<ReceiptReplay> {
+        self.with_read_view(|| {
+            let header = self.snapshot_header(self.selected_search_id(Some(head))?)?;
+            let view = match &header.manifest {
+                Some(manifest) => InventoryReader::paged(self, manifest.clone()),
+                None => InventoryReader::materialized(self, &header),
+            };
+            self.replay_receipt(Some(view), id)
+        })
     }
 
     /// Replay an authorized local receipt directly, including before the next snapshot.
@@ -116,27 +128,32 @@ impl Archive {
         self.replay_receipt(None, id)
     }
 
-    fn replay_receipt(&self, view: Option<&Snapshot>, id: Id) -> Result<ReceiptReplay> {
+    fn replay_receipt(
+        &self,
+        mut view: Option<InventoryReader<'_>>,
+        id: Id,
+    ) -> Result<ReceiptReplay> {
         self.with_read_view(|| {
-            let recorded = match view {
-                Some(view) => saved_assessment(self, view, id)?,
+            let recorded = match view.as_mut() {
+                Some(view) => assessment_document(view.read(id)?)?,
                 None => assessment_document(self.read_with(id, |key| self.resolve_local(key))?)?,
             };
             let evaluator: String = recorded.field("evaluator")?;
             let query = recorded.field("original_query")?;
             check_receipt_budget(&query)?;
             let head = recorded.one("snapshot")?;
-            let historical = match view {
-                Some(view) => self.receipt_horizon(view, head)?,
+            let historical = match view.as_mut() {
+                Some(view) => self.receipt_horizon_in(view, head)?,
                 None => self.local_receipt_horizon(head)?,
             };
             let mut aliases = Equivalence::default();
+            let mut local = InventoryReader::materialized(self, &historical);
             for mapping in recorded.roles("mapping") {
-                aliases.add(self.verify_mapping_with(
-                    view.unwrap_or(&historical),
-                    mapping,
-                    manifest_encoding(&evaluator)?,
-                )?);
+                let encoding = manifest_encoding(&evaluator)?;
+                aliases.add(match view.as_mut() {
+                    Some(view) => self.verify_mapping_in(view, mapping, encoding)?,
+                    None => self.verify_mapping_in(&mut local, mapping, encoding)?,
+                });
             }
             let replay = rebuild_receipt(
                 self,

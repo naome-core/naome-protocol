@@ -865,3 +865,36 @@ fn replay_rejects_a_historical_oversize_receipt_before_loading_its_horizon() -> 
     assert!(stderr.contains("receipt evaluation budget"), "{stderr}");
     Ok(())
 }
+
+#[test]
+fn explicit_replay_matches_the_materialized_view_with_a_mapping() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let path = root.join("archive.sqlite");
+    let archive = Archive::open(&path)?;
+    let case = fixture::seed(&archive, Format::A)?;
+    let published = archive.head(case.published)?;
+    let mapping = archive.migrate(&published, Format::B, "mapped evidence")?;
+    let horizon = archive.snapshot("receipt horizon", Default::default())?;
+    let mut query = case.queries[2].clone();
+    query.mappings.push(mapping.mapping);
+    let result = assess(&archive, &horizon, &query)?;
+    let receipt = deposit_receipt(&archive, &horizon, &query, &result, Format::A)?;
+    let selected = archive.snapshot("explicit view", Default::default())?;
+
+    let expected = serde_json::to_value(archive.replay_assessment(&selected, receipt)?)?;
+    assert_eq!(expected["matches"], true);
+    let received = run(
+        &path,
+        root,
+        &[
+            "replay",
+            &receipt.to_string(),
+            "--head",
+            &selected.id()?.to_string(),
+            "--require-match",
+        ],
+    )?;
+    assert_eq!(received, expected);
+    Ok(())
+}
