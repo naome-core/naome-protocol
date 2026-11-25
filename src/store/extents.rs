@@ -99,14 +99,14 @@ pub(super) fn get(db: &Connection, id: Id, length: usize) -> Result<Vec<u8>> {
     let mut data = Vec::with_capacity(length);
     while let Some(row) = rows.next()? {
         let index: i64 = row.get(0)?;
-        let block: Vec<u8> = row.get(1)?;
+        let block = row.get_ref(1)?.as_blob()?;
         ensure!(
             index as usize == data.len() / BLOCK
                 && block.len() == (length - data.len()).min(BLOCK)
                 && !block.is_empty(),
             "invalid extent block"
         );
-        data.extend_from_slice(&block);
+        data.extend_from_slice(block);
     }
     ensure!(data.len() == length, "incomplete extent");
     id.verify(&data)?;

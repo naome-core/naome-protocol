@@ -468,9 +468,8 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             bytes,
         } => {
             let db = reader()?;
-            let s = db.active_head(head)?;
             print(publish(&path, |file| {
-                db.materialize(&s, descriptor, "read", bytes, file)
+                db.materialize_at(head, descriptor, bytes, file)
             })?)
         }
         ArchiveCommand::Select { head, request } => {

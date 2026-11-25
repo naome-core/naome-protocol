@@ -796,3 +796,49 @@ fn compact_explanation_reads_the_same_records_as_the_materialized_view() -> Resu
     assert_eq!(fs::read(&path)?, before);
     Ok(())
 }
+
+#[test]
+fn recovery_publishes_only_complete_verified_payloads() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let path = root.join("archive.sqlite");
+    let archive = Archive::open(&path)?;
+    let content = vec![0x48; 700_000];
+    let descriptor = archive.capture(
+        content.as_slice(),
+        "application/octet-stream",
+        300_000,
+        Id::blob(READ_ONLY),
+        Format::A,
+    )?;
+    let head = archive.snapshot_id("capture", Default::default())?;
+    let chunk = archive
+        .read_head(head, descriptor, "read")?
+        .roles("chunk")
+        .last()
+        .unwrap();
+    let head = head.to_string();
+    let descriptor = descriptor.to_string();
+    let recover = |name| {
+        invoke(
+            &path,
+            root,
+            &["recover", &head, &descriptor, name, "--bytes", "700000"],
+        )
+    };
+
+    let before = fs::read(&path)?;
+    let recovered = recover("complete.bin")?;
+    assert!(recovered.status.success());
+    assert_eq!(serde_json::from_slice::<u64>(&recovered.stdout)?, 700_000);
+    assert_eq!(fs::read(root.join("complete.bin"))?, content);
+    assert!(!recover("complete.bin")?.status.success());
+    assert_eq!(fs::read(root.join("complete.bin"))?, content);
+    assert_eq!(fs::read(&path)?, before);
+
+    archive.withdraw(chunk)?;
+    let incomplete = recover("incomplete.bin")?;
+    assert!(!incomplete.status.success());
+    assert!(!root.join("incomplete.bin").exists());
+    Ok(())
+}

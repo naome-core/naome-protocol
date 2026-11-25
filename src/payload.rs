@@ -178,6 +178,22 @@ impl Archive {
         self.read(s, id, purpose)?
             .materialize(budget, output, |chunk| self.resolve(s, chunk, purpose))
     }
+
+    #[cfg(feature = "cli")]
+    pub(crate) fn materialize_at(
+        &self,
+        head: Id,
+        id: Id,
+        budget: u64,
+        output: impl Write,
+    ) -> Result<u64> {
+        self.with_read_view(|| {
+            let mut inventory = self.inventory_reader(head)?;
+            inventory
+                .read(id)?
+                .materialize(budget, output, |chunk| Ok(inventory.resolve(chunk)?.0))
+        })
+    }
 }
 
 impl Document {
