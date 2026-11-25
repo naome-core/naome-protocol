@@ -181,6 +181,34 @@ impl Archive {
         Ok(())
     }
 
+    pub(super) fn suspend_release_on_exchange_access(&self, head: Id) -> Result<()> {
+        let key = head.to_string();
+        let available: bool = self
+            .db
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM releases r WHERE r.head=?1 AND NOT EXISTS
+                 (SELECT 1 FROM suspended_releases WHERE head=?1))",
+            )?
+            .query_row([&key], |row| row.get(0))?;
+        if available {
+            let mut acl = self
+                .db
+                .prepare_cached("SELECT access FROM objects WHERE id=?")?;
+            for &id in &self.head(head)?.objects {
+                let access: String = acl.query_row([id.to_string()], |row| row.get(0))?;
+                if self
+                    .require_exchange_access(head, id, access.parse()?, false)
+                    .is_err()
+                {
+                    self.db
+                        .execute("INSERT OR IGNORE INTO suspended_releases VALUES(?)", [&key])?;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// An older archive can be opened for inspection without applying the migration.
     fn catalog_suspensions(&self) -> Result<Cow<'static, str>> {
         const SUSPENDED: &str = "SELECT head FROM suspended_releases";

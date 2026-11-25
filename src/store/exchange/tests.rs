@@ -638,8 +638,19 @@ fn omitted_blobs_cannot_inherit_a_conflicting_local_acl() -> Result<()> {
     let mut receiver = Archive::memory()?;
     assert_eq!(receiver.blob(bytes, Id::blob(PUBLIC))?, payload);
     let local = receiver.snapshot("local", Default::default())?;
+    let legacy = source.export_legacy_exchange_page(head, None, 64)?;
+    assert!(
+        receiver
+            .import_legacy_exchange_page(head, &legacy)?
+            .complete
+    );
+    receiver.release(head)?;
+    assert_eq!(receiver.released_member(head, payload)?.bytes, bytes);
     let page = source.export_exchange_page(head, None, 64)?;
     assert!(receiver.import_pinned_exchange_page(head, &page)?.complete);
+    assert!(receiver.has_observed_release(head)?);
+    assert!(receiver.releases()?.is_empty());
+    assert!(receiver.released_member(head, payload).is_err());
     let scoped = receiver.head(head)?;
     assert!(receiver.resolve_head(head, payload, "train").is_err());
     assert!(receiver.resolve(&scoped, payload, "train").is_err());
@@ -929,6 +940,10 @@ fn a_legacy_retry_retains_the_access_of_a_previously_omitted_conflict() -> Resul
             .complete
     );
     let checkpoint = receiver.exchange_import_status(head)?;
+    receiver.release(head)?;
+    assert_eq!(receiver.released_member(head, id)?.bytes, bytes);
+    let before = receiver.catalog_state()?;
+    assert_eq!(before.available, 1);
     assert!(
         receiver
             .import_legacy_exchange_page(head, &original)?
@@ -943,6 +958,12 @@ fn a_legacy_retry_retains_the_access_of_a_previously_omitted_conflict() -> Resul
     assert!(receiver.resolve_head(head, id, "train").is_err());
     assert!(receiver.resolve_head(head, id, "read").is_err());
     assert_eq!(receiver.resolve_local(id)?, bytes);
+    assert!(receiver.has_observed_release(head)?);
+    assert!(receiver.release_page(None)?.heads.is_empty());
+    assert!(receiver.announcements_after(0)?.is_empty());
+    assert!(receiver.releases()?.is_empty());
+    assert!(receiver.released_member(head, id).is_err());
+    assert_eq!(receiver.catalog_state()?.revision, before.revision + 1);
     Ok(())
 }
 

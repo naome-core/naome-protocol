@@ -15,7 +15,7 @@ use crate::{
     wire::{Id, MAX_BYTES},
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -442,9 +442,7 @@ impl Archive {
         );
         page.manifest.verify(head)?;
         let key = head.to_string();
-        let tx = self
-            .db
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let (cursor, seen, complete, prior_supplied): (Option<String>, i64, bool, Option<i64>) = tx
             .query_row(
                 "SELECT cursor,seen,complete,supplied FROM archive_exchange_sessions WHERE head=? AND verified=?",
@@ -545,10 +543,8 @@ impl Archive {
         drop(backlinks);
         witnesses.finish()?;
         let mut progress = page.progress();
+        let mut access_changed = legacy_scope_changed;
         if duplicate {
-            if legacy_scope_changed {
-                crate::store::search_index::invalidate_access_scope(&tx, &key)?;
-            }
             progress.complete = complete;
             progress.continuation = if complete { None } else { cursor };
             if supplied != 0 {
@@ -586,9 +582,7 @@ impl Archive {
                 supplied -= conflicts;
                 let snapshot = StoredHeader::Current(page.manifest.clone()).into_snapshot();
                 save_imported_head(&tx, head, &snapshot)?;
-                if verified || conflicts != 0 {
-                    crate::store::search_index::invalidate_access_scope(&tx, &key)?;
-                }
+                access_changed = verified || conflicts != 0;
             }
             tx.execute(
                 "INSERT INTO archive_exchange_sessions(head,verified,cursor,seen,complete,descriptor,supplied)
@@ -606,6 +600,10 @@ impl Archive {
                     else { prior_supplied.map(|n| n + supplied) },
                 ],
             )?;
+        }
+        if access_changed {
+            crate::store::search_index::invalidate_access_scope(&tx, &key)?;
+            self.suspend_release_on_exchange_access(head)?;
         }
         tx.commit()?;
         Ok(progress)
