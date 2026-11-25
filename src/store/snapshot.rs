@@ -936,20 +936,8 @@ impl Archive {
         ids: impl Iterator<Item = Result<Id>>,
         withheld: &BTreeSet<Id>,
     ) -> Result<Id> {
-        let seal_batch = |previous, items: &[Item], review_scope| -> Result<Id> {
-            let head = self
-                .admit_batch(source, previous, items, parents, false)?
-                .head;
-            if review_scope {
-                self.db
-                    .prepare_cached("INSERT OR IGNORE INTO archive_review_scopes VALUES(?)")?
-                    .execute([head.to_string()])?;
-            }
-            Ok(head)
-        };
         let mut items = Vec::new();
         let mut total = 0;
-        let mut review_scope = false;
         for id in ids {
             let id = id?;
             let review_withheld = withheld.contains(&id);
@@ -974,11 +962,13 @@ impl Archive {
                 }
             };
             if !items.is_empty() && (items.len() == MEMBERS || total + bytes.len() > BATCH_BYTES) {
-                cursor = Some(seal_batch(cursor, &items, review_scope)?);
+                cursor = Some(
+                    self.admit_batch(source, cursor, &items, parents, false)?
+                        .head,
+                );
                 items.clear();
                 total = 0;
             }
-            review_scope |= review_withheld;
             total += bytes.len();
             items.push(Item {
                 member: Member {
@@ -990,7 +980,9 @@ impl Archive {
                 bytes,
             });
         }
-        let head = seal_batch(cursor, &items, review_scope)?;
+        let head = self
+            .admit_batch(source, cursor, &items, parents, false)?
+            .head;
         let manifest = self.custody_head(head)?.manifest()?;
         self.register_snapshot(&manifest, false)?;
         Ok(head)

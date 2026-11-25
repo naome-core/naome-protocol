@@ -24,7 +24,7 @@ pub struct QuestionArguments {
     /// Use this snapshot instead of the active search snapshot.
     #[arg(long)]
     pub(super) head: Option<Id>,
-    /// Maximum record and relationship candidates to inspect, within a 64 MiB payload read budget.
+    /// Candidate limit per scan of records, incoming links, or dependencies. Payload reads share a 64 MiB limit.
     #[arg(long, default_value_t = 1000)]
     pub(super) budget: usize,
 }

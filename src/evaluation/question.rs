@@ -72,10 +72,10 @@ enum QuestionBacklinks {
         index: BacklinkIndex,
         candidates_left: usize,
     },
-    Scanned(BTreeMap<Id, Vec<Id>>),
+    Scanned(BTreeMap<Id, BTreeSet<Id>>),
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RecordState {
     Readable,
     Unavailable,
@@ -88,6 +88,8 @@ struct QuestionWalk<'a> {
     documents: BTreeMap<Id, Document>,
     unavailable: BTreeSet<Id>,
     records_left: usize,
+    dependency_limit: usize,
+    dependencies: BTreeMap<Id, Option<RecordState>>,
     read_budget: InventoryReadBudget,
     limited: bool,
     unscanned_from: Option<Id>,
@@ -157,14 +159,14 @@ impl QuestionWalk<'_> {
                 }
             }
         }
-        let mut backlinks: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+        let mut backlinks: BTreeMap<Id, BTreeSet<Id>> = BTreeMap::new();
         for (&id, document) in &self.documents {
             for edge in document
                 .inputs
                 .iter()
                 .filter(|edge| anchors(document, &edge.role))
             {
-                backlinks.entry(edge.target).or_default().push(id);
+                backlinks.entry(edge.target).or_default().insert(id);
             }
         }
         self.backlinks = QuestionBacklinks::Scanned(backlinks);
@@ -187,7 +189,11 @@ impl QuestionWalk<'_> {
                 *candidates_left -= candidates.len();
                 candidates
             }
-            QuestionBacklinks::Scanned(backlinks) => backlinks.remove(&target).unwrap_or_default(),
+            QuestionBacklinks::Scanned(backlinks) => backlinks
+                .remove(&target)
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
         };
         let mut related = Vec::new();
         for id in candidates.into_iter().filter(|id| id.format().is_some()) {
@@ -206,19 +212,50 @@ impl QuestionWalk<'_> {
         Ok(related)
     }
 
+    fn consider_dependency(&mut self, target: Id) -> bool {
+        if self.dependencies.contains_key(&target) {
+            return true;
+        }
+        if self.dependencies.len() == self.dependency_limit {
+            self.limited = true;
+            return false;
+        }
+        self.dependencies.insert(target, None);
+        true
+    }
+
+    fn claim_dependencies(&mut self, id: Id) -> Vec<Id> {
+        let claims: Vec<_> = self.documents[&id]
+            .roles("claim")
+            .filter(|id| id.format().is_some())
+            .collect();
+        claims
+            .into_iter()
+            .take_while(|&id| self.consider_dependency(id))
+            .collect()
+    }
+
+    fn blob_dependency(&mut self, id: Id) -> RecordState {
+        if let Some(state) = self.dependencies[&id] {
+            return state;
+        }
+        let state = match self.inventory.readable_bounded(id, &mut self.read_budget) {
+            Ok(()) => RecordState::Readable,
+            Err(error) if error.is::<InventoryBudgetExceeded>() => RecordState::Unexamined,
+            Err(_) => RecordState::Unavailable,
+        };
+        self.dependencies.insert(id, Some(state));
+        state
+    }
+
     fn related(&mut self, question: Id) -> Result<(BTreeSet<Id>, BTreeSet<Id>)> {
         let mut related = BTreeSet::new();
         let mut queue = VecDeque::from([question]);
-        queue.extend(
-            self.documents[&question]
-                .roles("claim")
-                .filter(|id| id.format().is_some()),
-        );
+        queue.extend(self.claim_dependencies(question));
         while let Some(id) = queue.pop_front() {
             if self.load(id)? == RecordState::Readable && related.insert(id) {
-                let document = &self.documents[&id];
-                if document.kind == Kind::Argument {
-                    queue.extend(document.roles("claim").filter(|id| id.format().is_some()));
+                if self.documents[&id].kind == Kind::Argument {
+                    queue.extend(self.claim_dependencies(id));
                 }
                 queue.extend(self.inbound(id, |_| true)?);
             }
@@ -234,14 +271,14 @@ impl QuestionWalk<'_> {
                 .map(|edge| edge.target)
                 .collect();
             for target in inputs {
+                if !self.consider_dependency(target) {
+                    break;
+                }
                 if target.format().is_none() {
-                    match self
-                        .inventory
-                        .readable_bounded(target, &mut self.read_budget)
-                    {
-                        Ok(()) => {}
-                        Err(error) if error.is::<InventoryBudgetExceeded>() => self.limited = true,
-                        Err(_) => {
+                    match self.blob_dependency(target) {
+                        RecordState::Readable => {}
+                        RecordState::Unexamined => self.limited = true,
+                        RecordState::Unavailable => {
                             unavailable_inputs.insert(target);
                         }
                     }
@@ -400,6 +437,8 @@ impl Archive {
             documents: BTreeMap::from([(question, root)]),
             unavailable: BTreeSet::new(),
             records_left: budget,
+            dependency_limit: budget,
+            dependencies: BTreeMap::new(),
             read_budget,
             limited: false,
             unscanned_from: None,
@@ -416,6 +455,27 @@ mod tests {
         wire::Format,
     };
     use serde_json::json;
+
+    #[test]
+    fn question_budget_bounds_forward_blob_probes() -> Result<()> {
+        let archive = Archive::memory()?;
+        let members: Vec<_> = (0_u8..64).map(|n| Id::blob(&[n])).collect();
+        let document = Document::new(
+            Kind::Question,
+            "question with unavailable evidence",
+            "test",
+            json!({}),
+            members.iter().map(|&id| link("evidence", id)).collect(),
+        )?;
+        let question = archive.document(&document, Format::A, Id::blob(PUBLIC))?;
+        let snapshot = archive.snapshot("dependency budget", Default::default())?;
+        let report = archive.question_view(&snapshot, question, 1)?;
+        assert_eq!(report.unavailable_inputs, [members[0]].into());
+        assert!(report.limited_coverage);
+        let report = archive.question_view(&snapshot, question, members.len())?;
+        assert_eq!(report.unavailable_inputs, members.into_iter().collect());
+        Ok(())
+    }
 
     #[test]
     fn payload_budget_charges_the_root_profile_and_reused_acl() -> Result<()> {

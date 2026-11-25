@@ -183,7 +183,10 @@ pub enum ArchiveCommand {
         #[arg(long, default_value = "read")]
         purpose: String,
     },
-    /// Save an assessment receipt using at most 100,000 evaluation steps and 64 MiB.
+    /// Save an assessment receipt with checked query limits.
+    ///
+    /// The query accepts a step budget up to 100,000 and a notice-scan byte limit up to 64 MiB.
+    /// The evaluator applies that step budget to notice discovery and to each argument separately.
     Assess { head: Id, query: PathBuf },
     /// Re-run the recorded evaluator and compare the result with the saved receipt.
     Replay(DeferredArgs<research::ReplayArguments>),

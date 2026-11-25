@@ -942,7 +942,7 @@ fn historical_extraction_reads_mapping_manifests_under_the_receipts_rules() -> R
 
 #[test]
 fn replica_review_admits_only_members_authorized_by_a_selected_source() -> Result<()> {
-    use naome_protocol::store::custody::MEMBERS;
+    use naome_protocol::store::custody::{Item, MEMBERS, Member};
     let mut archive = Archive::memory()?;
     let public = Id::blob(PUBLIC);
     let policy = fixture::policy(&archive, Format::A)?;
@@ -998,6 +998,30 @@ fn replica_review_admits_only_members_authorized_by_a_selected_source() -> Resul
     assert!(archive.head(prefix)?.objects.contains(&member));
     assert!(archive.resolve_head(prefix, member, "train").is_err());
     assert!(archive.custody_resolve(prefix, member, "train").is_err());
+    let later = archive
+        .custody_append(
+            &view.source,
+            Some(withheld),
+            &[Item::blob(b"later note".to_vec(), public)],
+        )?
+        .head;
+    assert!(archive.head(later)?.objects.contains(&member));
+    assert!(archive.resolve_head(later, member, "train").is_err());
+    assert!(archive.custody_resolve(later, member, "train").is_err());
+    let conflicting_absence = Item {
+        member: Member {
+            id: member,
+            access: public,
+            position: None,
+            absent: true,
+        },
+        bytes: Vec::new(),
+    };
+    assert!(
+        archive
+            .custody_append(&view.source, Some(later), &[conflicting_absence])
+            .is_err()
+    );
 
     request.label_head = archive.snapshot_id("independent custody", Default::default())?;
     let admitted = archive.review_releases(&request)?.review_horizon;
