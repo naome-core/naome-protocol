@@ -3,6 +3,7 @@ use super::{Archive, MEASUREMENT_PROFILE, PROFILE, PUBLIC, READ_ONLY};
 use crate::wire::Id;
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, params};
+use std::borrow::Cow;
 
 fn table_exists(db: &Connection, name: &str) -> Result<bool> {
     Ok(db
@@ -24,20 +25,50 @@ pub(super) fn upgrade(db: &Connection) -> Result<()> {
     // Older archives do not say whether a point-disclosed object was also
     // independently admitted. Keep its bytes, and require fresh admission.
     db.execute(
-        "INSERT OR IGNORE INTO archive_point_only
-         SELECT p.member FROM archive_point_access p JOIN objects o ON o.id=p.member
-         WHERE o.access=p.access AND o.id NOT IN (?1,?2,?3,?4)
-         UNION
-         SELECT p.member FROM archive_member_access p JOIN objects o ON o.id=p.member
-         WHERE o.access=p.access AND o.id NOT IN (?1,?2,?3,?4)",
-        params![
-            Id::blob(PUBLIC).to_string(),
-            Id::blob(READ_ONLY).to_string(),
-            Id::blob(PROFILE).to_string(),
-            Id::blob(MEASUREMENT_PROFILE).to_string(),
-        ],
+        &format!(
+            "INSERT OR IGNORE INTO archive_point_only {}",
+            legacy_catalog(db)?
+        ),
+        [],
     )?;
     Ok(())
+}
+
+fn legacy_catalog(db: &Connection) -> Result<String> {
+    let bootstrap = [PUBLIC, READ_ONLY, PROFILE, MEASUREMENT_PROFILE]
+        .map(|bytes| format!("'{}'", Id::blob(bytes)))
+        .join(",");
+    let mut sources = Vec::new();
+    for table in ["archive_point_access", "archive_member_access"] {
+        if table_exists(db, table)? {
+            sources.push(format!(
+                "SELECT p.member AS id FROM {table} p JOIN objects o ON o.id=p.member
+                 WHERE p.access=o.access AND p.member NOT IN ({bootstrap})"
+            ));
+        }
+    }
+    if sources.is_empty() {
+        return Ok("SELECT CAST(NULL AS TEXT) AS id WHERE 0".into());
+    }
+    Ok(sources.join(" UNION ALL "))
+}
+
+pub(super) fn catalog(db: &Connection) -> Result<Cow<'static, str>> {
+    if table_exists(db, "archive_point_only")? {
+        return Ok(Cow::Borrowed("SELECT id FROM archive_point_only"));
+    }
+    Ok(Cow::Owned(legacy_catalog(db)?))
+}
+
+pub(super) fn visible_in_search(db: &Connection, head: &str) -> Result<bool> {
+    let points = catalog(db)?;
+    Ok(db
+        .prepare_cached(&format!(
+            "SELECT EXISTS(SELECT 1 FROM ({points}) p
+           CROSS JOIN rep_search_sources s ON s.source=p.id
+           CROSS JOIN rep_search_visible v ON v.entry=s.entry WHERE v.head=?)"
+        ))?
+        .query_row([head], |row| row.get(0))?)
 }
 
 pub(super) fn mark_new(db: &Connection, id: Id) -> Result<()> {
@@ -123,26 +154,14 @@ impl Archive {
             Err(error) if table_exists(&self.db, "archive_point_only")? => return Err(error.into()),
             Err(_) => {}
         }
-        if [Id::blob(PUBLIC), Id::blob(READ_ONLY)].contains(&id)
-            || super::supported_profile(id).is_some()
-        {
-            return Ok(false);
-        }
         // Read-only opening must also honor the conservative upgrade rule.
-        for table in ["archive_point_access", "archive_member_access"] {
-            if table_exists(&self.db, table)?
-                && self
-                    .db
-                    .prepare_cached(&format!(
-                        "SELECT EXISTS(SELECT 1 FROM {table} p JOIN objects o ON o.id=p.member
-                                   WHERE p.member=? AND p.access=o.access)"
-                    ))?
-                    .query_row([id.to_string()], |row| row.get::<_, bool>(0))?
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let points = legacy_catalog(&self.db)?;
+        Ok(self
+            .db
+            .prepare_cached(&format!(
+                "SELECT EXISTS(SELECT 1 FROM ({points}) WHERE id=?)"
+            ))?
+            .query_row([id.to_string()], |row| row.get(0))?)
     }
 
     pub(super) fn require_point_scope(&self, id: Id, access: Id, head: Option<Id>) -> Result<()> {

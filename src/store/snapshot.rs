@@ -558,13 +558,16 @@ impl Archive {
             .db
             .query_row(
                 "SELECT id FROM archive_seals
-             WHERE source=? AND parents=? AND high_water=? AND epoch=?",
+             WHERE source=? AND parents=? AND high_water=? AND epoch=? ORDER BY rowid DESC LIMIT 1",
                 params![source, encoded, water, epoch],
                 |r| r.get(0),
             )
             .optional()?;
         if let Some(id) = existing {
-            return id.parse();
+            let id = id.parse()?;
+            if !self.full_seal_includes_points(id, water)? {
+                return Ok(id);
+            }
         }
         let mut base = None;
         let mut after = 0_i64;
@@ -585,6 +588,7 @@ impl Archive {
                 )
                 .optional()?
                 && (base.is_none() || previous > after)
+                && !self.full_seal_includes_points(*parent, previous)?
                 && (parent_epoch == epoch
                     || self.full_parent_available(*parent, previous, withdrawal_serial)?)
             {
@@ -611,6 +615,29 @@ impl Archive {
             tx.commit()?
         }
         Ok(head)
+    }
+
+    fn full_seal_includes_points(&self, head: Id, high_water: i64) -> Result<bool> {
+        // New disclosures never enter archive_deposits. Only legacy admissions
+        // can leave a point-only member in a full cut that predates its upgrade.
+        let mut query = self.db.prepare_cached(
+            "SELECT p.id FROM archive_point_only p CROSS JOIN archive_deposits d ON d.id=p.id
+             WHERE d.serial<=?",
+        )?;
+        let mut rows = query.query([high_water])?;
+        let Some(first) = rows.next()? else {
+            return Ok(false);
+        };
+        let inventory = self.custody_head(head)?.inventory;
+        let mut tree = Tree::new(&self.db);
+        let mut row = Some(first);
+        while let Some(item) = row {
+            if tree.get(inventory, &item.get::<_, String>(0)?)?.is_some() {
+                return Ok(true);
+            }
+            row = rows.next()?;
+        }
+        Ok(false)
     }
 
     fn full_parent_available(
@@ -694,7 +721,9 @@ impl Archive {
         }
         drop(rows);
         let (parent, water, epoch, source) = full.context(ambiguity)?;
-        let head = if (water, epoch) == self.archive_revision()? {
+        let head = if (water, epoch) == self.archive_revision()?
+            && !self.full_seal_includes_points(parent, water)?
+        {
             parent
         } else {
             self.snapshot_id(&source, [parent].into())?
@@ -731,13 +760,15 @@ impl Archive {
             let full = self.latest_full_seal()?;
             let pin = self.search_pin()?;
             let search_head = self.default_search_head(pin, full.as_ref().map(|seal| seal.0))?;
-            let pending_objects: i64 = self.db.query_row(
-                "SELECT count(*) FROM archive_deposits d JOIN objects o ON o.id=d.id
+            let points = super::point::catalog(&self.db)?;
+            let pending_objects: i64 = self
+                .db
+                .prepare_cached(&format!(
+                    "SELECT count(*) FROM archive_deposits d JOIN objects o ON o.id=d.id
                  WHERE d.serial>? AND o.data IS NOT NULL
-                   AND NOT EXISTS(SELECT 1 FROM archive_point_only WHERE id=d.id)",
-                [full.as_ref().map_or(0, |seal| seal.2)],
-                |row| row.get(0),
-            )?;
+                   AND NOT EXISTS(SELECT 1 FROM ({points}) p WHERE p.id=d.id)"
+                ))?
+                .query_row([full.as_ref().map_or(0, |seal| seal.2)], |row| row.get(0))?;
             let (_, current_epoch) = self.archive_revision()?;
             Ok(super::ArchiveStatus {
                 search_head,
@@ -1045,6 +1076,58 @@ impl Archive {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgraded_full_seals_preserve_history_and_exclude_old_point_admissions() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("legacy point catalog.sqlite");
+        let source = Archive::memory()?;
+        let public = Id::blob(PUBLIC);
+        let bytes = b"previously cataloged point observation";
+        let id = source.blob(bytes, public)?;
+        let point_head = source.snapshot_id("origin", Default::default())?;
+        let proof = source.export_member(point_head, id)?;
+        let archive = Archive::open(&path)?;
+        // Reproduce the old catalog entry and its point grant before upgrade.
+        archive.blob(bytes, public)?;
+        archive.import_member(point_head, &proof)?;
+        let cached = archive.snapshot_id("old cached selection", Default::default())?;
+        let previous = archive.snapshot_id("old continuation", Default::default())?;
+        assert!(archive.head(cached)?.objects.contains(&id));
+        archive.db.execute_batch(
+            "INSERT INTO archive_member_access SELECT * FROM archive_point_access;
+             DROP TABLE archive_point_access;
+             DROP TRIGGER archive_catalog_append;
+             DROP TABLE archive_point_only;
+             CREATE TRIGGER archive_catalog_append AFTER INSERT ON objects
+             BEGIN INSERT OR IGNORE INTO archive_deposits(id) VALUES(NEW.id); END;",
+        )?;
+        drop(archive);
+
+        let reader = Archive::open_for_read(&path)?;
+        assert_eq!(reader.status()?.pending_objects, 0);
+        assert_eq!(reader.resolve_head(point_head, id, "read")?, bytes);
+        drop(reader);
+
+        let archive = Archive::open(&path)?;
+        let rebuilt = archive.snapshot_id("old cached selection", Default::default())?;
+        assert_ne!(rebuilt, cached);
+        assert!(archive.head(cached)?.objects.contains(&id));
+        assert!(!archive.head(rebuilt)?.objects.contains(&id));
+        assert_eq!(
+            archive.snapshot_id("old cached selection", Default::default())?,
+            rebuilt
+        );
+
+        let continued = archive.continue_snapshot("old continuation")?;
+        assert_ne!(continued, previous);
+        assert!(archive.head(previous)?.objects.contains(&id));
+        let current = archive.head(continued)?;
+        assert_eq!(current.parents, [previous].into());
+        assert!(!current.objects.contains(&id));
+        assert_eq!(archive.continue_snapshot("old continuation")?, continued);
+        Ok(())
+    }
 
     #[test]
     fn continuation_preserves_logical_parents_and_withdrawals_after_upgrade() -> Result<()> {

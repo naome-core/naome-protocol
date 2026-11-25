@@ -367,6 +367,66 @@ fn verified_import_rechecks_prepared_text_sources_before_ranking_and_embedding()
 }
 
 #[test]
+fn old_local_prepared_media_respects_point_restrictions_before_and_after_upgrade() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("older cached media.sqlite");
+    let source = Archive::memory()?;
+    let archive = Archive::open(&path)?;
+    let bytes = b"bridge footage";
+    let public = Id::blob(PUBLIC);
+    let video = archive.capture(
+        bytes.as_slice(),
+        "video/mp4",
+        bytes.len(),
+        public,
+        Format::A,
+    )?;
+    let local = archive.snapshot("old local media", Default::default())?;
+    let chunk = archive.read(&local, video, "read")?.inputs[0].target;
+    assert_eq!(source.blob(bytes, public)?, chunk);
+    let origin = source.snapshot_id("point custodian", Default::default())?;
+    archive.import_member(origin, &source.export_member(origin, chunk)?)?;
+
+    let options = SearchOptions {
+        mode: SearchMode::Semantic,
+        kind: Some(Kind::Descriptor),
+        ..Default::default()
+    };
+    let mut model = SyntheticMedia(b"historical media model");
+    assert_eq!(
+        archive
+            .find(&local, "bridge", options, Some(&mut model))?
+            .hits[0]
+            .id,
+        video
+    );
+    drop(archive);
+    let database = rusqlite::Connection::open(&path)?;
+    database.execute_batch(
+        "INSERT INTO archive_member_access SELECT * FROM archive_point_access;
+         DROP TABLE archive_point_access;
+         DROP TRIGGER archive_catalog_append;
+         DROP TABLE archive_point_only;
+         CREATE TRIGGER archive_catalog_append AFTER INSERT ON objects
+         BEGIN INSERT OR IGNORE INTO archive_deposits(id) VALUES(NEW.id); END;",
+    )?;
+    drop(database);
+
+    let verify = |archive: Archive, model: &mut SyntheticMedia| -> Result<()> {
+        assert!(archive.resolve(&local, chunk, "read").is_err());
+        assert_eq!(archive.resolve_head(origin, chunk, "read")?, bytes);
+        let report =
+            archive.search_prepared(&local, SearchInput::Text("bridge"), options, Some(model))?;
+        assert!(report.hits.is_empty() && report.limited_coverage);
+        assert_eq!(report.vector_products, 0);
+        Ok(())
+    };
+    verify(Archive::open_for_read(&path)?, &mut model)?;
+    verify(Archive::open(&path)?, &mut model)?;
+    Ok(())
+}
+
+#[test]
 fn a_failed_media_embedding_preserves_other_hits_and_is_not_retried_per_query() -> Result<()> {
     struct Failing {
         text: TestEmbedder,

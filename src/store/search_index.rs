@@ -442,7 +442,8 @@ impl Archive {
             report.limited_coverage |= media_exists;
         }
         let mut work = VectorWork::default();
-        let scoped = inventory.has_exchange_scope()?;
+        let scoped =
+            inventory.has_exchange_scope()? || super::point::visible_in_search(&read, &head)?;
         let mut checked_entries = BTreeMap::new();
         let mut entry_allowed = |entry| {
             if scoped {
