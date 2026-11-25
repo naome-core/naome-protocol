@@ -253,9 +253,23 @@ impl Archive {
                 return Ok(());
             }
             proof.context("unavailable authenticated exchange access")?;
-        } else if let Some(agreed) =
-            self.stored_member_access("archive_member_access", head, member)?
-        {
+        } else {
+            self.require_legacy_access(head, member, access, point_read)?;
+            if member != access {
+                self.require_legacy_access(head, access, Id::blob(PUBLIC), point_read)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn require_legacy_access(
+        &self,
+        head: Id,
+        member: Id,
+        access: Id,
+        point_read: bool,
+    ) -> Result<()> {
+        if let Some(agreed) = self.stored_member_access("archive_member_access", head, member)? {
             ensure!(
                 access == agreed
                     || (point_read && self.point_access(head, member)? == Some(access)),

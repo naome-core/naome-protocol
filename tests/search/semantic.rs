@@ -419,6 +419,61 @@ fn sparse_semantic_search_fills_denied_slots_with_readable_vectors() -> Result<(
 }
 
 #[test]
+fn prepared_sparse_refill_does_not_walk_the_whole_vector_index() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("sparse refill.sqlite");
+    let archive = Archive::open(&path)?;
+    let public = Id::blob(PUBLIC);
+    let mut candidates = Vec::new();
+    for number in 0..260 {
+        let document = Document::new(
+            Kind::Claim,
+            &format!("observation {number}"),
+            "test",
+            json!({}),
+            vec![],
+        )?;
+        candidates.push(archive.document(&document, Format::A, public)?);
+    }
+    candidates.sort_unstable();
+    let snapshot = archive.snapshot("prepared observations", Default::default())?;
+    let head = snapshot.id()?.to_string();
+    let mut model = TestEmbedder {
+        id: Id::blob(b"prepared scoped refill"),
+        embedded_passages: 0,
+    };
+    assert_eq!(
+        archive
+            .prepare_search(&snapshot, 1024, Some(&mut model))?
+            .sample_positions_ready,
+        Some(true)
+    );
+    let db = rusqlite::Connection::open(path)?;
+    let read_only = Id::blob(naome_protocol::profile::READ_ONLY).to_string();
+    for id in &candidates[..candidates.len() - 1] {
+        db.execute(
+            "INSERT INTO archive_member_access VALUES(?,?,?)",
+            rusqlite::params![head, id.to_string(), read_only],
+        )?;
+    }
+    let report = archive.search_prepared(
+        &snapshot,
+        SearchInput::Text("observation"),
+        SearchOptions {
+            mode: SearchMode::Semantic,
+            vector_budget: 1,
+            ..Default::default()
+        },
+        Some(&mut model),
+    )?;
+    assert!(report.limited_coverage && report.vector_budget_exhausted);
+    assert_eq!(report.vector_rows_examined, 129);
+    assert_eq!(report.vector_rows_loaded, 0);
+    assert!(report.hits.is_empty());
+    Ok(())
+}
+
+#[test]
 fn old_local_prepared_media_respects_point_restrictions_before_and_after_upgrade() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("older cached media.sqlite");

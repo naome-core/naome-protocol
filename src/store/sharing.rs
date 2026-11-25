@@ -517,7 +517,6 @@ impl Archive {
     fn seal_review_union(&self, parents: BTreeSet<Id>) -> Result<Id> {
         let mut objects = BTreeSet::new();
         let mut withheld = BTreeSet::new();
-        let public = Id::blob(crate::profile::PUBLIC);
         let mut access = self
             .db
             .prepare_cached("SELECT access FROM objects WHERE id=? AND data IS NOT NULL")?;
@@ -536,10 +535,6 @@ impl Archive {
                         snapshot.objects.contains(&acl)
                             && !self.point_only(id)?
                             && self.require_exchange_access(head, id, acl, false).is_ok()
-                            && (acl == id
-                                || self
-                                    .require_exchange_access(head, acl, public, false)
-                                    .is_ok())
                             && self.check_access(acl, |_| true).is_ok()
                     }
                     None => false,
@@ -623,6 +618,8 @@ mod tests {
         assert!(archive.resolve_head(head, member, "read").is_err());
         assert!(archive.custody_resolve(head, member, "read").is_err());
 
+        let inner = archive.snapshot("trusted local cut", Default::default())?;
+        let inner_id = archive.deposit_manifest(&inner)?;
         let original = archive.snapshot_id("legacy source", Default::default())?;
         assert_eq!(archive.resolve_head(original, member, "train")?, bytes);
         archive.db.execute(
@@ -633,6 +630,12 @@ mod tests {
                 Id::blob(crate::profile::READ_ONLY).to_string()
             ],
         )?;
+        assert!(archive.resolve_head(original, member, "train").is_err());
+        let outer = archive.head(original)?;
+        let linked =
+            archive.linked_snapshot(&outer, inner_id, crate::store::ManifestEncoding::Canonical)?;
+        assert!(archive.resolve(&linked, member, "read").is_err());
+        assert_eq!(archive.resolve(&inner, member, "train")?, bytes);
         let review = archive.seal_review_union([original].into())?;
         assert!(archive.head(review)?.objects.contains(&member));
         assert!(archive.resolve_head(review, member, "train").is_err());

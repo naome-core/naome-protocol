@@ -308,32 +308,14 @@ impl Scope<'_> {
                 }
                 Ok(())
             };
-            let mut accepted = 0;
-            if let Some((sample, _)) = self.positions {
-                let mut lookup = self.db.prepare_cached(
-                    "SELECT s.passage,s.part,p.entry FROM rep_search_positions s
-                     CROSS JOIN rep_search_passages p ON p.id=s.passage
-                     WHERE s.sample=?1 AND s.ordinal=?2",
-                )?;
-                for index in 0..samples {
-                    let ordinal = midpoint(index, count, samples) as i64;
-                    let (passage, part, entry) = lookup
-                        .query_row(params![sample, ordinal], |row| {
-                            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                        })?;
-                    work.rows_examined += 1;
-                    if (self.entry_allowed)(entry) {
-                        load((passage, part))?;
-                        accepted += 1;
-                    }
-                }
-            } else {
-                accepted = self.scan_sparse_keys(count, samples, None, work, &mut load)?;
-            }
+            let primary = (0..samples).map(|index| midpoint(index, count, samples));
+            let accepted = self.visit_sparse_keys(primary, samples, work, &mut load)?;
             if accepted < samples {
-                // Both position indexes use canonical key order. Fill denied slots
-                // with readable keys outside the original sample.
-                self.scan_sparse_keys(count, samples, Some(samples - accepted), work, &mut load)?;
+                // Bound extra permission probes and distribute them across the
+                // remaining positions. A prepared index can seek directly to each.
+                let probes = samples.max(SAMPLE_BATCH).min(count - samples);
+                let reserve = reserve_ordinals(count, samples, probes);
+                self.visit_sparse_keys(reserve, samples - accepted, work, &mut load)?;
             }
         }
         if !keys.is_empty() {
@@ -343,14 +325,36 @@ impl Scope<'_> {
         Ok(loaded)
     }
 
-    fn scan_sparse_keys(
+    fn visit_sparse_keys(
         &mut self,
-        count: usize,
-        samples: usize,
-        refill: Option<usize>,
+        ordinals: impl Iterator<Item = usize>,
+        limit: usize,
         work: &mut VectorWork,
         mut visit: impl FnMut((i64, i64)) -> Result<()>,
     ) -> Result<usize> {
+        let mut accepted = 0;
+        if let Some((sample, _)) = self.positions {
+            let mut lookup = self.db.prepare_cached(
+                "SELECT s.passage,s.part,p.entry FROM rep_search_positions s
+                 CROSS JOIN rep_search_passages p ON p.id=s.passage
+                 WHERE s.sample=?1 AND s.ordinal=?2",
+            )?;
+            for ordinal in ordinals {
+                let (passage, part, entry) = lookup
+                    .query_row(params![sample, ordinal as i64], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?;
+                work.rows_examined += 1;
+                if (self.entry_allowed)(entry) {
+                    visit((passage, part))?;
+                    accepted += 1;
+                    if accepted == limit {
+                        break;
+                    }
+                }
+            }
+            return Ok(accepted);
+        }
         let sql = format!(
             "SELECT p.id,v.part,p.entry {}
              ORDER BY visible.object,visible.section,p.location,v.part",
@@ -364,19 +368,22 @@ impl Scope<'_> {
             self.options.subject,
             self.options.scope
         ])?;
+        let mut ordinals = ordinals.peekable();
         let mut ordinal = 0;
-        let mut visited = 0;
-        let mut accepted = 0;
-        while let Some(row) = rows.next()? {
-            work.rows_examined += 1;
-            let sampled = visited < samples && ordinal == midpoint(visited, count, samples);
-            visited += usize::from(sampled);
-            if sampled != refill.is_some() && (self.entry_allowed)(row.get(2)?) {
-                visit((row.get(0)?, row.get(1)?))?;
-                accepted += 1;
-            }
-            if refill.map_or(visited == samples, |needed| accepted == needed) {
+        while let Some(&target) = ordinals.peek() {
+            let Some(row) = rows.next()? else {
                 break;
+            };
+            work.rows_examined += 1;
+            if ordinal == target {
+                ordinals.next();
+                if (self.entry_allowed)(row.get(2)?) {
+                    visit((row.get(0)?, row.get(1)?))?;
+                    accepted += 1;
+                    if accepted == limit {
+                        break;
+                    }
+                }
             }
             ordinal += 1;
         }
@@ -386,6 +393,18 @@ impl Scope<'_> {
 
 fn midpoint(index: usize, count: usize, samples: usize) -> usize {
     (((2 * index as u128 + 1) * count as u128) / (2 * samples as u128)) as usize
+}
+
+fn reserve_ordinals(count: usize, samples: usize, probes: usize) -> impl Iterator<Item = usize> {
+    let mut skipped = 0;
+    (0..probes).map(move |index| {
+        let mut ordinal = midpoint(index, count - samples, probes) + skipped;
+        while skipped < samples && midpoint(skipped, count, samples) <= ordinal {
+            skipped += 1;
+            ordinal += 1;
+        }
+        ordinal
+    })
 }
 
 fn visit_samples(

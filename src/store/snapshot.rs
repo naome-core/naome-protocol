@@ -681,7 +681,7 @@ impl Archive {
                 && (base.is_none() || previous > after)
                 && !self.full_seal_includes_points(*parent, previous)?
                 && (parent_epoch == epoch
-                    || self.full_parent_available(*parent, previous, withdrawal_serial)?)
+                    || self.full_parent_available(*parent, withdrawal_serial)?)
             {
                 base = Some(*parent);
                 after = previous;
@@ -730,20 +730,13 @@ impl Archive {
         Ok(false)
     }
 
-    fn full_parent_available(
-        &self,
-        parent: Id,
-        high_water: i64,
-        withdrawal_serial: i64,
-    ) -> Result<bool> {
+    fn full_parent_available(&self, parent: Id, withdrawal_serial: i64) -> Result<bool> {
         // The parent already excludes withdrawals recorded at its seal. Historical seals
         // without a journal position inspect the complete withdrawal log.
         let mut query = self.db.prepare_cached(
-            "SELECT w.object FROM custody_withdrawal_log w WHERE w.serial>?1 AND EXISTS (
-                 SELECT 1 FROM archive_deposits d WHERE d.id=w.object AND d.serial<=?2
-             )",
+            "SELECT object FROM custody_withdrawal_log WHERE serial>? ORDER BY serial",
         )?;
-        let mut rows = query.query(params![withdrawal_serial, high_water])?;
+        let mut rows = query.query([withdrawal_serial])?;
         let Some(first) = rows.next()? else {
             return Ok(true);
         };
@@ -1223,6 +1216,7 @@ mod tests {
         archive.import_member(point_head, &proof)?;
         let cached = archive.snapshot_id("old cached selection", Default::default())?;
         let previous = archive.snapshot_id("old continuation", Default::default())?;
+        let later_withdrawal = archive.snapshot_id("withdrawn continuation", Default::default())?;
         assert!(archive.head(cached)?.objects.contains(&id));
         archive.db.execute_batch(
             "INSERT INTO archive_member_access SELECT * FROM archive_point_access;
@@ -1264,6 +1258,15 @@ mod tests {
         assert_eq!(current.parents, [previous].into());
         assert!(!current.objects.contains(&id));
         assert_eq!(archive.continue_snapshot("old continuation")?, continued);
+
+        assert_eq!(archive.blob(bytes, public)?, id);
+        archive.withdraw(id)?;
+        let after_withdrawal = archive.continue_snapshot("withdrawn continuation")?;
+        assert!(archive.head(later_withdrawal)?.objects.contains(&id));
+        let after = archive.head(after_withdrawal)?;
+        assert_eq!(after.parents, [later_withdrawal].into());
+        assert!(!after.objects.contains(&id));
+        assert!(archive.custody_head(after_withdrawal)?.parent.is_none());
         Ok(())
     }
 
