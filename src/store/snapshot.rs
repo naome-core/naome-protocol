@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ops::Bound::{Excluded, Unbounded},
 };
 
@@ -221,6 +221,42 @@ pub(crate) struct InventoryReader<'a> {
     pub(super) tree: Tree<'a>,
 }
 
+#[derive(Debug)]
+pub(crate) struct InventoryBudgetExceeded;
+
+impl std::fmt::Display for InventoryBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("inventory payload read budget exhausted")
+    }
+}
+
+impl std::error::Error for InventoryBudgetExceeded {}
+
+/// Payload bytes and checked policy/profile data for one stable inventory read view.
+pub(crate) struct InventoryReadBudget {
+    remaining: usize,
+    read_policies: BTreeMap<Id, bool>,
+    profiles: BTreeMap<Id, Vec<u8>>,
+}
+
+impl InventoryReadBudget {
+    pub(crate) fn new(bytes: usize) -> Self {
+        Self {
+            remaining: bytes,
+            read_policies: BTreeMap::new(),
+            profiles: BTreeMap::new(),
+        }
+    }
+
+    fn charge(&mut self, size: usize) -> Result<()> {
+        self.remaining = self
+            .remaining
+            .checked_sub(size)
+            .context(InventoryBudgetExceeded)?;
+        Ok(())
+    }
+}
+
 impl<'a> InventoryReader<'a> {
     pub(crate) fn materialized(archive: &'a Archive, snapshot: &'a Snapshot) -> Self {
         Self {
@@ -353,6 +389,49 @@ impl<'a> InventoryReader<'a> {
             .read_with(id, |key| Ok(self.resolve_for(key, purpose)?.0))
     }
 
+    pub(crate) fn read_bounded(
+        &mut self,
+        id: Id,
+        budget: &mut InventoryReadBudget,
+    ) -> Result<Document> {
+        self.archive.read_with(id, |key| {
+            if let Some(profile) = budget.profiles.get(&key) {
+                return Ok(profile.clone());
+            }
+            self.readable_bounded(key, budget)?;
+            budget.charge(self.archive.size(key)?)?;
+            let (bytes, _) = self
+                .archive
+                .raw_catalog_bytes(key)?
+                .context("unavailable")?;
+            if key != id {
+                budget.profiles.insert(key, bytes.clone());
+            }
+            Ok(bytes)
+        })
+    }
+
+    pub(crate) fn readable_bounded(
+        &mut self,
+        id: Id,
+        budget: &mut InventoryReadBudget,
+    ) -> Result<()> {
+        let access = self.read_access(id)?;
+        let permitted = if let Some(&permitted) = budget.read_policies.get(&access) {
+            permitted
+        } else {
+            budget.charge(self.archive.size(access)?)?;
+            let permitted = self
+                .archive
+                .check_access(access, |policy| allows(policy, "read"))
+                .is_ok();
+            budget.read_policies.insert(access, permitted);
+            permitted
+        };
+        ensure!(permitted, "use withheld");
+        Ok(())
+    }
+
     pub(crate) fn explain(
         &mut self,
         roots: &[Id],
@@ -367,9 +446,18 @@ impl<'a> InventoryReader<'a> {
     }
 
     pub(crate) fn readable(&mut self, id: Id) -> Result<Id> {
+        let access = self.read_access(id)?;
+        self.archive
+            .check_access(access, |policy| allows(policy, "read"))?;
+        Ok(access)
+    }
+
+    fn read_access(&mut self, id: Id) -> Result<Id> {
         match &self.view {
-            InventoryView::Materialized(snapshot) => self.archive.readable(snapshot, id),
-            InventoryView::Paged(manifest) => self.archive.readable_with(
+            InventoryView::Materialized(snapshot) => {
+                self.archive.snapshot_read_access(snapshot, id)
+            }
+            InventoryView::Paged(manifest) => self.archive.read_access_with(
                 id,
                 |key| Ok(self.tree.get(manifest.inventory, &key.to_string())? == Some(key)),
                 |access| {
@@ -835,15 +923,6 @@ impl Archive {
         )?;
         let snapshot = self.head(head)?;
         ensure!(snapshot.objects == objects, "sealed inventory differs");
-        if !withheld.is_empty() {
-            let key = head.to_string();
-            let mut record = self
-                .db
-                .prepare_cached("INSERT OR IGNORE INTO archive_review_withheld VALUES(?,?)")?;
-            for id in withheld {
-                record.execute(params![key, id.to_string()])?;
-            }
-        }
         if let Some(tx) = tx {
             tx.commit()?
         }
@@ -857,18 +936,28 @@ impl Archive {
         ids: impl Iterator<Item = Result<Id>>,
         withheld: &BTreeSet<Id>,
     ) -> Result<Id> {
+        let seal_batch = |previous, items: &[Item], review_scope| -> Result<Id> {
+            let head = self
+                .admit_batch(source, previous, items, parents, false)?
+                .head;
+            if review_scope {
+                self.db
+                    .prepare_cached("INSERT OR IGNORE INTO archive_review_scopes VALUES(?)")?
+                    .execute([head.to_string()])?;
+            }
+            Ok(head)
+        };
         let mut items = Vec::new();
         let mut total = 0;
+        let mut review_scope = false;
         for id in ids {
             let id = id?;
-            let raw = if withheld.contains(&id) {
-                None
-            } else {
-                self.raw(id)?
-            };
+            let review_withheld = withheld.contains(&id);
+            let raw = if review_withheld { None } else { self.raw(id)? };
             let absent = raw.is_none();
             let (bytes, access) = match raw {
                 Some(pair) => pair,
+                None if review_withheld => (Vec::new(), super::sharing::review_withheld_access()),
                 None => {
                     let known: Option<String> = self
                         .db
@@ -885,13 +974,11 @@ impl Archive {
                 }
             };
             if !items.is_empty() && (items.len() == MEMBERS || total + bytes.len() > BATCH_BYTES) {
-                cursor = Some(
-                    self.admit_batch(source, cursor, &items, parents, false)?
-                        .head,
-                );
+                cursor = Some(seal_batch(cursor, &items, review_scope)?);
                 items.clear();
                 total = 0;
             }
+            review_scope |= review_withheld;
             total += bytes.len();
             items.push(Item {
                 member: Member {
@@ -903,9 +990,7 @@ impl Archive {
                 bytes,
             });
         }
-        let head = self
-            .admit_batch(source, cursor, &items, parents, false)?
-            .head;
+        let head = seal_batch(cursor, &items, review_scope)?;
         let manifest = self.custody_head(head)?.manifest()?;
         self.register_snapshot(&manifest, false)?;
         Ok(head)

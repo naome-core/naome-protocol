@@ -942,11 +942,20 @@ fn historical_extraction_reads_mapping_manifests_under_the_receipts_rules() -> R
 
 #[test]
 fn replica_review_admits_only_members_authorized_by_a_selected_source() -> Result<()> {
+    use naome_protocol::store::custody::MEMBERS;
     let mut archive = Archive::memory()?;
     let public = Id::blob(PUBLIC);
     let policy = fixture::policy(&archive, Format::A)?;
-    let labels = archive.snapshot_id("local labels", Default::default())?;
     let bytes = b"independent bytes with a conflicting legacy access grant";
+    let withheld_id = Id::blob(bytes);
+    for suffix in (0_u64..)
+        .map(u64::to_be_bytes)
+        .filter(|bytes| Id::blob(bytes) > withheld_id)
+        .take(MEMBERS)
+    {
+        archive.blob(&suffix, public)?;
+    }
+    let labels = archive.snapshot_id("local labels", Default::default())?;
     let source = Archive::memory()?;
     let member = source.blob(bytes, Id::blob(READ_ONLY))?;
     let remote = source.snapshot_id("peer custody", Default::default())?;
@@ -983,12 +992,18 @@ fn replica_review_admits_only_members_authorized_by_a_selected_source() -> Resul
     assert!(archive.custody_head(withheld)?.restricted);
     assert!(archive.resolve(&view, member, "train").is_err());
     assert!(archive.resolve_head(withheld, member, "read").is_err());
+    assert!(archive.custody_resolve(withheld, member, "train").is_err());
     assert!(archive.export(&view, "train")?.omitted.contains(&member));
+    let prefix = archive.custody_head(withheld)?.parent.unwrap();
+    assert!(archive.head(prefix)?.objects.contains(&member));
+    assert!(archive.resolve_head(prefix, member, "train").is_err());
+    assert!(archive.custody_resolve(prefix, member, "train").is_err());
 
     request.label_head = archive.snapshot_id("independent custody", Default::default())?;
     let admitted = archive.review_releases(&request)?.review_horizon;
     assert_ne!(admitted, withheld);
     assert_eq!(archive.resolve_head(admitted, member, "train")?, bytes);
+    assert_eq!(archive.custody_resolve(admitted, member, "train")?, bytes);
     assert!(archive.resolve_head(withheld, member, "train").is_err());
     Ok(())
 }

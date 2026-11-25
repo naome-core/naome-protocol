@@ -2,7 +2,10 @@ use super::{Receipt, Standing, default_byte_limit};
 use crate::{
     payload::CAPTURED_EVIDENCE_SCOPE,
     profile::{DependencyRole, Document, Kind, Link},
-    store::{Archive, BacklinkIndex, InventoryReader, Snapshot},
+    store::{
+        Archive, BacklinkIndex, InventoryBudgetExceeded, InventoryReadBudget, InventoryReader,
+        Snapshot,
+    },
     wire::Id,
 };
 use anyhow::{Result, ensure};
@@ -80,13 +83,12 @@ enum RecordState {
 }
 
 struct QuestionWalk<'a> {
-    archive: &'a Archive,
     inventory: InventoryReader<'a>,
     backlinks: QuestionBacklinks,
     documents: BTreeMap<Id, Document>,
     unavailable: BTreeSet<Id>,
     records_left: usize,
-    bytes_left: usize,
+    read_budget: InventoryReadBudget,
     limited: bool,
     unscanned_from: Option<Id>,
 }
@@ -97,17 +99,15 @@ impl QuestionWalk<'_> {
             self.limited = true;
             return Ok(RecordState::Unexamined);
         }
-        let size = self.archive.size(id)?;
-        if size > self.bytes_left {
-            self.limited = true;
-            return Ok(RecordState::Unexamined);
-        }
         self.records_left -= 1;
-        self.bytes_left -= size;
-        match self.inventory.read(id) {
+        match self.inventory.read_bounded(id, &mut self.read_budget) {
             Ok(document) => {
                 self.documents.insert(id, document);
                 Ok(RecordState::Readable)
+            }
+            Err(error) if error.is::<InventoryBudgetExceeded>() => {
+                self.limited = true;
+                Ok(RecordState::Unexamined)
             }
             Err(_) => {
                 self.unavailable.insert(id);
@@ -235,8 +235,15 @@ impl QuestionWalk<'_> {
                 .collect();
             for target in inputs {
                 if target.format().is_none() {
-                    if self.inventory.readable(target).is_err() {
-                        unavailable_inputs.insert(target);
+                    match self
+                        .inventory
+                        .readable_bounded(target, &mut self.read_budget)
+                    {
+                        Ok(()) => {}
+                        Err(error) if error.is::<InventoryBudgetExceeded>() => self.limited = true,
+                        Err(_) => {
+                            unavailable_inputs.insert(target);
+                        }
                     }
                     continue;
                 }
@@ -343,7 +350,7 @@ impl Archive {
     ) -> Result<QuestionView> {
         self.with_read_view(|| {
             let inventory = self.inventory_reader(self.selected_search_id(head)?)?;
-            self.inspect_question(inventory, question, budget)
+            self.inspect_question(inventory, question, budget, default_byte_limit())
         })
     }
 
@@ -360,6 +367,7 @@ impl Archive {
                 InventoryReader::materialized(self, snapshot),
                 question,
                 budget,
+                default_byte_limit(),
             )
         })
     }
@@ -369,13 +377,15 @@ impl Archive {
         mut inventory: InventoryReader<'_>,
         question: Id,
         budget: usize,
+        bytes: usize,
     ) -> Result<QuestionView> {
         ensure!(
             (1..=100_000).contains(&budget),
             "question scan budget must be between 1 and 100000"
         );
         let head = inventory.id()?;
-        let root = inventory.read(question)?;
+        let mut read_budget = InventoryReadBudget::new(bytes);
+        let root = inventory.read_bounded(question, &mut read_budget)?;
         ensure!(root.kind == Kind::Question, "expected a question record");
         let backlinks = match self.backlink_index(head)? {
             Some(index) => QuestionBacklinks::Indexed {
@@ -385,16 +395,76 @@ impl Archive {
             None => QuestionBacklinks::Scanned(BTreeMap::new()),
         };
         QuestionWalk {
-            archive: self,
             inventory,
             backlinks,
             documents: BTreeMap::from([(question, root)]),
             unavailable: BTreeSet::new(),
             records_left: budget,
-            bytes_left: default_byte_limit(),
+            read_budget,
             limited: false,
             unscanned_from: None,
         }
         .report(head, question)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        profile::{PROFILE, PUBLIC, link},
+        wire::Format,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn payload_budget_charges_the_root_profile_and_reused_acl() -> Result<()> {
+        let archive = Archive::memory()?;
+        let public = Id::blob(PUBLIC);
+        let policy =
+            serde_json::to_vec(&json!({"version": 1, "purposes": ["read", "x".repeat(4096)]}))?;
+        let acl = archive.blob(&policy, public)?;
+        let question = archive.document(
+            &Document::new(Kind::Question, "test question", "test", json!({}), vec![])?,
+            Format::A,
+            acl,
+        )?;
+        let mut candidates = 0;
+        for name in ["first plan", "second plan"] {
+            let id = archive.document(
+                &Document::new(
+                    Kind::Plan,
+                    name,
+                    "test",
+                    json!({}),
+                    vec![link("question", question)],
+                )?,
+                Format::A,
+                acl,
+            )?;
+            candidates += archive.size(id)?;
+        }
+        let snapshot = archive.snapshot("question scope", Default::default())?;
+        let root_bytes = archive.size(question)? + policy.len() + PROFILE.len() + PUBLIC.len();
+        let inspect = |bytes| {
+            archive.with_read_view(|| {
+                archive.inspect_question(
+                    InventoryReader::materialized(&archive, &snapshot),
+                    question,
+                    8,
+                    bytes,
+                )
+            })
+        };
+        assert!(
+            matches!(inspect(root_bytes - 1), Err(error) if error.is::<InventoryBudgetExceeded>())
+        );
+        let limited = inspect(root_bytes + candidates - 1)?;
+        assert_eq!(limited.records.len(), 2);
+        assert!(limited.limited_coverage);
+        let complete = inspect(root_bytes + candidates)?;
+        assert_eq!(complete.records.len(), 3);
+        assert!(!complete.limited_coverage);
+        Ok(())
     }
 }

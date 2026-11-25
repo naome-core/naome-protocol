@@ -21,6 +21,11 @@ pub const MAX_MEMBERS: usize = 512;
 pub const MAX_MEMBER_BYTES: usize = 1024 * 1024;
 pub const MAX_RELEASE_BYTES: usize = 16 * 1024 * 1024;
 
+pub(super) fn review_withheld_access() -> Id {
+    // The reserved ID does not identify a readable access policy.
+    Id::blob(b"naome-review-withheld")
+}
+
 #[derive(Debug)]
 struct ReleaseUnavailable(&'static str);
 

@@ -215,10 +215,7 @@ impl Archive {
     }
 
     pub(in crate::store) fn exchange_access_scope(&self, head: Id) -> Result<Option<Id>> {
-        let scoped = (has_table(&self.db, "archive_review_withheld")?
-            && self.db.prepare_cached(
-                "SELECT EXISTS(SELECT 1 FROM archive_review_withheld WHERE head=?)",
-            )?.query_row([head.to_string()], |row| row.get::<_, bool>(0))?)
+        let scoped = self.is_review_scope(head)?
             || (has_table(&self.db, "archive_exchange_sessions")?
             && self.db.prepare_cached(
                 "SELECT EXISTS(SELECT 1 FROM archive_exchange_sessions WHERE head=? AND verified AND complete)",
@@ -239,12 +236,11 @@ impl Archive {
         access: Id,
         point_read: bool,
     ) -> Result<()> {
-        if has_table(&self.db, "archive_review_withheld")? {
-            let withheld: bool = self.db.prepare_cached(
-                "SELECT EXISTS(SELECT 1 FROM archive_review_withheld WHERE head=? AND member=?)",
-            )?.query_row(params![head.to_string(), member.to_string()], |row| row.get(0))?;
+        if self.is_review_scope(head)? {
+            let descriptor = self.custody_head(head)?;
+            let mut tree = Tree::new(&self.db);
             ensure!(
-                !withheld,
+                committed_access(&descriptor, member, |id| tree.read(id))? == access,
                 "member is unavailable in the source inventories of this review"
             );
         }
@@ -265,6 +261,14 @@ impl Archive {
             );
         }
         Ok(())
+    }
+
+    fn is_review_scope(&self, head: Id) -> Result<bool> {
+        Ok(has_table(&self.db, "archive_review_scopes")?
+            && self
+                .db
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM archive_review_scopes WHERE head=?)")?
+                .query_row([head.to_string()], |row| row.get::<_, bool>(0))?)
     }
 
     pub(in crate::store) fn point_access(&self, head: Id, member: Id) -> Result<Option<Id>> {

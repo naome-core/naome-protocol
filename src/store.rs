@@ -16,7 +16,9 @@ pub use exchange::{
 #[cfg(feature = "cli")]
 pub(crate) use search_index::IndexPreparation;
 pub use snapshot::Snapshot;
-pub(crate) use snapshot::{InventoryReader, ManifestEncoding};
+pub(crate) use snapshot::{
+    InventoryBudgetExceeded, InventoryReadBudget, InventoryReader, ManifestEncoding,
+};
 
 use crate::profile::TrainingAccess;
 use crate::{
@@ -279,7 +281,13 @@ impl Archive {
     }
     /// Return the checked read grant without materializing the payload.
     pub(crate) fn readable(&self, s: &Snapshot, id: Id) -> Result<Id> {
-        self.readable_with(
+        let access = self.snapshot_read_access(s, id)?;
+        self.check_access(access, |policy| allows(policy, "read"))?;
+        Ok(access)
+    }
+
+    fn snapshot_read_access(&self, s: &Snapshot, id: Id) -> Result<Id> {
+        self.read_access_with(
             id,
             |key| Ok(s.objects.contains(&key)),
             |acl| {
@@ -289,7 +297,7 @@ impl Archive {
         )
     }
 
-    fn readable_with(
+    fn read_access_with(
         &self,
         id: Id,
         mut contains: impl FnMut(Id) -> Result<bool>,
@@ -303,7 +311,6 @@ impl Archive {
         let acl = acl.parse()?;
         ensure!(contains(acl)?, "missing access descriptor");
         require_access(acl)?;
-        self.check_access(acl, |policy| crate::profile::allows(policy, "read"))?;
         Ok(acl)
     }
     pub(crate) fn check_access(&self, acl: Id, allows: impl FnOnce(&[u8]) -> bool) -> Result<()> {
