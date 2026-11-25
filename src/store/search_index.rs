@@ -25,6 +25,18 @@ use vectors::{embed_query, missing_vectors};
 
 const MAX_QUERY_PASSAGES: usize = 24;
 
+pub(super) fn invalidate_access_scope(db: &rusqlite::Connection, head: &str) -> Result<()> {
+    let prepared: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='rep_search_heads')",
+        [],
+        |row| row.get(0),
+    )?;
+    if prepared && db.execute("DELETE FROM rep_search_heads WHERE head=?", [head])? != 0 {
+        db.execute("UPDATE rep_search_revision SET value=value+1", [])?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum IndexPreparation {
     Existing,
@@ -430,20 +442,16 @@ impl Archive {
             report.limited_coverage |= media_exists;
         }
         let mut work = VectorWork::default();
-        let mut checked_media = BTreeMap::new();
-        let mut media_allowed = |id| {
-            *checked_media.entry(id).or_insert_with(|| {
-                inventory
-                    .read(id)
-                    .and_then(|document| {
-                        self.media_dependencies(
-                            &mut inventory,
-                            &document,
-                            &mut Dependencies::default(),
-                        )
-                    })
-                    .is_ok()
-            })
+        let scoped = inventory.has_exchange_scope()?;
+        let mut checked_entries = BTreeMap::new();
+        let mut entry_allowed = |entry| {
+            if scoped {
+                *checked_entries.entry(entry).or_insert_with(|| {
+                    cache::entry_readable(&read, &mut inventory, entry).unwrap_or(false)
+                })
+            } else {
+                true
+            }
         };
         let candidates = rank(
             &read,
@@ -458,11 +466,11 @@ impl Archive {
                     model,
                     vectors: vector,
                     minimum,
-                    media_allowed: &mut media_allowed,
                 }),
             &mut work,
+            &mut entry_allowed,
         )?;
-        report.limited_coverage |= checked_media.values().any(|&allowed| !allowed);
+        report.limited_coverage |= checked_entries.values().any(|&allowed| !allowed);
         report.vector_budget_exhausted = work.bounded;
         report.vector_products = work.products;
         report.vector_rows_examined = work.rows_examined;

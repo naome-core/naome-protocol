@@ -8,7 +8,10 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 const VECTOR_BATCH: usize = 16;
 const VECTOR_PREFETCH: usize = VECTOR_BATCH * 16;
@@ -17,6 +20,7 @@ const RETRY_SECONDS: i64 = 30;
 
 struct Pending {
     id: i64,
+    entry: i64,
     object: Id,
     location: SearchLocation,
     text: String,
@@ -72,7 +76,21 @@ impl Archive {
                 break;
             };
             for batch in selected.chunks(VECTOR_BATCH) {
-                let pending = self.pending_vectors(head, &key, batch, now)?;
+                let (pending, examined) = self.with_read_view(|| {
+                    let mut pending = self.pending_vectors(head, &key, batch, now)?;
+                    let examined = pending.len();
+                    if inventory.has_exchange_scope()? {
+                        let mut checked = BTreeMap::new();
+                        pending.retain(|passage| {
+                            *checked.entry(passage.entry).or_insert_with(|| {
+                                super::cache::entry_readable(&self.db, inventory, passage.entry)
+                                    .unwrap_or(false)
+                            })
+                        });
+                    }
+                    Ok((pending, examined))
+                })?;
+                budget -= examined;
                 if pending.is_empty() {
                     continue;
                 }
@@ -82,6 +100,8 @@ impl Archive {
                     let mut state = tx.prepare_cached(
                         "INSERT INTO rep_search_vector_state(passage,model,limited,retry_after)
                          SELECT id,?2,?3,?4 FROM rep_search_passages WHERE id=?1
+                           AND EXISTS(SELECT 1 FROM rep_search_visible v
+                                      WHERE v.head=?5 AND v.entry=rep_search_passages.entry)
                          ON CONFLICT(passage,model) DO UPDATE
                          SET limited=excluded.limited,retry_after=excluded.retry_after
                          WHERE rep_search_vector_state.retry_after IS NOT NULL",
@@ -95,7 +115,9 @@ impl Archive {
                             continue;
                         };
                         let retry = indexed.retry.then_some(now.saturating_add(RETRY_SECONDS));
-                        if state.execute(params![passage.id, key, indexed.limited, retry])? == 0 {
+                        if state.execute(params![passage.id, key, indexed.limited, retry, head])?
+                            == 0
+                        {
                             continue;
                         }
                         for (part, (span, vector)) in indexed.parts.into_iter().enumerate() {
@@ -107,7 +129,6 @@ impl Archive {
                     }
                 }
                 tx.commit()?;
-                budget -= pending.len();
             }
             // Passage IDs are monotone, including after a rebuild.
             cursor = last;
@@ -153,7 +174,7 @@ impl Archive {
     ) -> Result<Vec<Pending>> {
         self.db
             .prepare_cached(
-                "SELECT p.id,e.object,p.location,p.text FROM json_each(?3) ids
+                "SELECT p.id,p.entry,e.object,p.location,p.text FROM json_each(?3) ids
                  CROSS JOIN rep_search_passages p ON p.id=ids.value
                  JOIN rep_search_entries e ON e.id=p.entry
                  LEFT JOIN rep_search_vector_state st ON st.passage=p.id AND st.model=?2
@@ -168,16 +189,18 @@ impl Archive {
                 |row| {
                     Ok((
                         row.get(0)?,
-                        row.get::<_, String>(1)?,
+                        row.get(1)?,
                         row.get::<_, String>(2)?,
-                        row.get(3)?,
+                        row.get::<_, String>(3)?,
+                        row.get(4)?,
                     ))
                 },
             )?
             .map(|row| {
-                let (id, object, location, text) = row?;
+                let (id, entry, object, location, text) = row?;
                 Ok(Pending {
                     id,
+                    entry,
                     object: object.parse()?,
                     location: serde_json::from_str(&location)?,
                     text,

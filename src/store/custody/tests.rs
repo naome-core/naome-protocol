@@ -832,7 +832,7 @@ fn grouped_member_proof_commits_only_the_verified_union() -> Result<()> {
     assert_eq!(
         other
             .db
-            .query_row("SELECT count(*) FROM archive_member_access", [], |r| r
+            .query_row("SELECT count(*) FROM archive_point_access", [], |r| r
                 .get::<_, i64>(0))?,
         0
     );

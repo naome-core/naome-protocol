@@ -11,7 +11,7 @@ use crate::{
     wire::{Id, MAX_BYTES},
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -257,47 +257,38 @@ impl Archive {
             &self.db,
             rusqlite::TransactionBehavior::Immediate,
         )?;
+        let head_key = head.to_string();
+        let mut added_grant = false;
         for (key, (access, bytes)) in contents {
             ensure!(
                 insert(&tx, key, &bytes, access)? == ObjectAvailability::Available,
                 "locally withdrawn point disclosure"
             );
-            tx.execute(
-                "INSERT OR IGNORE INTO archive_member_access VALUES(?,?,?)",
-                params![head.to_string(), key.to_string(), access.to_string()],
-            )?;
+            added_grant |= tx.execute(
+                "INSERT OR IGNORE INTO archive_point_access VALUES(?,?,?)",
+                params![head_key, key.to_string(), access.to_string()],
+            )? != 0;
+        }
+        if added_grant {
+            crate::store::search_index::invalidate_access_scope(&tx, &head_key)?;
         }
         tx.commit()?;
         Ok(requested.to_vec())
     }
 
     pub(in crate::store) fn point_bytes(&self, head: Id, id: Id, purpose: &str) -> Result<Vec<u8>> {
-        if !self
-            .db
-            .prepare_cached(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='archive_member_access')",
-            )?
-            .query_row([], |r| r.get::<_, bool>(0))?
+        if let Some(proved) = self.point_access(head, id)?
+            && !self
+                .db
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM heads WHERE id=?)")?
+                .query_row([head.to_string()], |row| row.get::<_, bool>(0))?
         {
-            return Ok(self
-                .resolve_member(&self.active_manifest(head)?, id, purpose)?
-                .0);
-        }
-        let present: Option<String> = self
-            .db
-            .prepare_cached(
-                "SELECT access FROM archive_member_access WHERE head=?1 AND member=?2
-             AND NOT EXISTS(SELECT 1 FROM heads WHERE id=?1)",
-            )?
-            .query_row(params![head.to_string(), id.to_string()], |r| r.get(0))
-            .optional()?;
-        if let Some(proved) = present {
             ensure!(
                 purpose == "read",
                 "point disclosure authorizes reading only"
             );
             let (bytes, access) = self.raw(id)?.context("unavailable point member")?;
-            ensure!(access == proved.parse()?, "point access changed");
+            ensure!(access == proved, "point access changed");
             self.check_access(access, |p| allows(p, purpose))?;
             return Ok(bytes);
         }

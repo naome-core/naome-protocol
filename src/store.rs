@@ -235,7 +235,7 @@ impl Archive {
         .transpose()
     }
     pub fn resolve(&self, s: &Snapshot, id: Id, purpose: &str) -> Result<Vec<u8>> {
-        self.resolve_with(s, id, |policy| allows(policy, purpose))
+        self.resolve_with(s, id, purpose == "read", |policy| allows(policy, purpose))
             .map(|(bytes, _)| bytes)
     }
 
@@ -250,19 +250,20 @@ impl Archive {
         id: Id,
         access: &TrainingAccess<'_>,
     ) -> Result<Vec<u8>> {
-        self.resolve_with(s, id, |policy| access.allows(policy))
+        self.resolve_with(s, id, false, |policy| access.allows(policy))
             .map(|(bytes, _)| bytes)
     }
     fn resolve_with(
         &self,
         s: &Snapshot,
         id: Id,
+        point_read: bool,
         allows: impl FnOnce(&[u8]) -> bool,
     ) -> Result<(Vec<u8>, Id)> {
         ensure!(s.objects.contains(&id), "outside snapshot");
         let (b, acl) = self.raw(id)?.context("unavailable")?;
         ensure!(s.objects.contains(&acl), "missing access descriptor");
-        self.require_snapshot_exchange_access(s, id, acl)?;
+        self.require_snapshot_exchange_access(s, id, acl, point_read)?;
         self.check_access(acl, allows)?;
         Ok((b, acl))
     }
@@ -271,7 +272,7 @@ impl Archive {
         self.readable_with(
             id,
             |key| Ok(s.objects.contains(&key)),
-            |acl| self.require_snapshot_exchange_access(s, id, acl),
+            |acl| self.require_snapshot_exchange_access(s, id, acl, true),
         )
     }
 
@@ -317,7 +318,7 @@ impl Archive {
     /// An executor authority, decision and attestation must carry the public descriptor.
     pub(crate) fn read_public(&self, s: &Snapshot, id: Id) -> Result<Document> {
         self.read_with(id, |input| {
-            self.resolve_with(s, input, |descriptor| descriptor == PUBLIC)
+            self.resolve_with(s, input, false, |descriptor| descriptor == PUBLIC)
                 .map(|(bytes, _)| bytes)
         })
     }

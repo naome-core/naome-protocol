@@ -34,7 +34,7 @@ struct Scope<'a> {
     options: SearchOptions<'a>,
     model: &'a str,
     positions: Option<(i64, i64)>,
-    media_allowed: &'a mut dyn FnMut(Id) -> bool,
+    entry_allowed: &'a mut dyn FnMut(i64) -> bool,
 }
 
 type Match = (Id, i64, i64, f32);
@@ -73,6 +73,7 @@ pub(super) fn semantic_passages(
     semantic: SemanticQuery<'_>,
     bound: usize,
     work: &mut VectorWork,
+    entry_allowed: &mut dyn FnMut(i64) -> bool,
 ) -> Result<Vec<Match>> {
     let dimensions = semantic.vectors[0].len();
     let query_count = semantic.vectors.len().min(options.vector_budget);
@@ -95,7 +96,7 @@ pub(super) fn semantic_passages(
         } else {
             None
         },
-        media_allowed: semantic.media_allowed,
+        entry_allowed,
     };
     let count = scope.count()?;
     work.bounded = query_count < semantic.vectors.len() || count > budget / exact_cost;
@@ -249,10 +250,9 @@ impl Scope<'_> {
             return Ok(0);
         }
         let mut scored = 0;
-        let media_allowed = &mut self.media_allowed;
+        let entry_allowed = &mut self.entry_allowed;
         let mut visit = |row: &Row<'_>| {
-            // Media vectors may have been prepared before scoped access was enforced.
-            if !row.get::<_, bool>(5)? || media_allowed(row.get::<_, String>(0)?.parse()?) {
+            if entry_allowed(row.get(5)?) {
                 score(row)?;
                 scored += 1;
             }
@@ -263,7 +263,7 @@ impl Scope<'_> {
         let sparse = samples < count;
         let width = (width * 4) as i64;
         if sparse && let Some((sample, _)) = self.positions {
-            let mut lookup=self.db.prepare_cached("SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?4),p.text=''
+            let mut lookup=self.db.prepare_cached("SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?4),p.entry
                 FROM rep_search_positions s CROSS JOIN rep_search_vectors v ON v.model=?3 AND v.passage=s.passage AND v.part=s.part
                 CROSS JOIN rep_search_passages p ON p.id=v.passage CROSS JOIN rep_search_entries e ON e.id=p.entry
                 WHERE s.sample=?1 AND s.ordinal=?2")?;
@@ -283,7 +283,7 @@ impl Scope<'_> {
             ("p.id,v.part", COVERING_VECTORS)
         } else {
             (
-                "e.object,p.id,p.location,v.part,substr(v.vector,1,?6),p.text=''",
+                "e.object,p.id,p.location,v.part,substr(v.vector,1,?6),p.entry",
                 "",
             )
         };
@@ -303,7 +303,7 @@ impl Scope<'_> {
         ];
         let mut rows = statement.query(&bound[..if sparse { 5 } else { 6 }])?;
         let mut vectors = self.db.prepare_cached(
-            "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?3),p.text=''
+            "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?3),p.entry
              FROM json_each(?2) sample
              CROSS JOIN rep_search_vectors v ON v.model=?1
                 AND v.passage=json_extract(sample.value,'$[0]')

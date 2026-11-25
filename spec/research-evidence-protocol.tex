@@ -634,7 +634,7 @@ Version 2 encodes the custody descriptor in this canonical field order. \texttt{
 Pin the head independently and verify the manifest and every node used. Enumerate \texttt{examined} members after \texttt{after}, starting at the beginning for null. Set \texttt{last} to the last member or to \texttt{after} on an empty final page. \texttt{complete} marks the end, where the cumulative examined count must match the manifest. Pages may reuse verified nodes and include witnesses for linked manifest blobs.
 
 Each packet contains \texttt{id}, \texttt{access}, and the exact payload bytes in \texttt{hex}. Packets cover a strictly increasing subset of examined identifiers. Verify each payload identity and each record's embedded access reference. In version 2, prove the packet ACL and its public grant against the custody tree. The grant bytes are
-\verb|{"purposes":["read","train"],"version":1}| or \verb|{"purposes":["read"],"version":1}|. Reuse local bytes for an omitted member only when its local ACL matches the proven commitment.
+\verb|{"purposes":["read","train"],"version":1}| or \verb|{"purposes":["read"],"version":1}|. Reuse local bytes for an omitted member only with a matching proven ACL. A verified point disclosure can supplement the same head for reading.
 
 Stage verified packets and advance the cursor atomically. Reject local ACL conflicts before acknowledging a new page. If a local admission conflicts with a staged packet, complete the transfer with that member unavailable at the pinned head. Repeated pages preserve the acknowledged cursor and completed coverage count. Limits are 1,024 examined members per page, 16 MiB per payload and 72 MiB per page.
 

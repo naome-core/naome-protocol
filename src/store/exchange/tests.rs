@@ -652,6 +652,68 @@ fn omitted_blobs_cannot_inherit_a_conflicting_local_acl() -> Result<()> {
 }
 
 #[test]
+fn point_grant_restores_only_read_access_after_verified_paged_import() -> Result<()> {
+    use crate::{profile::PUBLIC, store::Archive, wire::Id};
+    let source = Archive::memory()?;
+    let mut payloads = std::collections::BTreeMap::new();
+    for n in 0..160 {
+        let bytes = format!("supplemental observation {n}").into_bytes();
+        payloads.insert(source.blob(&bytes, Id::blob(PUBLIC))?, bytes);
+    }
+    let head = source.snapshot_id("supplemental point grant", Default::default())?;
+    let disclosures: Vec<_> = payloads
+        .keys()
+        .step_by(16)
+        .map(|&id| Ok((id, source.export_member(head, id)?)))
+        .collect::<Result<_>>()?;
+    for &id in payloads.keys() {
+        source.withdraw(id)?;
+    }
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("point grant.sqlite");
+    let mut receiver = Archive::open(&path)?;
+    let page = source.export_exchange_page(head, None, 1024)?;
+    assert!(receiver.import_pinned_exchange_page(head, &page)?.complete);
+    let (payload, disclosure) = disclosures
+        .into_iter()
+        .find(|(id, _)| {
+            receiver
+                .require_exchange_access(head, *id, Id::blob(PUBLIC), false)
+                .is_err()
+        })
+        .expect("a custody leaf omitted from the paged exchange");
+    let bytes = &payloads[&payload];
+    assert_eq!(receiver.blob(bytes, Id::blob(PUBLIC))?, payload);
+    assert!(receiver.resolve_head(head, payload, "read").is_err());
+    let status = receiver.exchange_import_status(head)?;
+
+    assert_eq!(receiver.import_member(head, &disclosure)?, payload);
+    assert_eq!(receiver.import_member(head, &disclosure)?, payload);
+    assert_eq!(receiver.exchange_import_status(head)?, status);
+    let snapshot = receiver.head(head)?;
+    assert_eq!(receiver.resolve(&snapshot, payload, "read")?, *bytes);
+    assert!(receiver.resolve(&snapshot, payload, "train").is_err());
+    assert_eq!(receiver.inventory_reader(head)?.resolve(payload)?.0, *bytes);
+    drop(receiver);
+    let receiver = Archive::open_for_read(&path)?;
+    assert_eq!(receiver.resolve_head(head, payload, "read")?, *bytes);
+    assert!(receiver.resolve_head(head, payload, "train").is_err());
+    drop(receiver);
+
+    let receiver = Archive::open(&path)?;
+    receiver.db.execute_batch(
+        "INSERT INTO archive_member_access SELECT * FROM archive_point_access;
+         DROP TABLE archive_point_access;",
+    )?;
+    drop(receiver);
+    let historical = Archive::open_for_read(&path)?;
+    assert_eq!(historical.resolve_head(head, payload, "read")?, *bytes);
+    assert!(historical.resolve_head(head, payload, "train").is_err());
+    Ok(())
+}
+
+#[test]
 fn conflicting_packet_does_not_advance_either_exchange_mode() -> Result<()> {
     use crate::{
         profile::{PUBLIC, READ_ONLY},

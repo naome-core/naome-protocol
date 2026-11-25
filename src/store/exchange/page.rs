@@ -233,29 +233,50 @@ impl Archive {
         head: Id,
         member: Id,
         access: Id,
+        point_read: bool,
     ) -> Result<()> {
         if let Some(descriptor) = self.imported_exchange_descriptor(head)? {
             let mut tree = Tree::new(&self.db);
-            verify_access(&descriptor, member, access, |id| tree.read(id))
-                .context("unavailable authenticated exchange access")?;
-        } else if has_table(&self.db, "archive_member_access")? {
-            let agreed: Option<String> = self
-                .db
-                .prepare_cached(
-                    "SELECT access FROM archive_member_access WHERE head=? AND member=?",
-                )?
-                .query_row(params![head.to_string(), member.to_string()], |row| {
-                    row.get(0)
-                })
-                .optional()?;
-            if let Some(agreed) = agreed {
-                ensure!(
-                    access == agreed.parse()?,
-                    "local ACL differs from scoped exchange access"
-                );
+            let proof = verify_access(&descriptor, member, access, |id| tree.read(id));
+            if proof.is_err() && point_read && self.point_access(head, member)? == Some(access) {
+                return Ok(());
             }
+            proof.context("unavailable authenticated exchange access")?;
+        } else if let Some(agreed) =
+            self.stored_member_access("archive_member_access", head, member)?
+        {
+            ensure!(
+                access == agreed
+                    || (point_read && self.point_access(head, member)? == Some(access)),
+                "local ACL differs from scoped exchange access"
+            );
         }
         Ok(())
+    }
+
+    pub(super) fn point_access(&self, head: Id, member: Id) -> Result<Option<Id>> {
+        if let Some(access) = self.stored_member_access("archive_point_access", head, member)? {
+            return Ok(Some(access));
+        }
+        // Older point proofs share a table with legacy conflicts. A conflict
+        // row can never equal the immutable ACL of the locally held object.
+        self.stored_member_access("archive_member_access", head, member)
+    }
+
+    fn stored_member_access(&self, table: &str, head: Id, member: Id) -> Result<Option<Id>> {
+        if !has_table(&self.db, table)? {
+            return Ok(None);
+        }
+        let agreed: Option<String> = self
+            .db
+            .prepare_cached(&format!(
+                "SELECT access FROM {table} WHERE head=? AND member=?"
+            ))?
+            .query_row(params![head.to_string(), member.to_string()], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        agreed.map(|access| access.parse()).transpose()
     }
 
     // The receiver already holds the inventory path for an acknowledged cursor.
@@ -549,9 +570,13 @@ impl Archive {
                 )?;
             }
             if finished {
-                supplied -= publish_packets(&tx, &key, verified)?;
+                let conflicts = publish_packets(&tx, &key, verified)?;
+                supplied -= conflicts;
                 let snapshot = StoredHeader::Current(page.manifest.clone()).into_snapshot();
                 save_imported_head(&tx, head, &snapshot)?;
+                if verified || conflicts != 0 {
+                    crate::store::search_index::invalidate_access_scope(&tx, &key)?;
+                }
             }
             tx.execute(
                 "INSERT INTO archive_exchange_sessions(head,verified,cursor,seen,complete,descriptor,supplied)

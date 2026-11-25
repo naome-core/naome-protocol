@@ -256,6 +256,15 @@ impl<'a> InventoryReader<'a> {
         }
     }
 
+    pub(super) fn has_exchange_scope(&self) -> Result<bool> {
+        if let InventoryView::Materialized(snapshot) = &self.view
+            && !snapshot.inherited_access.is_empty()
+        {
+            return Ok(true);
+        }
+        Ok(self.archive.exchange_access_scope(self.id()?)?.is_some())
+    }
+
     fn covers(&mut self, required: &Snapshot) -> Result<bool> {
         let manifest = match &self.view {
             InventoryView::Materialized(view) => {
@@ -316,7 +325,9 @@ impl<'a> InventoryReader<'a> {
         match &self.view {
             InventoryView::Materialized(snapshot) => {
                 self.archive
-                    .resolve_with(snapshot, id, |policy| allows(policy, purpose))
+                    .resolve_with(snapshot, id, purpose == "read", |policy| {
+                        allows(policy, purpose)
+                    })
             }
             InventoryView::Paged(manifest) => {
                 self.archive
@@ -355,7 +366,7 @@ impl<'a> InventoryReader<'a> {
                 |key| Ok(self.tree.get(manifest.inventory, &key.to_string())? == Some(key)),
                 |access| {
                     self.archive
-                        .require_exchange_access(manifest.id()?, id, access)
+                        .require_exchange_access(manifest.id()?, id, access, true)
                 },
             ),
         }
@@ -470,12 +481,13 @@ impl Archive {
         snapshot: &Snapshot,
         id: Id,
         access: Id,
+        point_read: bool,
     ) -> Result<()> {
         if let Some(manifest) = &snapshot.manifest {
-            self.require_exchange_access(manifest.id()?, id, access)?;
+            self.require_exchange_access(manifest.id()?, id, access, point_read)?;
         }
         for &scope in &snapshot.inherited_access {
-            self.require_exchange_access(scope, id, access)?;
+            self.require_exchange_access(scope, id, access, point_read)?;
         }
         Ok(())
     }
@@ -945,7 +957,7 @@ impl Archive {
             tree.get(m.inventory, &access.to_string())? == Some(access),
             "missing access descriptor"
         );
-        self.require_exchange_access(m.id()?, id, access)?;
+        self.require_exchange_access(m.id()?, id, access, purpose == "read")?;
         self.check_access(access, |policy| crate::profile::allows(policy, purpose))?;
         Ok((bytes, access))
     }

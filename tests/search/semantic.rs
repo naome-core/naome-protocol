@@ -267,6 +267,106 @@ fn media_search_respects_imported_chunk_access_even_with_a_prepared_cache() -> R
 }
 
 #[test]
+fn verified_import_rechecks_prepared_text_sources_before_ranking_and_embedding() -> Result<()> {
+    use naome_protocol::profile::READ_ONLY;
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("text cache.sqlite");
+    let mut receiver = Archive::open(&path)?;
+    let source = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let bytes = b"confidential field notes";
+    let text = receiver.capture(
+        bytes.as_slice(),
+        "text/plain",
+        bytes.len(),
+        public,
+        Format::A,
+    )?;
+    let local = receiver.snapshot("local notes", BTreeSet::new())?;
+    let descriptor = receiver.read(&local, text, "read")?;
+    let chunk = descriptor.inputs[0].target;
+    assert_eq!(source.blob(bytes, Id::blob(READ_ONLY))?, chunk);
+    assert_eq!(source.document(&descriptor, Format::A, public)?, text);
+    let head = source.snapshot_id("peer notes", BTreeSet::new())?;
+    source.withdraw(chunk)?;
+    assert!(
+        receiver
+            .import_legacy_exchange_page(
+                head,
+                &source.export_legacy_exchange_page(head, None, 64)?
+            )?
+            .complete
+    );
+    let scoped = receiver.head(head)?;
+    let mut model = TestEmbedder {
+        id: Id::blob(b"prepared text access"),
+        embedded_passages: 0,
+    };
+    let options = SearchOptions {
+        mode: SearchMode::Hybrid,
+        kind: Some(Kind::Descriptor),
+        ..Default::default()
+    };
+    receiver.prepare_search(&local, 100, Some(&mut model))?;
+    let before = receiver.find(&scoped, "confidential", options, Some(&mut model))?;
+    assert_eq!(before.hits.first().map(|hit| hit.id), Some(text));
+    assert!(before.hits[0].semantic_rank.is_some());
+
+    assert!(
+        receiver
+            .import_pinned_exchange_page(head, &source.export_exchange_page(head, None, 64)?)?
+            .complete
+    );
+    assert!(receiver.resolve_head(head, chunk, "read").is_err());
+    let stale_query = |model: &mut TestEmbedder| {
+        receiver.search_prepared(
+            &scoped,
+            SearchInput::Text("confidential"),
+            options,
+            Some(model),
+        )
+    };
+    let invalidated = stale_query(&mut model)?;
+    assert!(!invalidated.index_complete && invalidated.hits.is_empty());
+
+    // Restore an older derived view to check the read paths on existing archives.
+    let db = rusqlite::Connection::open(path)?;
+    let head = head.to_string();
+    db.execute(
+        "INSERT INTO rep_search_heads(head,finished) VALUES(?,1)",
+        [&head],
+    )?;
+    let shared = db.execute(
+        "INSERT INTO rep_search_head_sets SELECT ?,set_id FROM rep_search_head_sets WHERE head=?",
+        rusqlite::params![head, local.id()?.to_string()],
+    )?;
+    assert!(shared > 0);
+    let stale = stale_query(&mut model)?;
+    assert!(stale.limited_coverage && stale.hits.is_empty());
+    assert_eq!(stale.vector_products, 0);
+    let metadata = receiver.search_prepared(
+        &scoped,
+        SearchInput::Text("text/plain"),
+        options,
+        Some(&mut model),
+    )?;
+    assert_eq!(metadata.hits.first().map(|hit| hit.id), Some(text));
+    assert!(metadata.hits[0].semantic_rank.is_none());
+    assert!(metadata.hits[0].semantic_similarity.is_none());
+
+    let mut new_model = TestEmbedder {
+        id: Id::blob(b"missing text embeddings"),
+        embedded_passages: 0,
+    };
+    receiver.prepare_search(&scoped, 100, Some(&mut new_model))?;
+    assert_eq!(new_model.embedded_passages, 0);
+    receiver.prepare_search(&local, 100, Some(&mut new_model))?;
+    assert!(new_model.embedded_passages > 0);
+    Ok(())
+}
+
+#[test]
 fn a_failed_media_embedding_preserves_other_hits_and_is_not_retried_per_query() -> Result<()> {
     struct Failing {
         text: TestEmbedder,

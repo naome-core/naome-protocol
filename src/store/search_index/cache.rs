@@ -320,6 +320,26 @@ fn cached_record(
     Ok(Some(Record::Cached { entries, limited }))
 }
 
+pub(super) fn entry_readable(
+    db: &Connection,
+    inventory: &mut InventoryReader<'_>,
+    entry: i64,
+) -> Result<bool> {
+    let mut statement = db.prepare_cached("SELECT source FROM rep_search_sources WHERE entry=?")?;
+    let mut rows = statement.query([entry])?;
+    let mut found = false;
+    while let Some(row) = rows.next()? {
+        found = true;
+        if inventory
+            .readable(row.get::<_, String>(0)?.parse()?)
+            .is_err()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(found)
+}
+
 fn publish(db: &Connection, head: &str, id: Id, record: &Record) -> Result<()> {
     let key = id.to_string();
     db.execute(
