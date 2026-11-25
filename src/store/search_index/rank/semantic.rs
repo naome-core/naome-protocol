@@ -34,6 +34,7 @@ struct Scope<'a> {
     options: SearchOptions<'a>,
     model: &'a str,
     positions: Option<(i64, i64)>,
+    media_allowed: &'a mut dyn FnMut(Id) -> bool,
 }
 
 type Match = (Id, i64, i64, f32);
@@ -82,7 +83,7 @@ pub(super) fn semantic_passages(
         .collect();
     let budget = options.vector_budget.saturating_mul(dimensions);
     let exact_cost = queries.len() * dimensions;
-    let scope = Scope {
+    let mut scope = Scope {
         db,
         head,
         options,
@@ -94,6 +95,7 @@ pub(super) fn semantic_passages(
         } else {
             None
         },
+        media_allowed: semantic.media_allowed,
     };
     let count = scope.count()?;
     work.bounded = query_count < semantic.vectors.len() || count > budget / exact_cost;
@@ -122,8 +124,8 @@ pub(super) fn semantic_passages(
     };
 
     if count <= budget / exact_cost {
-        scope.visit(dimensions, count, count, work, &mut exact)?;
-        work.products = count * exact_cost;
+        let scored = scope.visit(dimensions, count, count, work, &mut exact)?;
+        work.products = scored * exact_cost;
     } else {
         let coarse_budget = (budget - exact_cost) / 2;
         let width = (coarse_budget / query_count / count).clamp(1, dimensions.min(128));
@@ -131,12 +133,13 @@ pub(super) fn semantic_passages(
         if samples == 0 {
             // Tiny caller-supplied budgets can only afford sampled exact comparisons.
             let samples = count.min(budget / exact_cost);
-            scope.visit(dimensions, count, samples, work, &mut exact)?;
-            work.products = samples * exact_cost;
+            let scored = scope.visit(dimensions, count, samples, work, &mut exact)?;
+            work.products = scored * exact_cost;
         } else {
             let coarse_products = samples * query_count * width;
             let finalists = samples.min((budget - coarse_products) / exact_cost);
-            let shortlist = shortlist(&scope, &queries, width, count, samples, finalists, work)?;
+            let shortlist =
+                shortlist(&mut scope, &queries, width, count, samples, finalists, work)?;
             let mut statement = db.prepare_cached(
                 "SELECT e.object,p.id,p.location,v.part,v.vector FROM rep_search_vectors v
                  JOIN rep_search_passages p ON p.id=v.passage JOIN rep_search_entries e ON e.id=p.entry
@@ -149,7 +152,7 @@ pub(super) fn semantic_passages(
                     work.vectors_loaded += 1;
                 }
             }
-            work.products = coarse_products + shortlist.len() * exact_cost;
+            work.products += shortlist.len() * exact_cost;
         }
     }
 
@@ -172,7 +175,7 @@ pub(super) fn semantic_passages(
 }
 
 fn shortlist(
-    scope: &Scope<'_>,
+    scope: &mut Scope<'_>,
     queries: &[&[f32]],
     width: usize,
     count: usize,
@@ -188,7 +191,7 @@ fn shortlist(
     let mut decoded = Vec::with_capacity(width);
     let mut best = BinaryHeap::with_capacity(finalists);
     let mut order = 0;
-    scope.visit(width, count, samples, work, |row| {
+    let scored = scope.visit(width, count, samples, work, |row| {
         let values = decode(row, width, &mut decoded)?;
         let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
         let similarity = if norm > 0.0 {
@@ -211,6 +214,7 @@ fn shortlist(
         }
         Ok(())
     })?;
+    work.products = scored * queries.len() * width;
     Ok(best.into_iter().map(|item| item.0).collect())
 }
 
@@ -234,22 +238,32 @@ impl Scope<'_> {
     }
 
     fn visit(
-        &self,
+        &mut self,
         width: usize,
         count: usize,
         samples: usize,
         work: &mut VectorWork,
-        mut visit: impl FnMut(&Row<'_>) -> Result<()>,
-    ) -> Result<()> {
+        mut score: impl FnMut(&Row<'_>) -> Result<()>,
+    ) -> Result<usize> {
         if samples == 0 {
-            return Ok(());
+            return Ok(0);
         }
+        let mut scored = 0;
+        let media_allowed = &mut self.media_allowed;
+        let mut visit = |row: &Row<'_>| {
+            // Media vectors may have been prepared before scoped access was enforced.
+            if !row.get::<_, bool>(5)? || media_allowed(row.get::<_, String>(0)?.parse()?) {
+                score(row)?;
+                scored += 1;
+            }
+            Ok(())
+        };
         // Sparse scans read ordered keys first. Materialize embedding BLOBs
         // only for sampled rows, even when the eligible inventory is large.
         let sparse = samples < count;
         let width = (width * 4) as i64;
         if sparse && let Some((sample, _)) = self.positions {
-            let mut lookup=self.db.prepare_cached("SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?4)
+            let mut lookup=self.db.prepare_cached("SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?4),p.text=''
                 FROM rep_search_positions s CROSS JOIN rep_search_vectors v ON v.model=?3 AND v.passage=s.passage AND v.part=s.part
                 CROSS JOIN rep_search_passages p ON p.id=v.passage CROSS JOIN rep_search_entries e ON e.id=p.entry
                 WHERE s.sample=?1 AND s.ordinal=?2")?;
@@ -263,12 +277,15 @@ impl Scope<'_> {
                 work.rows_examined += 1;
                 work.vectors_loaded += 1;
             }
-            return Ok(());
+            return Ok(scored);
         }
         let (columns, index) = if sparse {
             ("p.id,v.part", COVERING_VECTORS)
         } else {
-            ("e.object,p.id,p.location,v.part,substr(v.vector,1,?6)", "")
+            (
+                "e.object,p.id,p.location,v.part,substr(v.vector,1,?6),p.text=''",
+                "",
+            )
         };
         let sql = format!(
             "SELECT {columns} {} ORDER BY visible.object,visible.section,p.location,v.part",
@@ -286,7 +303,7 @@ impl Scope<'_> {
         ];
         let mut rows = statement.query(&bound[..if sparse { 5 } else { 6 }])?;
         let mut vectors = self.db.prepare_cached(
-            "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?3)
+            "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?3),p.text=''
              FROM json_each(?2) sample
              CROSS JOIN rep_search_vectors v ON v.model=?1
                 AND v.passage=json_extract(sample.value,'$[0]')
@@ -322,7 +339,7 @@ impl Scope<'_> {
             work.vectors_loaded +=
                 visit_samples(&mut vectors, self.model, width, &keys, &mut visit)?;
         }
-        Ok(())
+        Ok(scored)
     }
 }
 

@@ -86,7 +86,7 @@ impl Embedder for SyntheticMedia {
         Ok(input
             .iter()
             .map(|text| {
-                if text.contains("bridge") {
+                if text.contains("bridge") || *text == "video/mp4" {
                     vec![1.0, 0.0]
                 } else {
                     vec![0.0, 1.0]
@@ -237,6 +237,20 @@ fn media_search_respects_imported_chunk_access_even_with_a_prepared_cache() -> R
         Some(&mut model),
     )?;
     assert!(stale.limited_coverage && stale.hits.is_empty());
+    assert_eq!(stale.vector_products, 0);
+    let hybrid = SearchOptions {
+        mode: SearchMode::Hybrid,
+        ..options
+    };
+    let metadata = receiver.search_prepared(
+        &scoped,
+        SearchInput::Text("video/mp4"),
+        hybrid,
+        Some(&mut model),
+    )?;
+    assert_eq!(metadata.hits.first().map(|hit| hit.id), Some(video));
+    assert!(metadata.hits[0].semantic_rank.is_none());
+    assert!(metadata.hits[0].semantic_similarity.is_none());
     let mut new_model = SyntheticMedia(b"scoped multimodal test second model");
     let denied = receiver.find(&scoped, "bridge", options, Some(&mut new_model))?;
     assert!(denied.hits.is_empty());

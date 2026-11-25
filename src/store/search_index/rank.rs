@@ -52,6 +52,7 @@ pub(super) struct SemanticQuery<'a> {
     pub(super) model: &'a str,
     pub(super) vectors: &'a [Vec<f32>],
     pub(super) minimum: f32,
+    pub(super) media_allowed: &'a mut dyn FnMut(Id) -> bool,
 }
 
 pub(super) fn rank(

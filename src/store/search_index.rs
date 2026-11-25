@@ -20,7 +20,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use cache::{INDEX_VERSION, coverage, prepared_cache_version};
 use rusqlite::{OptionalExtension, params};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use vectors::{embed_query, missing_vectors};
 
 const MAX_QUERY_PASSAGES: usize = 24;
@@ -430,6 +430,21 @@ impl Archive {
             report.limited_coverage |= media_exists;
         }
         let mut work = VectorWork::default();
+        let mut checked_media = BTreeMap::new();
+        let mut media_allowed = |id| {
+            *checked_media.entry(id).or_insert_with(|| {
+                inventory
+                    .read(id)
+                    .and_then(|document| {
+                        self.media_dependencies(
+                            &mut inventory,
+                            &document,
+                            &mut Dependencies::default(),
+                        )
+                    })
+                    .is_ok()
+            })
+        };
         let candidates = rank(
             &read,
             &head,
@@ -443,9 +458,11 @@ impl Archive {
                     model,
                     vectors: vector,
                     minimum,
+                    media_allowed: &mut media_allowed,
                 }),
             &mut work,
         )?;
+        report.limited_coverage |= checked_media.values().any(|&allowed| !allowed);
         report.vector_budget_exhausted = work.bounded;
         report.vector_products = work.products;
         report.vector_rows_examined = work.rows_examined;
@@ -462,14 +479,6 @@ impl Archive {
             )?;
             let mut location = serde_json::from_str(&location)?;
             let snippet = if let SearchLocation::Media { span, .. } = &mut location {
-                // Stored visibility can predate the snapshot's scoped access checks.
-                if self
-                    .media_dependencies(&mut inventory, &document, &mut Dependencies::default())
-                    .is_err()
-                {
-                    report.limited_coverage = true;
-                    continue;
-                }
                 let part = candidate
                     .semantic
                     .and_then(|item| item.part)
