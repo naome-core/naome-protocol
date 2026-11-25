@@ -187,11 +187,14 @@ impl Archive {
         budget: u64,
         output: impl Write,
     ) -> Result<u64> {
-        self.with_read_view(|| {
+        let (mut inventory, descriptor) = self.with_read_view(|| {
             let mut inventory = self.inventory_reader(head)?;
-            inventory
-                .read(id)?
-                .materialize(budget, output, |chunk| Ok(inventory.resolve(chunk)?.0))
+            let descriptor = inventory.read(id)?;
+            Ok((inventory, descriptor))
+        })?;
+        // Output I/O can take arbitrarily long. Release each read view before writing.
+        descriptor.materialize(budget, output, |chunk| {
+            self.with_read_view(|| Ok(inventory.resolve(chunk)?.0))
         })
     }
 }
@@ -238,5 +241,62 @@ impl Document {
             "payload digest or length disagrees"
         );
         Ok(offset)
+    }
+}
+
+#[cfg(all(test, feature = "cli"))]
+mod tests {
+    use super::*;
+    use std::{io, time::Duration};
+
+    #[test]
+    fn recovery_releases_the_read_view_before_writing_a_chunk() -> Result<()> {
+        struct WithdrawDuringWrite<'a> {
+            archive: &'a Archive,
+            chunk: Id,
+            wrote: bool,
+        }
+
+        impl Write for WithdrawDuringWrite<'_> {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                if !self.wrote {
+                    self.archive
+                        .withdraw(self.chunk)
+                        .map_err(io::Error::other)?;
+                    self.wrote = true;
+                }
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("archive.sqlite");
+        let writer = Archive::open(&path)?;
+        let descriptor = writer.capture(
+            &b"firstlast"[..],
+            "application/octet-stream",
+            5,
+            Id::blob(PUBLIC),
+            Format::A,
+        )?;
+        let head = writer.snapshot_id("slow destination", Default::default())?;
+        writer.db.busy_timeout(Duration::from_millis(5))?;
+        let reader = Archive::open_for_read(&path)?;
+        let mut sink = WithdrawDuringWrite {
+            archive: &writer,
+            chunk: Id::blob(b"last"),
+            wrote: false,
+        };
+
+        let error = reader
+            .materialize_at(head, descriptor, 9, &mut sink)
+            .unwrap_err();
+        assert!(sink.wrote, "{error:#}");
+        assert!(error.to_string().contains("unavailable"));
+        Ok(())
     }
 }
