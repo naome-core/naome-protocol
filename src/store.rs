@@ -127,6 +127,7 @@ impl Archive {
         CREATE TABLE IF NOT EXISTS revocations(authority TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, request BLOB NOT NULL, state TEXT NOT NULL, witness TEXT);")?;
         archive.init_custody()?;
+        extents::upgrade(&archive.db)?;
         for bytes in [PUBLIC, READ_ONLY, PROFILE] {
             archive.blob(bytes, Id::blob(PUBLIC))?;
         }
@@ -202,12 +203,25 @@ impl Archive {
         )?)
     }
     pub(crate) fn raw(&self, id: Id) -> Result<Option<(Vec<u8>, Id)>> {
-        let item: Option<(Vec<u8>, String,Option<i64>)> = self
+        // Project the extent row so read-only handles also work before and across layout upgrades.
+        let item: Option<(Vec<u8>, String, Option<i64>)> = self
             .db
-            .prepare_cached("SELECT CASE WHEN r.id IS NULL THEN o.data ELSE substr(p.data,r.start+1,r.length) END,o.access,e.length FROM objects o LEFT JOIN custody_records r ON o.id=r.id
-                   LEFT JOIN custody_packs p ON p.id=r.pack
-                   LEFT JOIN archive_extents e ON e.id=o.id WHERE o.id=? AND o.data IS NOT NULL")?
-            .query_row([id.to_string()], |r| Ok((r.get(0)?, r.get(1)?,r.get(2)?)))
+            .prepare_cached(
+                "SELECT CASE WHEN r.id IS NULL THEN o.data ELSE substr(p.data,r.start+1,r.length) END,
+                        o.access,e.*
+                 FROM objects o LEFT JOIN custody_records r ON o.id=r.id
+                 LEFT JOIN custody_packs p ON p.id=r.pack LEFT JOIN archive_extents e ON e.id=o.id
+                 WHERE o.id=? AND o.data IS NOT NULL",
+            )?
+            .query_row([id.to_string()], |row| {
+                let access = row.get(1)?;
+                if let Ok(column) = row.as_ref().column_index("inline_data")
+                    && let Some(bytes) = row.get(column)?
+                {
+                    return Ok((bytes, access, None));
+                }
+                Ok((row.get(0)?, access, row.get("length")?))
+            })
             .optional()?;
         item.map(|(b, a, length)| {
             let b = if let Some(n) = length {

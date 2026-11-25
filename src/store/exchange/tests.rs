@@ -414,7 +414,8 @@ fn pending_imports_share_bytes_and_respect_intervening_admission_and_withdrawal(
         final_pages.push(source.export_exchange_page(head, progress.continuation, limit)?);
     }
     let copies: i64 = receiver.db.query_row(
-        "SELECT count(*) FROM archive_extent_blocks WHERE id=?",
+        "SELECT (SELECT count(*) FROM archive_extent_blocks WHERE id=?1)
+              + (SELECT count(*) FROM archive_extents WHERE id=?1 AND inline_data IS NOT NULL)",
         [payload.to_string()],
         |row| row.get(0),
     )?;
@@ -490,7 +491,8 @@ fn a_pending_import_resumes_from_the_previous_blob_staging_layout() -> Result<()
          ) WITHOUT ROWID;
          DROP TABLE archive_exchange_staged;
          DELETE FROM archive_extent_blocks;
-         DELETE FROM archive_extents;",
+         DELETE FROM archive_extents;
+         ALTER TABLE archive_extents DROP COLUMN inline_data;",
     )?;
     receiver.db.execute(
         "INSERT INTO archive_exchange_sessions(head,verified,cursor,seen,complete)
@@ -534,5 +536,43 @@ fn a_pending_import_resumes_from_the_previous_blob_staging_layout() -> Result<()
             source.resolve_head(head, id, "read")?
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_read_handle_keeps_resolving_payloads_across_the_extent_upgrade() -> Result<()> {
+    use crate::{
+        profile::PUBLIC,
+        store::{Archive, custody::BLOCK},
+        wire::Id,
+    };
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("receiver.sqlite");
+    let public = Id::blob(PUBLIC);
+    let receiver = Archive::open(&path)?;
+    let large = vec![0x75; BLOCK + 1];
+    let blocked = receiver.blob(&large, public)?;
+    receiver
+        .db
+        .execute_batch("ALTER TABLE archive_extents DROP COLUMN inline_data;")?;
+    drop(receiver);
+
+    let reader = Archive::open_for_read(&path)?;
+    assert_eq!(reader.resolve_local(blocked)?, large);
+
+    let source = Archive::memory()?;
+    let tiny_bytes = b"short observation";
+    let tiny = source.blob(tiny_bytes, public)?;
+    let empty = source.blob(b"", public)?;
+    let head = source.snapshot_id("inline transfer", Default::default())?;
+    let mut receiver = Archive::open(&path)?;
+    let page = source.export_exchange_page(head, None, 64)?;
+    assert!(receiver.import_pinned_exchange_page(head, &page)?.complete);
+
+    assert_eq!(reader.resolve_head(head, tiny, "read")?, tiny_bytes);
+    assert_eq!(reader.resolve_head(head, empty, "read")?, b"");
+    assert_eq!(reader.resolve_local(blocked)?, large);
+    receiver.withdraw(tiny)?;
+    assert!(reader.resolve_head(head, tiny, "read").is_err());
     Ok(())
 }

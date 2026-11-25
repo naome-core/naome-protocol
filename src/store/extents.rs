@@ -4,6 +4,24 @@ use crate::wire::Id;
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
+// This keeps small values in one indexed row on the default SQLite page size.
+const INLINE_BYTES: usize = 512;
+
+fn has_inline_data(db: &Connection) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('archive_extents') WHERE name='inline_data')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+pub(super) fn upgrade(db: &Connection) -> Result<()> {
+    if !has_inline_data(db)? {
+        db.execute_batch("ALTER TABLE archive_extents ADD COLUMN inline_data BLOB;")?;
+    }
+    Ok(())
+}
+
 pub(super) fn put(db: &Connection, id: Id, data: &[u8], access: Id) -> Result<ObjectAvailability> {
     let tx = if db.is_autocommit() {
         Some(rusqlite::Transaction::new_unchecked(
@@ -45,10 +63,13 @@ pub(super) fn put(db: &Connection, id: Id, data: &[u8], access: Id) -> Result<Ob
 }
 /// Write validated bytes by content ID inside the caller's write transaction.
 pub(super) fn store(db: &Connection, key: &str, data: &[u8]) -> Result<()> {
+    let inline = (data.len() <= INLINE_BYTES).then_some(data);
     let added = db
-        .prepare_cached("INSERT OR IGNORE INTO archive_extents VALUES(?,?)")?
-        .execute(params![key, data.len() as i64])?;
-    if added != 0 && !data.is_empty() {
+        .prepare_cached(
+            "INSERT OR IGNORE INTO archive_extents(id,length,inline_data) VALUES(?,?,?)",
+        )?
+        .execute(params![key, data.len() as i64, inline])?;
+    if added != 0 && inline.is_none() {
         let mut insert = db.prepare_cached("INSERT INTO archive_extent_blocks VALUES(?,?,?)")?;
         for (i, block) in data.chunks(BLOCK).enumerate() {
             insert.execute(params![key, i as i64, block])?;
