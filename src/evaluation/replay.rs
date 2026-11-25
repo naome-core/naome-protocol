@@ -124,6 +124,7 @@ impl Archive {
             };
             let evaluator: String = recorded.field("evaluator")?;
             let query = recorded.field("original_query")?;
+            check_receipt_budget(&query)?;
             let head = recorded.one("snapshot")?;
             let historical = match view {
                 Some(view) => self.receipt_horizon(view, head)?,
@@ -169,14 +170,14 @@ impl Archive {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let view = self.active_head(head)?;
         let recorded = saved_assessment(self, &view, previous)?;
-        let original: Receipt = recorded.field("original_transcript")?;
         let mut query: Query = recorded.field("original_query")?;
+        check_receipt_budget(&query)?;
+        let original: Receipt = recorded.field("original_transcript")?;
         for &argument in arguments {
             if !query.arguments.contains(&argument) {
                 query.arguments.push(argument);
             }
         }
-        check_receipt_budget(&query)?;
         query.current_at = current_at.or(query.current_at);
         let receipt = super::assess_for_evaluator(self, &view, &query, EVALUATOR_ID)?;
         let id = deposit_receipt_for_evaluator(

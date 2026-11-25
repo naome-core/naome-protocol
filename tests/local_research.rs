@@ -842,3 +842,26 @@ fn recovery_publishes_only_complete_verified_payloads() -> Result<()> {
     assert!(!root.join("incomplete.bin").exists());
     Ok(())
 }
+
+#[test]
+fn replay_rejects_a_historical_oversize_receipt_before_loading_its_horizon() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let path = root.join("archive.sqlite");
+    let archive = Archive::open(&path)?;
+    let case = fixture::seed(&archive, Format::A)?;
+    let mut old_receipt = archive.read_head(case.published, case.receipts[2], "read")?;
+    let mut query: naome_protocol::evaluation::Query = old_receipt.field("original_query")?;
+    query.budget = 100_001;
+    old_receipt
+        .fields
+        .insert("original_query".into(), serde_json::to_value(query)?);
+    let receipt = archive.document(&old_receipt, Format::A, Id::blob(PUBLIC))?;
+    archive.withdraw(case.s0)?;
+
+    let replay = invoke(&path, root, &["replay", &receipt.to_string()])?;
+    assert!(!replay.status.success());
+    let stderr = String::from_utf8_lossy(&replay.stderr);
+    assert!(stderr.contains("receipt evaluation budget"), "{stderr}");
+    Ok(())
+}
