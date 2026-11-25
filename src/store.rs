@@ -1,3 +1,4 @@
+mod backlinks;
 mod exchange;
 mod extents;
 mod inventory;
@@ -7,6 +8,7 @@ pub mod custody;
 mod search_index;
 pub mod sharing;
 mod snapshot;
+pub(crate) use backlinks::BacklinkIndex;
 pub use exchange::{Bundle, ExchangePage, ExchangeProgress, MemberProof, Packet};
 #[cfg(feature = "cli")]
 pub(crate) use search_index::IndexPreparation;

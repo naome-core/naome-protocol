@@ -158,6 +158,7 @@ fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -
     let initial = receiver.import_pinned_exchange_page(head, &first)?;
     assert_eq!(initial.continuation, first.progress().continuation);
     assert!(receiver.head(head).is_err());
+    assert!(receiver.backlink_index(head)?.is_none());
     drop(receiver);
     let mut receiver = Archive::open(&path)?;
     let local = receiver.snapshot("local research", Default::default())?;
@@ -173,6 +174,7 @@ fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -
     }
     assert!(receiver.import_exchange_page(&next)?.complete);
     assert!(progress.continuation.is_none());
+    assert!(receiver.backlink_index(head)?.unwrap().complete);
     assert_eq!(receiver.head(head)?.objects, snapshot.objects);
     assert!(receiver.resolve_head(head, readings[1], "train").is_err());
     let mut relay = Archive::memory()?;
@@ -193,6 +195,53 @@ fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn verified_exchange_with_an_omitted_record_keeps_backlink_coverage_open() -> Result<()> {
+    use crate::{
+        profile::{Document, Kind, PUBLIC, link},
+        store::Archive,
+        wire::{Format, Id},
+    };
+    use serde_json::json;
+
+    let sender = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let question = sender.document(
+        &Document::new(Kind::Question, "example", "scope", json!({}), vec![])?,
+        Format::A,
+        public,
+    )?;
+    let plan = sender.document(
+        &Document::new(
+            Kind::Plan,
+            "example",
+            "scope",
+            json!({}),
+            vec![link("question", question)],
+        )?,
+        Format::A,
+        public,
+    )?;
+    let head = sender.snapshot_id("notebook", Default::default())?;
+    // Model a sender whose inventory is pinned but whose record bytes are unavailable.
+    sender.db.execute(
+        "UPDATE objects SET data=NULL WHERE id=?",
+        [plan.to_string()],
+    )?;
+
+    let mut receiver = Archive::memory()?;
+    let page = sender.export_exchange_page(head, None, 64)?;
+    assert!(receiver.import_pinned_exchange_page(head, &page)?.complete);
+    assert!(!receiver.backlink_index(head)?.unwrap().complete);
+    assert!(
+        receiver
+            .question_at(Some(head), question, 2)?
+            .limited_coverage
+    );
+    assert!(receiver.read_head(head, plan, "read").is_err());
     Ok(())
 }
 

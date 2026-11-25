@@ -49,16 +49,23 @@ def verify_research_handoff(run):
     receiver = "research receiver.sqlite"
     initial = fixture["published"]
     transfer_paged(run, initial, "initial-research", receiver, sender=origin)
-    replay = ["--db", receiver, "label", initial, fixture["receipts"][2], "synthetic"]
-    if run(*replay) != fixture["labels"][2]:
+    receipt = fixture["receipts"][2]
+    replay = ["--db", receiver, "replay", receipt]
+    label = ["--db", receiver, "label", initial, receipt, "synthetic"]
+    historical = run(*replay)
+    if not historical["matches"] or historical["head"] != fixture["s0"]:
         raise ValueError("received archive did not replay the historical receipt")
+    if run(*label) != fixture["labels"][2]:
+        raise ValueError("received archive derived a different historical label")
 
     current = run("--db", origin, "snapshot", "release correction review")
     transfer_paged(run, current, "corrected-research", receiver, sender=origin)
     impact = run("--db", receiver, "impact", current, study["N"], "--mapping", study["mapping"])
     affected = {item for ids in impact["by_kind"].values() for item in ids}
-    if not set(fixture["labels"]) <= affected or run(*replay) != fixture["labels"][2]:
-        raise ValueError("received correction did not route original labels while preserving replay")
+    if not set(fixture["labels"]) <= affected:
+        raise ValueError("received correction did not route original labels")
+    if run(*replay) != historical or run(*label) != fixture["labels"][2]:
+        raise ValueError("received correction changed historical replay or label derivation")
 
 
 def verify(nao, directory, version):

@@ -212,10 +212,13 @@ pub enum ArchiveCommand {
         #[arg(long, default_value = "read")]
         purpose: String,
     },
-    /// Verify an exchange file and commit it to the archive.
+    /// Import an exchange file into the archive.
+    #[command(
+        long_about = "Import an exchange file into the archive.\n\nFor independent senders, use --paged with an independently obtained --expected-head to verify membership and committed access policies. JSON bundles, --stream and --legacy-page rely on the sender for blob access policies."
+    )]
     Import {
         file: PathBuf,
-        /// Stage the next range and publish the inventory after the final range.
+        /// Verify and stage the next range, then publish the inventory after the final range.
         #[arg(long, conflicts_with_all = ["stream", "member_head"])]
         paged: bool,
         /// Accept a v0.1.8 page without custody access witnesses from a trusted sender.
@@ -230,7 +233,7 @@ pub enum ArchiveCommand {
         /// Maximum stream input in bytes, including metadata (default 256 MiB).
         #[arg(long, requires = "stream")]
         max_bytes: Option<u64>,
-        /// Read the streaming exchange format.
+        /// Read a stream from a trusted sender that supplies the blob access policies.
         #[arg(long)]
         stream: bool,
     },

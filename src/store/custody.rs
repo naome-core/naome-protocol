@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tree::Tree;
 
 pub const BLOCK: usize = 256 * 1024;
+pub(super) const MAX_INDEXED_EDGES: usize = 4096;
 pub const MEMBERS: usize = 64;
 pub const BATCH_BYTES: usize = 4 * 1024 * 1024;
 const SCHEMA: &str = include_str!("custody/schema.sql");
@@ -86,27 +87,6 @@ impl Head {
     }
 }
 
-/// Reverse links committed by a verified custody head. Positive candidates can
-/// be checked even when the head cannot attest exhaustive coverage.
-pub(crate) struct BacklinkIndex {
-    root: Id,
-    pub(crate) complete: bool,
-}
-
-impl BacklinkIndex {
-    pub(crate) fn candidates(
-        &self,
-        inventory: &mut super::InventoryReader<'_>,
-        target: Id,
-        limit: usize,
-    ) -> Result<Vec<Id>> {
-        let mut found = Vec::new();
-        inventory
-            .tree
-            .prefix(self.root, &format!("r/{target}/"), limit, &mut found)?;
-        Ok(found)
-    }
-}
 #[derive(Serialize)]
 pub struct Admission {
     pub head: Id,
@@ -144,14 +124,6 @@ impl Archive {
             .context("unadmitted paged head")
     }
 
-    pub(crate) fn backlink_index(&self, head: Id) -> Result<Option<BacklinkIndex>> {
-        Ok(self
-            .custody_head_if_present(head)?
-            .map(|proof| BacklinkIndex {
-                root: proof.tree,
-                complete: proof.opaque == 0,
-            }))
-    }
     pub(super) fn custody_head_if_present(&self, id: Id) -> Result<Option<Head>> {
         self.custody_head_data(id)?
             .map(|data| {
@@ -323,7 +295,7 @@ impl Archive {
             }
             if let Some(record) = record {
                 // Large historical records remain readable. An unindexed edge leaves coverage open.
-                let index_edges = edges.saturating_add(record.edges.len()) <= 4096;
+                let index_edges = edges.saturating_add(record.edges.len()) <= MAX_INDEXED_EDGES;
                 if index_edges {
                     edges += record.edges.len();
                     match Document::decode(&record) {

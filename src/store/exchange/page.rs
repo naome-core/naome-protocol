@@ -7,7 +7,7 @@ use super::{
 use crate::{
     profile::{PUBLIC, READ_ONLY},
     store::{
-        custody::{Head, tree::Tree},
+        custody::{Head, MAX_INDEXED_EDGES, tree::Tree},
         insert,
         snapshot::{StoredHeader, save_imported_head},
     },
@@ -317,6 +317,13 @@ impl Archive {
         );
         let mut bytes = Vec::new();
         let mut previous = None;
+        let mut link_budget = MAX_INDEXED_EDGES;
+        let mut indexed_records = 0;
+        let mut backlinks = verified
+            .then(|| {
+                tx.prepare_cached("INSERT OR IGNORE INTO archive_exchange_backlinks VALUES(?,?,?)")
+            })
+            .transpose()?;
         for p in &page.packets {
             ensure!(
                 previous.is_none_or(|last| last < p.id) && ids.binary_search(&p.id).is_ok(),
@@ -328,15 +335,27 @@ impl Archive {
                     tree.read(id)
                 })?;
             }
-            p.decode(&mut bytes)?;
+            let record = p.decode(&mut bytes)?;
             if complete {
                 insert(&tx, p.id, &bytes, p.access)?;
             } else {
                 stage_packet(&tx, &key, verified, p, &bytes)?;
             }
+            if let Some(record) = record
+                && let Some(backlinks) = backlinks.as_mut()
+                && let Some(remaining) = link_budget.checked_sub(record.edges.len())
+            {
+                link_budget = remaining;
+                indexed_records += 1;
+                let record_id = p.id.to_string();
+                for edge in record.edges {
+                    backlinks.execute(params![key, edge.target.to_string(), record_id])?;
+                }
+            }
             witnesses.link(p.id, &bytes)?;
             previous = Some(p.id);
         }
+        drop(backlinks);
         witnesses.finish()?;
         let mut progress = page.progress();
         if duplicate {
@@ -350,6 +369,21 @@ impl Archive {
                 total <= page.manifest.count && (total == page.manifest.count) == finished,
                 "exchange count differs from manifest"
             );
+            if let Some(descriptor) = descriptor {
+                let covered = descriptor.opaque == 0
+                    && indexed_records == ids.iter().filter(|id| id.format().is_some()).count();
+                // Omitted or unindexed records leave coverage open. The seen
+                // checkpoint also detects ranges accepted by earlier versions.
+                tx.execute(
+                    "INSERT INTO archive_exchange_backlink_state VALUES(
+                         ?1,?2,?3 AND (?4=0 OR EXISTS (
+                             SELECT 1 FROM archive_exchange_backlink_state
+                             WHERE head=?1 AND seen=?4 AND covered
+                         ))
+                     ) ON CONFLICT(head) DO UPDATE SET seen=excluded.seen,covered=excluded.covered",
+                    params![key, i64::try_from(total)?, covered, seen],
+                )?;
+            }
             if finished {
                 publish_packets(&tx, &key, verified)?;
                 let snapshot = StoredHeader::Current(page.manifest.clone()).into_snapshot();

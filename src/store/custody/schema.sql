@@ -42,3 +42,9 @@ CREATE TABLE IF NOT EXISTS archive_exchange_packets(
     head TEXT NOT NULL, verified INTEGER NOT NULL, id TEXT NOT NULL, access TEXT NOT NULL,
     data BLOB NOT NULL, PRIMARY KEY(head,verified,id)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_exchange_backlinks(
+    head TEXT NOT NULL,target TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(head,target,record)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_exchange_backlink_state(
+    head TEXT PRIMARY KEY,seen INTEGER NOT NULL,covered INTEGER NOT NULL
+) WITHOUT ROWID;

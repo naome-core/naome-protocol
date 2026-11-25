@@ -3,7 +3,7 @@
 use anyhow::{Result, ensure};
 use naome_protocol::{
     fixture,
-    profile::{Document, Kind, PUBLIC, READ_ONLY},
+    profile::{Document, Kind, PUBLIC, READ_ONLY, link},
     store::Archive,
     wire::{Format, Id},
 };
@@ -147,6 +147,86 @@ fn one_archive_reports_pending_work_and_continues_the_full_snapshot() -> Result<
 fn document(root: &Path, archive: &Path, value: Value) -> Result<Value> {
     fs::write(root.join("record.json"), serde_json::to_vec(&value)?)?;
     run(archive, root, &["put", "record.json"])
+}
+
+#[test]
+fn verified_page_import_keeps_question_links_at_the_same_budget() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let sender = root.join("sender.sqlite");
+    let receiver = root.join("receiver.sqlite");
+    let archive = Archive::open(&sender)?;
+    let deposit = |kind, fields, edges| {
+        archive.document(
+            &Document::new(kind, "synthetic notebook", "finite sets", fields, edges)?,
+            Format::A,
+            Id::blob(PUBLIC),
+        )
+    };
+    let question = deposit(
+        Kind::Question,
+        json!({"statement":"Which element is least?"}),
+        vec![],
+    )?;
+    let plan = deposit(
+        Kind::Plan,
+        json!({"title":"Sort the items"}),
+        vec![link("question", question)],
+    )?;
+    for index in 0..48 {
+        deposit(
+            Kind::Question,
+            json!({"statement":format!("Independent experiment {index}")}),
+            vec![],
+        )?;
+    }
+    let head = archive
+        .snapshot_id("notebook", Default::default())?
+        .to_string();
+    drop(archive);
+
+    let question = question.to_string();
+    let args = ["question", &question, "--head", &head, "--budget", "2"];
+    let expected = run(&sender, root, &args)?;
+    assert_eq!(expected["limited_coverage"], false);
+    assert!(
+        expected["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == json!(plan))
+    );
+
+    let mut cursor = None;
+    for index in 0..16 {
+        let file = format!("part-{index}.json");
+        let mut export = vec!["export", &head, &file, "--paged", "--limit", "8"];
+        if let Some(cursor) = &cursor {
+            export.extend(["--after", identifier(cursor)]);
+        }
+        let sent = run(&sender, root, &export)?;
+        let received = run(
+            &receiver,
+            root,
+            &["import", &file, "--paged", "--expected-head", &head],
+        )?;
+        assert_eq!(sent, received);
+        if index == 1 {
+            let resumed = run(
+                &receiver,
+                root,
+                &["import", "part-0.json", "--paged", "--expected-head", &head],
+            )?;
+            assert_eq!(resumed["continuation"], received["continuation"]);
+        }
+        if received["complete"] == true {
+            assert_eq!(run(&receiver, root, &args)?, expected);
+            return Ok(());
+        }
+        assert!(!invoke(&receiver, root, &args)?.status.success());
+        cursor = Some(received["continuation"].clone());
+    }
+    anyhow::bail!("verified transfer did not complete")
 }
 
 #[test]

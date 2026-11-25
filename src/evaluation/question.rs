@@ -2,7 +2,7 @@ use super::{Receipt, Standing, default_byte_limit};
 use crate::{
     payload::CAPTURED_EVIDENCE_SCOPE,
     profile::{DependencyRole, Document, Kind, Link},
-    store::{Archive, InventoryReader, Snapshot, custody::BacklinkIndex},
+    store::{Archive, BacklinkIndex, InventoryReader, Snapshot},
     wire::Id,
 };
 use anyhow::{Result, ensure};

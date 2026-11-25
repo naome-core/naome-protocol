@@ -393,15 +393,16 @@ impl Archive {
         let mut base = None;
         let mut after = 0_i64;
         for parent in &parents {
-            if let Some(previous) = self
+            if let Some((previous, parent_epoch)) = self
                 .db
                 .query_row(
-                    "SELECT high_water FROM archive_seals WHERE id=? AND source=? AND epoch=?",
-                    params![parent.to_string(), source, epoch],
-                    |r| r.get::<_, i64>(0),
+                    "SELECT high_water,epoch FROM archive_seals WHERE id=? AND source=?",
+                    params![parent.to_string(), source],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
                 )
                 .optional()?
                 && (base.is_none() || previous > after)
+                && (parent_epoch == epoch || self.full_parent_available(*parent, previous)?)
             {
                 base = Some(*parent);
                 after = previous;
@@ -422,6 +423,31 @@ impl Archive {
             tx.commit()?
         }
         Ok(head)
+    }
+
+    fn full_parent_available(&self, parent: Id, high_water: i64) -> Result<bool> {
+        // Full seals only include deposits at or below their high-water mark.
+        // An older withdrawal already excluded from this parent is harmless.
+        let mut query = self.db.prepare_cached(
+            "SELECT o.id FROM objects o WHERE o.data IS NULL AND EXISTS (
+                 SELECT 1 FROM archive_deposits d WHERE d.id=o.id AND d.serial<=?
+             )",
+        )?;
+        let mut rows = query.query([high_water])?;
+        let Some(first) = rows.next()? else {
+            return Ok(true);
+        };
+        let inventory = self.custody_head(parent)?.inventory;
+        let mut tree = Tree::new(&self.db);
+        let mut row = Some(first);
+        while let Some(withdrawn) = row {
+            let id: String = withdrawn.get(0)?;
+            if tree.get(inventory, &id)?.is_some() {
+                return Ok(false);
+            }
+            row = rows.next()?;
+        }
+        Ok(true)
     }
     /// Continue one explicitly requested full lineage. Resolve the tip and seal under one lock.
     pub fn continue_snapshot(&self, source: &str) -> Result<Id> {
