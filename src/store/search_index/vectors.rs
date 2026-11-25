@@ -88,17 +88,13 @@ impl Archive {
                 let (pending, examined) = self.with_read_view(|| {
                     let mut pending = self.pending_vectors(head, &key, batch, now)?;
                     let examined = pending.len();
-                    if inventory.has_exchange_scope()?
-                        || crate::store::point::visible_in_search(&self.db, head)?
-                    {
-                        let mut checked = BTreeMap::new();
-                        pending.retain(|passage| {
-                            *checked.entry(passage.entry).or_insert_with(|| {
-                                super::cache::entry_readable(&self.db, inventory, passage.entry)
-                                    .unwrap_or(false)
-                            })
-                        });
-                    }
+                    let mut access = super::cache::EntryAccess::new(&self.db, inventory)?;
+                    let mut checked = BTreeMap::new();
+                    pending.retain(|passage| {
+                        *checked
+                            .entry(passage.entry)
+                            .or_insert_with(|| access.allows(inventory, passage.entry))
+                    });
                     Ok((pending, examined))
                 })?;
                 budget -= examined;

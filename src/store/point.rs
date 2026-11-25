@@ -2,7 +2,7 @@
 use super::{Archive, MEASUREMENT_PROFILE, PROFILE, PUBLIC, READ_ONLY};
 use crate::wire::Id;
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, params};
+use rusqlite::{CachedStatement, Connection, params};
 use std::borrow::Cow;
 
 fn table_exists(db: &Connection, name: &str) -> Result<bool> {
@@ -81,15 +81,20 @@ pub(super) fn catalog(db: &Connection) -> Result<Cow<'static, str>> {
     Ok(Cow::Owned(legacy_catalog(db)?))
 }
 
-pub(super) fn visible_in_search(db: &Connection, head: &str) -> Result<bool> {
+pub(super) fn search_entry_check(db: &Connection) -> Result<Option<CachedStatement<'_>>> {
+    if table_exists(db, "archive_point_only")? {
+        let has_points: bool = db
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM archive_point_only)")?
+            .query_row([], |row| row.get(0))?;
+        if !has_points {
+            return Ok(None);
+        }
+    }
     let points = catalog(db)?;
-    Ok(db
-        .prepare_cached(&format!(
-            "SELECT EXISTS(SELECT 1 FROM ({points}) p
-           CROSS JOIN rep_search_sources s ON s.source=p.id
-           CROSS JOIN rep_search_visible v ON v.entry=s.entry WHERE v.head=?)"
-        ))?
-        .query_row([head], |row| row.get(0))?)
+    Ok(Some(db.prepare_cached(&format!(
+        "SELECT EXISTS(SELECT 1 FROM rep_search_sources s WHERE s.entry=?
+         AND EXISTS(SELECT 1 FROM ({points}) p WHERE p.id=s.source))"
+    ))?))
 }
 
 pub(super) fn mark_new(db: &Connection, id: Id) -> Result<()> {
@@ -195,6 +200,39 @@ impl Archive {
                 "point disclosure is outside this head"
             );
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::StatementStatus;
+
+    #[test]
+    fn checking_a_search_entry_does_not_walk_unrelated_points() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(
+            "CREATE TABLE archive_point_only(id TEXT PRIMARY KEY) WITHOUT ROWID;
+             CREATE TABLE rep_search_sources(source TEXT,entry INTEGER,PRIMARY KEY(source,entry)) WITHOUT ROWID;
+             CREATE INDEX rep_search_sources_entry ON rep_search_sources(entry);
+             INSERT INTO rep_search_sources VALUES('underlying source',1);
+             INSERT INTO archive_point_only VALUES('unrelated point');",
+        )?;
+        let mut scope = search_entry_check(&db)?.expect("point catalog is nonempty");
+        assert!(!scope.query_row([1], |row| row.get::<_, bool>(0))?);
+        let baseline = scope.reset_status(StatementStatus::VmStep);
+        db.execute_batch(
+            "WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<4096)
+             INSERT INTO archive_point_only SELECT 'point ' || n FROM ids;",
+        )?;
+        assert!(!scope.query_row([1], |row| row.get::<_, bool>(0))?);
+        assert_eq!(scope.reset_status(StatementStatus::VmStep), baseline);
+        db.execute(
+            "INSERT INTO archive_point_only VALUES('underlying source')",
+            [],
+        )?;
+        assert!(scope.query_row([1], |row| row.get::<_, bool>(0))?);
         Ok(())
     }
 }

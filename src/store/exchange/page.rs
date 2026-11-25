@@ -215,7 +215,7 @@ impl Archive {
     }
 
     pub(in crate::store) fn exchange_access_scope(&self, head: Id) -> Result<Option<Id>> {
-        let scoped = self.is_review_scope(head)?
+        let scoped = self.native_requires_access_proof(head)?
             || (has_table(&self.db, "archive_exchange_sessions")?
             && self.db.prepare_cached(
                 "SELECT EXISTS(SELECT 1 FROM archive_exchange_sessions WHERE head=? AND verified AND complete)",
@@ -236,14 +236,14 @@ impl Archive {
         access: Id,
         point_read: bool,
     ) -> Result<()> {
-        if self.is_review_scope(head)? {
+        if self.native_requires_access_proof(head)? {
             let descriptor = self.custody_head(head)?;
             let mut tree = Tree::new(&self.db);
             ensure!(
                 committed_access(&descriptor, member, |id| tree.read(id))? == access
                     && committed_access(&descriptor, access, |id| tree.read(id))?
                         == Id::blob(PUBLIC),
-                "member is unavailable in the source inventories of this review"
+                "local ACL differs from authenticated native custody"
             );
         }
         if let Some(descriptor) = self.imported_exchange_descriptor(head)? {
@@ -279,12 +279,26 @@ impl Archive {
         Ok(())
     }
 
-    fn is_review_scope(&self, head: Id) -> Result<bool> {
-        Ok(has_table(&self.db, "archive_review_scopes")?
-            && self
-                .db
-                .prepare_cached("SELECT EXISTS(SELECT 1 FROM archive_review_scopes WHERE head=?)")?
-                .query_row([head.to_string()], |row| row.get::<_, bool>(0))?)
+    fn native_requires_access_proof(&self, head: Id) -> Result<bool> {
+        match self.db.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM custody_heads INDEXED BY custody_restricted_heads
+             WHERE id=? AND json_extract(CAST(data AS TEXT),'$.restricted')=1)",
+        ) {
+            Ok(mut lookup) => Ok(lookup.query_row([head.to_string()], |row| row.get(0))?),
+            Err(error) => {
+                let indexed: bool = self.db.prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='custody_restricted_heads')",
+                )?.query_row([], |row| row.get(0))?;
+                if indexed {
+                    return Err(error.into());
+                }
+                // A read-only legacy archive cannot install the partial index.
+                Ok(has_table(&self.db, "custody_heads")?
+                    && self
+                        .custody_head_if_present(head)?
+                        .is_some_and(|descriptor| descriptor.restricted))
+            }
+        }
     }
 
     pub(in crate::store) fn point_access(&self, head: Id, member: Id) -> Result<Option<Id>> {

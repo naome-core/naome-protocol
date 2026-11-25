@@ -94,7 +94,7 @@ pub struct Admission {
     pub io: PageIo,
 }
 
-pub(super) fn object(id: Id) -> String {
+fn object(id: Id) -> String {
     format!("o/{id}")
 }
 fn required(id: Id) -> String {
@@ -444,22 +444,6 @@ impl Archive {
                     .prepare_cached("INSERT INTO custody_jumps VALUES(?,?,?)")?
                     .execute(params![id.to_string(), level as i64, ancestor.to_string()])?;
             }
-        }
-        if head.restricted {
-            let withheld = super::sharing::review_withheld_access();
-            let introduced = items
-                .iter()
-                .any(|item| item.member.absent && item.member.access == withheld);
-            self.db
-                .prepare_cached(
-                    "INSERT OR IGNORE INTO archive_review_scopes(head)
-                 SELECT ?1 WHERE ?2 OR EXISTS(SELECT 1 FROM archive_review_scopes WHERE head=?3)",
-                )?
-                .execute(params![
-                    id.to_string(),
-                    introduced,
-                    parent.map(|id| id.to_string())
-                ])?;
         }
         Ok(Admission {
             head: id,

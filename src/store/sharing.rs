@@ -1,13 +1,11 @@
 //! Complete inventories explicitly released to a configured replication group.
 use super::{
-    Archive, Snapshot,
-    custody::{object, tree::Tree},
-    insert,
+    Archive, Snapshot, insert,
     inventory::{InvalidInventory, Page, Pages, bound_parents},
     snapshot::save_imported_head,
 };
 use crate::{
-    profile::{Document, Kind, PROFILE, PUBLIC, allows, verify_attestation},
+    profile::{Document, Kind, PROFILE, allows, verify_attestation},
     wire::{Id, Record},
 };
 use anyhow::{Context, Result, ensure};
@@ -524,8 +522,6 @@ impl Archive {
             .prepare_cached("SELECT access FROM objects WHERE id=? AND data IS NOT NULL")?;
         for &head in &parents {
             let snapshot = self.head(head)?;
-            let native = self.custody_head_if_present(head)?;
-            let mut tree = Tree::new(&self.db);
             for &id in &snapshot.objects {
                 if !objects.insert(id) && !withheld.contains(&id) {
                     continue;
@@ -536,16 +532,7 @@ impl Archive {
                 let admitted = match local_acl {
                     Some(acl) => {
                         let acl = acl.parse()?;
-                        let native_allows = match &native {
-                            Some(native) => {
-                                tree.get(native.tree, &object(id))? == Some(acl)
-                                    && tree.get(native.tree, &object(acl))?
-                                        == Some(Id::blob(PUBLIC))
-                            }
-                            None => true,
-                        };
                         snapshot.objects.contains(&acl)
-                            && native_allows
                             && !self.point_only(id)?
                             && self.require_exchange_access(head, id, acl, false).is_ok()
                             && self.check_access(acl, |_| true).is_ok()
@@ -611,6 +598,7 @@ impl Archive {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::PUBLIC;
 
     #[test]
     fn review_preserves_the_native_grant_of_a_later_deposited_member() -> Result<()> {
@@ -621,6 +609,27 @@ mod tests {
         let archive = Archive::memory()?;
         let bytes = b"later deposit under a separate grant";
         let member = Id::blob(bytes);
+        let public = Id::blob(PUBLIC);
+        let question = archive.document(
+            &Document::new(
+                Kind::Question,
+                "native source question",
+                "test",
+                serde_json::json!({}),
+                vec![crate::profile::link("evidence", member)],
+            )?,
+            crate::wire::Format::A,
+            public,
+        )?;
+        let question_item = Item {
+            member: Member {
+                id: question,
+                access: public,
+                position: None,
+                absent: false,
+            },
+            bytes: archive.raw(question)?.context("missing question")?.0,
+        };
         let absent = Item {
             member: Member {
                 id: member,
@@ -631,11 +640,23 @@ mod tests {
             bytes: Vec::new(),
         };
         let source = archive
-            .custody_append("native source", None, &[absent])?
+            .custody_append("native source", None, &[absent, question_item])?
             .head;
-        let public = Id::blob(PUBLIC);
         archive.blob(bytes, public)?;
         assert!(archive.custody_resolve(source, member, "train").is_err());
+        assert!(archive.resolve_head(source, member, "train").is_err());
+        assert!(archive.inventory_reader(source)?.readable(member).is_err());
+        assert_eq!(
+            archive
+                .question_at(Some(source), question, 16)?
+                .unavailable_inputs,
+            [member].into()
+        );
+        archive
+            .db
+            .execute_batch("DROP INDEX custody_restricted_heads;")?;
+        assert!(archive.resolve_head(source, member, "train").is_err());
+        archive.init_custody()?;
         let review = archive.seal_review_union([source].into())?;
         assert!(archive.head(review)?.objects.contains(&member));
         assert!(archive.resolve_head(review, member, "train").is_err());

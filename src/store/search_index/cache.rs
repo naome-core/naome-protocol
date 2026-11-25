@@ -5,7 +5,9 @@ use super::{
 };
 use crate::{profile::Document, wire::Id};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    CachedStatement, Connection, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use std::collections::BTreeSet;
 
 pub(super) const INDEX_VERSION: u32 = 7;
@@ -367,7 +369,44 @@ fn cached_record(
     Ok(Some(Record::Cached { entries, limited }))
 }
 
-pub(super) fn entry_readable(
+pub(super) struct EntryAccess<'a> {
+    db: &'a Connection,
+    scoped: bool,
+    point_check: Option<CachedStatement<'a>>,
+}
+
+impl<'a> EntryAccess<'a> {
+    pub(super) fn new(db: &'a Connection, inventory: &InventoryReader<'_>) -> Result<Self> {
+        let scoped = inventory.has_exchange_scope()?;
+        let point_check = if scoped {
+            None
+        } else {
+            crate::store::point::search_entry_check(db)?
+        };
+        Ok(Self {
+            db,
+            scoped,
+            point_check,
+        })
+    }
+
+    pub(super) fn allows(&mut self, inventory: &mut InventoryReader<'_>, entry: i64) -> bool {
+        let checked = (|| {
+            let requires_check = match &mut self.point_check {
+                Some(query) => query.query_row([entry], |row| row.get(0))?,
+                None => self.scoped,
+            };
+            if requires_check {
+                entry_readable(self.db, inventory, entry)
+            } else {
+                Ok(true)
+            }
+        })();
+        checked.unwrap_or(false)
+    }
+}
+
+fn entry_readable(
     db: &Connection,
     inventory: &mut InventoryReader<'_>,
     entry: i64,

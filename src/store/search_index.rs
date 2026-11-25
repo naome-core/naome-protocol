@@ -444,24 +444,19 @@ impl Archive {
             report.limited_coverage |= media_exists;
         }
         let mut work = VectorWork::default();
-        let scoped =
-            inventory.has_exchange_scope()? || super::point::visible_in_search(&read, &head)?;
+        let mut access = cache::EntryAccess::new(&read, &inventory)?;
         let mut previous_entry = None;
         let mut rejected_entry = false;
         let mut entry_allowed = |entry| {
-            if scoped {
-                if let Some((previous, allowed)) = previous_entry
-                    && previous == entry
-                {
-                    return allowed;
-                }
-                let allowed = cache::entry_readable(&read, &mut inventory, entry).unwrap_or(false);
-                previous_entry = Some((entry, allowed));
-                rejected_entry |= !allowed;
-                allowed
-            } else {
-                true
+            if let Some((previous, allowed)) = previous_entry
+                && previous == entry
+            {
+                return allowed;
             }
+            let allowed = access.allows(&mut inventory, entry);
+            previous_entry = Some((entry, allowed));
+            rejected_entry |= !allowed;
+            allowed
         };
         let candidates = rank(
             &read,
@@ -480,6 +475,7 @@ impl Archive {
             &mut work,
             &mut entry_allowed,
         )?;
+        drop(access);
         report.limited_coverage |= rejected_entry;
         report.vector_budget_exhausted = work.bounded;
         report.vector_products = work.products;
