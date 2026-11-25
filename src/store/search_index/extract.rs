@@ -129,6 +129,7 @@ impl Archive {
                 document: None,
                 sections: Vec::new(),
                 missing: dependencies.missing,
+                missing_pages: dependencies.missing_pages,
                 limited: true,
                 cacheable: false,
             };
@@ -208,6 +209,7 @@ impl Archive {
             document: Some(document),
             sections,
             missing: dependencies.missing,
+            missing_pages: dependencies.missing_pages,
             limited,
             cacheable,
         }
@@ -266,9 +268,7 @@ impl Archive {
             let access = match inventory.readable(id) {
                 Ok(access) => access,
                 Err(error) => {
-                    if let Some(missing) = self.search_missing(inventory, id)? {
-                        dependencies.missing.insert(missing);
-                    }
+                    self.note_search_gap(inventory, id, dependencies, &error)?;
                     return Err(error);
                 }
             };
@@ -289,12 +289,25 @@ impl Archive {
                 Ok(bytes)
             }
             Err(error) => {
-                if let Some(missing) = self.search_missing(inventory, id)? {
-                    dependencies.missing.insert(missing);
-                }
+                self.note_search_gap(inventory, id, dependencies, &error)?;
                 Err(error)
             }
         }
+    }
+
+    fn note_search_gap(
+        &self,
+        inventory: &mut InventoryReader<'_>,
+        id: Id,
+        dependencies: &mut Dependencies,
+        error: &anyhow::Error,
+    ) -> Result<()> {
+        if let Some(page) = error.downcast_ref::<crate::store::custody::tree::MissingPage>() {
+            dependencies.missing_pages.insert(page.0);
+        } else if let Some(missing) = self.search_missing(inventory, id)? {
+            dependencies.missing.insert(missing);
+        }
+        Ok(())
     }
 
     fn search_missing(&self, inventory: &mut InventoryReader<'_>, id: Id) -> Result<Option<Id>> {

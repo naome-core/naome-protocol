@@ -10,7 +10,10 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 pub use super::inventory::MAX_MANIFEST_PARENTS;
 pub const CATALOG_PAGE_SIZE: usize = 32;
@@ -162,17 +165,55 @@ impl Replica {
 }
 
 impl Archive {
+    pub(super) fn upgrade_release_access(&self) -> Result<()> {
+        if self.db.execute(
+            "INSERT OR IGNORE INTO archive_release_access_state VALUES(1)",
+            [],
+        )? != 0
+        {
+            self.db.execute(
+                "INSERT OR IGNORE INTO suspended_releases
+                 SELECT r.head FROM archive_point_only p
+                 CROSS JOIN archive_release_members r ON r.member=p.id",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// An older archive can be opened for inspection without applying the migration.
+    fn catalog_suspensions(&self) -> Result<Cow<'static, str>> {
+        const SUSPENDED: &str = "SELECT head FROM suspended_releases";
+        let (current, indexed): (bool, bool) = self.db.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='archive_release_access_state'),
+                    EXISTS(SELECT 1 FROM sqlite_schema WHERE name='archive_release_members')",
+        )?.query_row([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        if current || !indexed {
+            return Ok(Cow::Borrowed(SUSPENDED));
+        }
+        let points = super::point::catalog(&self.db)?;
+        Ok(Cow::Owned(format!(
+            "{SUSPENDED} UNION SELECT r.head FROM ({points}) p
+             CROSS JOIN archive_release_members r ON r.member=p.id"
+        )))
+    }
+
     pub fn releases(&self) -> Result<BTreeSet<Id>> {
-        self.id_set("SELECT head FROM available_releases")
+        let suspended = self.catalog_suspensions()?;
+        self.id_set(&format!(
+            "SELECT head FROM releases EXCEPT SELECT head FROM ({suspended})"
+        ))
     }
 
     pub fn catalog_state(&self) -> Result<CatalogState> {
         // Both tables are append-only. Each admission or first suspension changes the revision.
-        let (observed, suspended): (i64, i64) = self.db.query_row(
-            "SELECT (SELECT count(*) FROM releases), (SELECT count(*) FROM suspended_releases)",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+        let access = self.catalog_suspensions()?;
+        let (observed, suspended): (i64, i64) = self
+            .db
+            .prepare_cached(&format!(
+                "SELECT (SELECT count(*) FROM releases), (SELECT count(*) FROM ({access}))",
+            ))?
+            .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(CatalogState {
             revision: observed as u64 + suspended as u64,
             available: usize::try_from(observed - suspended)?,
@@ -182,12 +223,13 @@ impl Archive {
     pub fn release_page(&self, after: Option<Id>) -> Result<ReleasePage> {
         let tx = self.db.unchecked_transaction()?;
         let state = self.catalog_state()?;
+        let suspended = self.catalog_suspensions()?;
         let mut heads = tx
-            .prepare(
+            .prepare_cached(&format!(
                 "SELECT head FROM releases r WHERE head > ? AND NOT EXISTS
-             (SELECT 1 FROM suspended_releases s WHERE s.head=r.head)
-             ORDER BY head LIMIT ?",
-            )?
+                 (SELECT 1 FROM ({suspended}) s WHERE s.head=r.head)
+                 ORDER BY head LIMIT ?",
+            ))?
             .query_map(
                 rusqlite::params![
                     after.map(|id| id.to_string()).unwrap_or_default(),
@@ -218,12 +260,13 @@ impl Archive {
     }
 
     pub fn announcements_after(&self, cursor: i64) -> Result<Vec<(i64, Id)>> {
+        let suspended = self.catalog_suspensions()?;
         self.db
-            .prepare(
+            .prepare_cached(&format!(
                 "SELECT rowid,head FROM releases r WHERE rowid > ? AND NOT EXISTS
-             (SELECT 1 FROM suspended_releases s WHERE s.head=r.head)
-             ORDER BY rowid LIMIT ?",
-            )?
+                 (SELECT 1 FROM ({suspended}) s WHERE s.head=r.head)
+                 ORDER BY rowid LIMIT ?",
+            ))?
             .query_map(rusqlite::params![cursor, CATALOG_PAGE_SIZE as i64], |row| {
                 Ok((row.get(0)?, row.get::<_, String>(1)?))
             })?
@@ -248,12 +291,14 @@ impl Archive {
     }
 
     fn ensure_released(&self, head: Id) -> Result<()> {
-        let released: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT head FROM releases WHERE head=?1
-                           EXCEPT SELECT head FROM suspended_releases WHERE head=?1)",
-            [head.to_string()],
-            |r| r.get(0),
-        )?;
+        let suspended = self.catalog_suspensions()?;
+        let released: bool = self
+            .db
+            .prepare_cached(&format!(
+                "SELECT EXISTS(SELECT 1 FROM releases WHERE head=?1 AND NOT EXISTS
+                           (SELECT 1 FROM ({suspended}) s WHERE s.head=?1))",
+            ))?
+            .query_row([head.to_string()], |r| r.get(0))?;
         ensure!(released, "inventory has not been released");
         Ok(())
     }
@@ -298,10 +343,7 @@ impl Archive {
                     include(&m, &mut total).map_err(|err| {
                         if err.is::<InvalidInventory>() {
                             err.context(ReleaseUnavailable("invalid linked inventory witness"))
-                        } else if matches!(
-                            err.downcast_ref::<rusqlite::Error>(),
-                            Some(rusqlite::Error::QueryReturnedNoRows)
-                        ) {
+                        } else if err.is::<super::custody::tree::MissingPage>() {
                             err.context(ReleaseUnavailable("missing inventory page"))
                         } else {
                             err
@@ -381,6 +423,14 @@ impl Archive {
                 }
             }
         }
+        let suspended: bool = self
+            .db
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM suspended_releases WHERE head=?)")?
+            .query_row([head.to_string()], |row| row.get(0))?;
+        ensure!(
+            !suspended,
+            "release is suspended; seal a new snapshot to publish"
+        );
         self.db.execute(
             "INSERT OR IGNORE INTO releases(head) VALUES(?)",
             [head.to_string()],
@@ -489,6 +539,82 @@ impl Archive {
 mod tests {
     use super::*;
     use crate::profile::PUBLIC;
+
+    #[test]
+    fn upgrade_suspends_releases_containing_historical_point_bytes() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("historical release.sqlite");
+        let author = Archive::memory()?;
+        let archive = Archive::open(&path)?;
+        let public = Id::blob(PUBLIC);
+        let available = archive.snapshot_id("untouched release", Default::default())?;
+        archive.release(available)?;
+        let bytes = b"historical point transfer";
+        let member = author.blob(bytes, public)?;
+        let origin = author.snapshot_id("point origin", Default::default())?;
+        archive.blob(bytes, public)?;
+        archive.import_member(origin, &author.export_member(origin, member)?)?;
+        let unavailable = archive.snapshot_id("historical release", Default::default())?;
+        archive.release(unavailable)?;
+        archive.db.execute_batch(
+            "INSERT INTO archive_member_access SELECT * FROM archive_point_access;
+             DROP TABLE archive_point_access;
+             DROP TABLE archive_release_access_state;
+             DROP TRIGGER archive_catalog_append;
+             DROP TABLE archive_point_only;
+             CREATE TRIGGER archive_catalog_append AFTER INSERT ON objects
+             BEGIN INSERT OR IGNORE INTO archive_deposits(id) VALUES(NEW.id); END;",
+        )?;
+        drop(archive);
+
+        let check = |archive: &Archive| -> Result<()> {
+            assert_eq!(
+                archive.observed_releases()?,
+                [available, unavailable].into()
+            );
+            assert_eq!(archive.releases()?, [available].into());
+            assert_eq!(
+                archive.catalog_state()?,
+                CatalogState {
+                    revision: 3,
+                    available: 1
+                }
+            );
+            assert_eq!(archive.release_page(None)?.heads, [available]);
+            assert_eq!(
+                archive
+                    .announcements_after(0)?
+                    .iter()
+                    .map(|&(_, id)| id)
+                    .collect::<Vec<_>>(),
+                [available]
+            );
+            assert!(archive.released_manifest(unavailable).is_err());
+            assert!(archive.released_member(unavailable, member).is_err());
+            assert!(archive.head(unavailable)?.objects.contains(&member));
+            Ok(())
+        };
+        check(&Archive::open_for_read(&path)?)?;
+        let upgraded = Archive::open(&path)?;
+        check(&upgraded)?;
+        assert!(upgraded.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM suspended_releases WHERE head=?)",
+            [unavailable.to_string()],
+            |row| row.get::<_, bool>(0),
+        )?);
+        upgraded.blob(bytes, public)?;
+        assert!(upgraded.release(unavailable).is_err());
+        let fresh = upgraded.snapshot_id("independently readmitted release", Default::default())?;
+        upgraded.release(fresh)?;
+        assert_eq!(upgraded.releases()?, [available, fresh].into());
+        assert!(upgraded.observed_releases()?.contains(&unavailable));
+        drop(upgraded);
+        assert_eq!(
+            Archive::open_for_read(&path)?.releases()?,
+            [available, fresh].into()
+        );
+        Ok(())
+    }
 
     #[test]
     fn oversized_publication_is_rejected_before_inventory_loading() -> Result<()> {

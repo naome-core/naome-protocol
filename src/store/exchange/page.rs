@@ -460,9 +460,8 @@ impl Archive {
             "previous exchange page has not been acknowledged"
         );
         let witnesses = Witnesses::begin(&tx)?;
-        let mut new_witness = false;
         for (&id, data) in &page.pages {
-            new_witness |= witnesses.install(id, data)?;
+            witnesses.install(id, data)?;
         }
         let mut tree = Tree::new(&tx);
         let mut ids = Vec::new();
@@ -491,6 +490,7 @@ impl Archive {
         let mut link_budget = MAX_INDEXED_EDGES;
         let mut indexed_records = 0;
         let mut supplied = 0;
+        let mut legacy_scope_changed = false;
         let mut backlinks = verified
             .then(|| {
                 tx.prepare_cached("INSERT OR IGNORE INTO archive_exchange_backlinks VALUES(?,?,?)")
@@ -516,6 +516,9 @@ impl Archive {
                     "conflicting access for immutable object {}",
                     p.id
                 );
+                if !verified {
+                    legacy_scope_changed |= retain_legacy_conflict(&tx, &key, p.id, p.access)?;
+                }
                 witnesses.link(p.id, &bytes)?;
                 previous = Some(p.id);
                 continue;
@@ -543,8 +546,8 @@ impl Archive {
         witnesses.finish()?;
         let mut progress = page.progress();
         if duplicate {
-            if verified && complete && new_witness {
-                crate::store::search_index::refresh_access_gaps(&tx, &key)?;
+            if legacy_scope_changed {
+                crate::store::search_index::invalidate_access_scope(&tx, &key)?;
             }
             progress.complete = complete;
             progress.continuation = if complete { None } else { cursor };
@@ -676,6 +679,22 @@ fn conflicts_with_local_access(db: &Connection, id: Id, access: Id) -> Result<bo
     Ok(db
         .prepare_cached("SELECT EXISTS(SELECT 1 FROM objects WHERE id=? AND access<>?)")?
         .query_row([id.to_string(), access.to_string()], |row| row.get(0))?)
+}
+
+fn retain_legacy_conflict(db: &Connection, head: &str, id: Id, access: Id) -> Result<bool> {
+    let id = id.to_string();
+    let access = access.to_string();
+    let added = db
+        .prepare_cached("INSERT OR IGNORE INTO archive_member_access VALUES(?,?,?)")?
+        .execute(params![head, id, access])?
+        != 0;
+    if !added {
+        let same: bool = db
+            .prepare_cached("SELECT access=? FROM archive_member_access WHERE head=? AND member=?")?
+            .query_row(params![access, head, id], |row| row.get(0))?;
+        ensure!(same, "conflicting legacy access for immutable object {id}");
+    }
+    Ok(added)
 }
 
 fn publish_packets(db: &Connection, head: &str, verified: bool) -> Result<i64> {

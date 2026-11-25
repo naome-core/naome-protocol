@@ -638,7 +638,7 @@ Each packet contains \texttt{id}, \texttt{access}, and the exact payload bytes i
 
 Stage verified packets and advance the cursor atomically. Reject local ACL conflicts before acknowledging a new page. If a local admission conflicts with a staged packet, complete the transfer with that member unavailable at the pinned head. Repeated pages can add verified witnesses while preserving the acknowledged cursor and completed coverage count. Limits are 1,024 examined members per page, 16 MiB per payload and 72 MiB per page.
 
-Version 1 carries inventory witnesses and packets. A recipient must select this compatibility mode explicitly and trust the sender for packet ACLs.
+Version 1 carries inventory witnesses and packets. A recipient must select this compatibility mode explicitly and trust the sender for packet ACLs. If a repeated page establishes a conflicting sender ACL, the member remains unavailable at that head.
 
 \partpage{Sources and design lineage}
 \small

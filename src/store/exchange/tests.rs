@@ -827,16 +827,23 @@ fn a_completed_page_retry_refreshes_prepared_search_gaps() -> Result<()> {
         records.push((id, text));
     }
     let head = source.snapshot_id("retry witnesses", Default::default())?;
+    let mirror = source.snapshot_id("shared retry witnesses", Default::default())?;
+    assert_eq!(
+        source.custody_head(head)?.tree,
+        source.custody_head(mirror)?.tree
+    );
     let complete = source.export_exchange_page(head, None, 1024)?;
     for (_, text) in &records {
         source.withdraw(Id::blob(text.as_bytes()))?;
     }
-    let omitted = source.export_exchange_page(head, None, 1024)?;
-    assert!(
-        receiver
-            .import_pinned_exchange_page(head, &omitted)?
-            .complete
-    );
+    for cut in [head, mirror] {
+        let omitted = source.export_exchange_page(cut, None, 1024)?;
+        assert!(
+            receiver
+                .import_pinned_exchange_page(cut, &omitted)?
+                .complete
+        );
+    }
     let (id, text) = records
         .into_iter()
         .find(|(_, text)| {
@@ -845,19 +852,22 @@ fn a_completed_page_retry_refreshes_prepared_search_gaps() -> Result<()> {
                 .is_err()
         })
         .expect("a payload with an omitted access witness");
-    let snapshot = receiver.head(head)?;
-    let prepared = receiver.prepare_search(&snapshot, 128, None)?;
-    assert!(prepared.index_complete && prepared.limited_coverage);
     let options = SearchOptions::default();
     let status = receiver.exchange_import_status(head)?;
+    let mirror_status = receiver.exchange_import_status(mirror)?;
     let query = SearchInput::Text(&text);
-    assert!(
-        receiver
-            .search_prepared(&snapshot, query, options, None)?
-            .hits
-            .iter()
-            .all(|hit| hit.id != id)
-    );
+    for cut in [head, mirror] {
+        let snapshot = receiver.head(cut)?;
+        let prepared = receiver.prepare_search(&snapshot, 128, None)?;
+        assert!(prepared.index_complete && prepared.limited_coverage);
+        assert!(
+            receiver
+                .search_prepared(&snapshot, query, options, None)?
+                .hits
+                .iter()
+                .all(|hit| hit.id != id)
+        );
+    }
 
     assert!(
         receiver
@@ -865,30 +875,74 @@ fn a_completed_page_retry_refreshes_prepared_search_gaps() -> Result<()> {
             .complete
     );
     assert_eq!(receiver.exchange_import_status(head)?, status);
-    assert_eq!(
-        receiver.resolve_head(head, Id::blob(text.as_bytes()), "read")?,
-        text.as_bytes()
-    );
-    let prepared = receiver.prepare_search(&snapshot, 128, None)?;
-    assert!(prepared.index_complete && !prepared.limited_coverage);
-    assert!(
-        receiver
-            .search_prepared(&snapshot, query, options, None)?
-            .hits
-            .iter()
-            .any(|hit| hit.id == id)
-    );
+    assert_eq!(receiver.exchange_import_status(mirror)?, mirror_status);
+    for cut in [head, mirror] {
+        assert_eq!(
+            receiver.resolve_head(cut, Id::blob(text.as_bytes()), "read")?,
+            text.as_bytes()
+        );
+        let snapshot = receiver.head(cut)?;
+        let prepared = receiver.prepare_search(&snapshot, 128, None)?;
+        assert!(prepared.index_complete && !prepared.limited_coverage);
+        assert!(
+            receiver
+                .search_prepared(&snapshot, query, options, None)?
+                .hits
+                .iter()
+                .any(|hit| hit.id == id)
+        );
+    }
     assert!(
         receiver
             .import_pinned_exchange_page(head, &complete)?
             .complete
     );
     assert_eq!(receiver.exchange_import_status(head)?, status);
+    let snapshot = receiver.head(head)?;
     assert!(
         receiver
             .search_prepared(&snapshot, query, options, None)?
             .index_complete
     );
+    Ok(())
+}
+
+#[test]
+fn a_legacy_retry_retains_the_access_of_a_previously_omitted_conflict() -> Result<()> {
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::Archive,
+        wire::Id,
+    };
+    let source = Archive::memory()?;
+    let bytes = b"sender read-only, independently public";
+    let id = source.blob(bytes, Id::blob(READ_ONLY))?;
+    let head = source.snapshot_id("legacy sender", Default::default())?;
+    let original = source.export_legacy_exchange_page(head, None, 64)?;
+    source.withdraw(id)?;
+    let omitted = source.export_legacy_exchange_page(head, None, 64)?;
+    let mut receiver = Archive::memory()?;
+    receiver.blob(bytes, Id::blob(PUBLIC))?;
+    assert!(
+        receiver
+            .import_legacy_exchange_page(head, &omitted)?
+            .complete
+    );
+    let checkpoint = receiver.exchange_import_status(head)?;
+    assert!(
+        receiver
+            .import_legacy_exchange_page(head, &original)?
+            .complete
+    );
+    assert!(
+        receiver
+            .import_legacy_exchange_page(head, &original)?
+            .complete
+    );
+    assert_eq!(receiver.exchange_import_status(head)?, checkpoint);
+    assert!(receiver.resolve_head(head, id, "train").is_err());
+    assert!(receiver.resolve_head(head, id, "read").is_err());
+    assert_eq!(receiver.resolve_local(id)?, bytes);
     Ok(())
 }
 

@@ -13,6 +13,13 @@ const BATCH: usize = 16;
 const TEXT_BATCH: usize = 4;
 const ADD_MEDIA_PASSAGE_INDEX: &str = "CREATE INDEX IF NOT EXISTS rep_search_media_passages
     ON rep_search_passages(entry) WHERE semantic AND text=''";
+const ADD_WITNESS_ARRIVAL: &str = "CREATE TRIGGER rep_search_witness_arrival
+    AFTER INSERT ON custody_pages
+    WHEN EXISTS(SELECT 1 FROM rep_search_waiting WHERE source='page/' || NEW.id AND NOT ready)
+    BEGIN
+        UPDATE rep_search_waiting SET ready=1 WHERE source='page/' || NEW.id;
+        UPDATE rep_search_revision SET value=value+1;
+    END;";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct State {
@@ -27,7 +34,7 @@ enum Record {
 
 impl Archive {
     pub(super) fn init_search(&self) -> Result<()> {
-        if current_schema(&self.db)? {
+        if current_schema(&self.db)? && witness_arrival_installed(&self.db)? {
             return Ok(());
         }
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
@@ -74,6 +81,18 @@ impl Archive {
             tx.execute_batch(include_str!("vector_visibility.sql"))?;
         }
         tx.execute_batch(ADD_MEDIA_PASSAGE_INDEX)?;
+        if !witness_arrival_installed(&tx)? {
+            tx.execute_batch(ADD_WITNESS_ARRIVAL)?;
+            // Earlier prepared gaps may have been recorded without a missing page ID.
+            tx.execute_batch(
+                "INSERT INTO rep_search_waiting(source,head,object,ready)
+                 SELECT g.object,g.head,g.object,1 FROM rep_search_gaps g
+                 JOIN archive_exchange_sessions s ON s.head=g.head
+                 WHERE s.verified AND s.complete
+                 ON CONFLICT(source,head,object) DO UPDATE SET ready=1;
+                 UPDATE rep_search_revision SET value=value+1;",
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -211,6 +230,15 @@ pub(super) fn current_schema(db: &Connection) -> Result<bool> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema
             WHERE type='index' AND name='rep_search_media_passages')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn witness_arrival_installed(db: &Connection) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE
+            type='trigger' AND name='rep_search_witness_arrival')",
         [],
         |row| row.get(0),
     )?)
@@ -368,6 +396,13 @@ fn publish(db: &Connection, head: &str, id: Id, record: &Record) -> Result<()> {
                 db.execute(
                     "INSERT OR IGNORE INTO rep_search_waiting(source,head,object) VALUES(?,?,?)",
                     params![missing.to_string(), head, key],
+                )?;
+            }
+            for page in &extracted.missing_pages {
+                db.execute(
+                    "INSERT OR IGNORE INTO rep_search_waiting(source,head,object,ready)
+                     VALUES('page/' || ?1,?2,?3,EXISTS(SELECT 1 FROM custody_pages WHERE id=?1))",
+                    params![page.to_string(), head, key],
                 )?;
             }
             (entries, extracted.limited)

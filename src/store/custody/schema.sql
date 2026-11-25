@@ -28,6 +28,7 @@ CREATE TRIGGER IF NOT EXISTS archive_catalog_append AFTER INSERT ON objects
 BEGIN INSERT OR IGNORE INTO archive_deposits(id) VALUES(NEW.id); END;
 CREATE TABLE IF NOT EXISTS archive_prior_heads(id TEXT PRIMARY KEY,descriptor BLOB NOT NULL,current TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS archive_release_members(member TEXT NOT NULL,head TEXT NOT NULL REFERENCES releases(head),PRIMARY KEY(member,head)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_release_access_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1));
 
 CREATE TABLE IF NOT EXISTS custody_pull_cursors(target TEXT PRIMARY KEY,cursor TEXT NOT NULL,sequence INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS custody_withdrawal_log(serial INTEGER PRIMARY KEY,object TEXT UNIQUE NOT NULL);

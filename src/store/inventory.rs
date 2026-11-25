@@ -274,18 +274,17 @@ pub(super) fn install(db: &Connection, pages: &Pages) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn install_page(db: &Connection, id: Id, page: &Page) -> Result<bool> {
+pub(super) fn install_page(db: &Connection, id: Id, page: &Page) -> Result<()> {
     let bytes = serde_json::to_vec(page)?;
     ensure!(
         bytes.len() <= 16384 && id.blob_digest().is_some(),
         "invalid witness page"
     );
     id.verify(&bytes)?;
-    let inserted = db
-        .prepare_cached("INSERT OR IGNORE INTO custody_pages VALUES(?,?)")?
+    db.prepare_cached("INSERT OR IGNORE INTO custody_pages VALUES(?,?)")?
         .execute(params![
             id.to_string(),
             super::custody::tree::encode_page(bytes)
         ])?;
-    Ok(inserted != 0)
+    Ok(())
 }
