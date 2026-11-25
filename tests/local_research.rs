@@ -898,3 +898,96 @@ fn explicit_replay_matches_the_materialized_view_with_a_mapping() -> Result<()> 
     assert_eq!(received, expected);
     Ok(())
 }
+
+#[test]
+fn question_view_includes_the_measurement_trials_plan_linked_claims() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let path = root.join("archive.sqlite");
+    let archive = Archive::open(&path)?;
+    let case = fixture::seed(&archive, Format::A)?;
+    let head = case.published.to_string();
+    let snapshot = archive.head(case.published)?;
+    let argument = archive.read(&snapshot, case.queries[2].arguments[0], "read")?;
+    let plan = archive.read(&snapshot, argument.one("plan")?, "read")?;
+    let question = plan.one("question")?.to_string();
+    let overview = run(&path, root, &["question", &question, "--head", &head])?;
+    let reviewed_ids = overview["records"].as_array().unwrap();
+    for required in [
+        case.queries[2].target,
+        case.queries[2].arguments[0],
+        case.receipts[2],
+    ] {
+        assert!(
+            reviewed_ids
+                .iter()
+                .any(|record| record["id"] == json!(required))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn replay_and_reassess_a_migrated_receipt_using_its_separate_mapping() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let path = root.join("archive.sqlite");
+    let archive = Archive::open(&path)?;
+    let case = fixture::seed(&archive, Format::A)?;
+    let published = archive.head(case.published)?;
+    let migration = archive.migrate(&published, Format::B, "receipt interchange")?;
+    let receipt = migration.pairs[&case.receipts[2]].to_string();
+    let exchange = migration.exchange_head.to_string();
+    let mapping = migration.mapping.to_string();
+    let report = run(
+        &path,
+        root,
+        &[
+            "replay",
+            &receipt,
+            "--head",
+            &exchange,
+            "--mapping",
+            &mapping,
+            "--require-match",
+        ],
+    )?;
+    assert_eq!(report["matches"], true);
+    assert_eq!(report["head"], json!(case.s0));
+    let invalid = case.published.to_string();
+    let wrong_scope = invoke(
+        &path,
+        root,
+        &[
+            "replay",
+            &receipt,
+            "--head",
+            &invalid,
+            "--mapping",
+            &mapping,
+            "--require-match",
+        ],
+    )?;
+    assert!(!wrong_scope.status.success());
+
+    let reassessed = run(
+        &path,
+        root,
+        &[
+            "reassess",
+            &receipt,
+            "--head",
+            &exchange,
+            "--mapping",
+            &mapping,
+        ],
+    )?;
+    assert_eq!(reassessed["previous"], receipt);
+    let replay = run(
+        &path,
+        root,
+        &["replay", identifier(&reassessed["id"]), "--require-match"],
+    )?;
+    assert_eq!(replay["matches"], true);
+    Ok(())
+}

@@ -39,6 +39,7 @@ pub struct Snapshot {
     pub(crate) manifest: Option<Manifest>,
     pub(crate) pages: Pages,
     archived_version: u8,
+    inherited_access: Vec<Id>,
 }
 impl std::ops::Deref for Snapshot {
     type Target = SnapshotView;
@@ -90,6 +91,7 @@ impl StoredHeader {
                 manifest: None,
                 pages: Pages::new(),
                 archived_version: a.version,
+                inherited_access: Vec::new(),
             },
         }
     }
@@ -105,6 +107,7 @@ impl Snapshot {
             manifest: Some(manifest),
             pages,
             archived_version: 0,
+            inherited_access: Vec::new(),
         }
     }
     pub(super) fn hydrate(&mut self, pages: &Pages) -> Result<()> {
@@ -345,7 +348,17 @@ impl<'a> InventoryReader<'a> {
     }
 
     pub(crate) fn readable(&mut self, id: Id) -> Result<()> {
-        self.archive.readable_with(id, |key| self.contains(key))
+        match &self.view {
+            InventoryView::Materialized(snapshot) => self.archive.readable(snapshot, id),
+            InventoryView::Paged(manifest) => self.archive.readable_with(
+                id,
+                |key| Ok(self.tree.get(manifest.inventory, &key.to_string())? == Some(key)),
+                |access| {
+                    self.archive
+                        .require_exchange_access(manifest.id()?, id, access)
+                },
+            ),
+        }
     }
 
     pub(crate) fn records_after(&mut self, after: Option<Id>, limit: usize) -> Result<Vec<Id>> {
@@ -438,7 +451,33 @@ impl Archive {
         id: Id,
         encoding: ManifestEncoding,
     ) -> Result<Snapshot> {
-        self.load_snapshot_packet(id, &view.resolve(id)?.0, encoding)
+        let mut snapshot = self.load_snapshot_packet(id, &view.resolve(id)?.0, encoding)?;
+        if let InventoryView::Materialized(parent) = &view.view {
+            snapshot
+                .inherited_access
+                .clone_from(&parent.inherited_access);
+        }
+        if let Some(scope) = self.exchange_access_scope(view.id()?)?
+            && !snapshot.inherited_access.contains(&scope)
+        {
+            snapshot.inherited_access.push(scope);
+        }
+        Ok(snapshot)
+    }
+
+    pub(super) fn require_snapshot_exchange_access(
+        &self,
+        snapshot: &Snapshot,
+        id: Id,
+        access: Id,
+    ) -> Result<()> {
+        if let Some(manifest) = &snapshot.manifest {
+            self.require_exchange_access(manifest.id()?, id, access)?;
+        }
+        for &scope in &snapshot.inherited_access {
+            self.require_exchange_access(scope, id, access)?;
+        }
+        Ok(())
     }
 
     fn load_snapshot_packet(
@@ -906,6 +945,7 @@ impl Archive {
             tree.get(m.inventory, &access.to_string())? == Some(access),
             "missing access descriptor"
         );
+        self.require_exchange_access(m.id()?, id, access)?;
         self.check_access(access, |policy| crate::profile::allows(policy, purpose))?;
         Ok((bytes, access))
     }

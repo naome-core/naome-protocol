@@ -431,21 +431,40 @@ fn pending_imports_share_bytes_and_respect_intervening_admission_and_withdrawal(
         assert_eq!(status.supplied, Some(status.examined));
     }
 
-    let mut conflicted = Archive::memory()?;
-    let head = heads[0];
-    let initial = source.export_exchange_page(head, None, limit)?;
-    conflicted.import_pinned_exchange_page(head, &initial)?;
-    conflicted.blob(bytes, Id::blob(READ_ONLY))?;
-    let checkpoint = conflicted.exchange_import_status(head)?;
-    assert!(
-        conflicted
-            .import_pinned_exchange_page(head, &final_pages[0])
-            .is_err()
-    );
-    assert_eq!(conflicted.exchange_import_status(head)?, checkpoint);
-    assert!(conflicted.head(head).is_err());
-    for &other in payloads.keys().filter(|&&id| id != payload) {
-        assert!(conflicted.raw(other)?.is_none());
+    for verified in [true, false] {
+        let mut conflicted = Archive::memory()?;
+        let head = heads[0];
+        let export = |after| {
+            if verified {
+                source.export_exchange_page(head, after, limit)
+            } else {
+                source.export_legacy_exchange_page(head, after, limit)
+            }
+        };
+        let import = |archive: &mut Archive, page: &_| {
+            if verified {
+                archive.import_pinned_exchange_page(head, page)
+            } else {
+                archive.import_legacy_exchange_page(head, page)
+            }
+        };
+        let initial = export(None)?;
+        let pending = import(&mut conflicted, &initial)?;
+        conflicted.blob(bytes, Id::blob(READ_ONLY))?;
+        let last = export(pending.continuation)?;
+        assert!(import(&mut conflicted, &last)?.complete);
+        assert!(import(&mut conflicted, &initial)?.complete);
+        let status = &conflicted.exchange_import_status(head)?[0];
+        assert_eq!(status.omitted, Some(1));
+        assert_eq!(status.supplied, Some(status.examined - 1));
+        assert!(conflicted.resolve_head(head, payload, "read").is_err());
+        assert_eq!(conflicted.resolve_local(payload)?, *bytes);
+        for &other in payloads.keys().filter(|&&id| id != payload) {
+            assert_eq!(
+                conflicted.resolve_head(head, other, "read")?,
+                payloads[&other]
+            );
+        }
     }
     Ok(())
 }
@@ -574,5 +593,83 @@ fn a_read_handle_keeps_resolving_payloads_across_the_extent_upgrade() -> Result<
     assert_eq!(reader.resolve_local(blocked)?, large);
     receiver.withdraw(tiny)?;
     assert!(reader.resolve_head(head, tiny, "read").is_err());
+    Ok(())
+}
+
+#[test]
+fn omitted_blobs_cannot_inherit_a_conflicting_local_acl() -> Result<()> {
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::Archive,
+        wire::Id,
+    };
+    let source = Archive::memory()?;
+    let bytes = b"read-only from the publisher, public only in the local archive";
+    let payload = source.blob(bytes, Id::blob(READ_ONLY))?;
+    let historical = source.snapshot("publisher historical snapshot", Default::default())?;
+    let historical_id = source.deposit_manifest(&historical)?;
+    let cut = source.snapshot("publisher", [historical_id].into())?;
+    let head = cut.id()?;
+    source.withdraw(payload)?;
+
+    let mut receiver = Archive::memory()?;
+    assert_eq!(receiver.blob(bytes, Id::blob(PUBLIC))?, payload);
+    let local = receiver.snapshot("local", Default::default())?;
+    let page = source.export_exchange_page(head, None, 64)?;
+    assert!(receiver.import_pinned_exchange_page(head, &page)?.complete);
+    let scoped = receiver.head(head)?;
+    assert!(receiver.resolve_head(head, payload, "train").is_err());
+    assert!(receiver.resolve(&scoped, payload, "train").is_err());
+    assert!(receiver.readable(&scoped, payload).is_err());
+    let linked = receiver.linked_snapshot(
+        &scoped,
+        historical_id,
+        crate::store::ManifestEncoding::Canonical,
+    )?;
+    assert!(receiver.resolve(&linked, payload, "train").is_err());
+    assert_eq!(receiver.resolve(&local, payload, "train")?, bytes);
+    Ok(())
+}
+
+#[test]
+fn conflicting_packet_does_not_advance_either_exchange_mode() -> Result<()> {
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::Archive,
+        wire::Id,
+    };
+    let source = Archive::memory()?;
+    let bytes = b"access conflict before the first page";
+    let key = source.blob(bytes, Id::blob(READ_ONLY))?;
+    let cut = source.snapshot("source", Default::default())?;
+    let head = cut.id()?;
+    for verified in [true, false] {
+        let mut receiver = Archive::memory()?;
+        receiver.blob(bytes, Id::blob(PUBLIC))?;
+        let export = |source: &Archive| {
+            if verified {
+                source.export_exchange_page(head, None, 64)
+            } else {
+                source.export_legacy_exchange_page(head, None, 64)
+            }
+        };
+        let import = |receiver: &mut Archive, page: &_| {
+            if verified {
+                receiver.import_pinned_exchange_page(head, page)
+            } else {
+                receiver.import_legacy_exchange_page(head, page)
+            }
+        };
+        let page = export(&source)?;
+        assert!(import(&mut receiver, &page).is_err());
+        assert!(receiver.exchange_import_status(head)?.is_empty());
+        assert!(receiver.head(head).is_err());
+    }
+    source.withdraw(key)?;
+    let mut receiver = Archive::memory()?;
+    receiver.blob(bytes, Id::blob(PUBLIC))?;
+    let page = source.export_exchange_page(head, None, 64)?;
+    assert!(receiver.import_pinned_exchange_page(head, &page)?.complete);
+    assert!(receiver.resolve_head(head, key, "read").is_err());
     Ok(())
 }

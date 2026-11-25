@@ -59,7 +59,7 @@ pub struct ExchangeImportStatus {
     /// The last acknowledged inventory member, retained after completion.
     pub cursor: Option<Id>,
     pub examined: u64,
-    /// Distinct packets supplied through this checkpoint. Completion freezes the count.
+    /// Distinct packets retained at this checkpoint. Completion freezes the admitted count.
     pub supplied: Option<u64>,
     /// Examined members with no packet supplied at this checkpoint, when recorded.
     pub omitted: Option<u64>,
@@ -183,25 +183,79 @@ impl Archive {
         self.make_exchange_page(head, after, limit, false)
     }
 
+    fn imported_exchange_descriptor(&self, head: Id) -> Result<Option<Head>> {
+        if !has_table(&self.db, "archive_exchange_sessions")? {
+            return Ok(None);
+        }
+        let bytes: Option<Vec<u8>> = self
+            .db
+            .prepare_cached(
+                "SELECT descriptor FROM archive_exchange_sessions
+             WHERE head=? AND verified AND complete",
+            )?
+            .query_row([head.to_string()], |row| row.get(0))
+            .optional()?;
+        let descriptor: Option<Head> = bytes.as_deref().map(serde_json::from_slice).transpose()?;
+        if let Some(descriptor) = &descriptor {
+            ensure!(
+                !descriptor.restricted && descriptor.manifest()?.id()? == head,
+                "invalid imported custody descriptor"
+            );
+        }
+        Ok(descriptor)
+    }
+
     fn exchange_descriptor(&self, head: Id) -> Result<Head> {
         if let Some(descriptor) = self.custody_head_if_present(head)? {
             return Ok(descriptor);
         }
-        let bytes: Option<Vec<u8>> = if has_table(&self.db, "archive_exchange_sessions")? {
-            self.db
-                .query_row(
-                    "SELECT descriptor FROM archive_exchange_sessions
-                 WHERE head=? AND verified AND complete",
-                    [head.to_string()],
-                    |row| row.get(0),
-                )
-                .optional()?
-        } else {
-            None
-        };
-        Ok(serde_json::from_slice(&bytes.context(
+        self.imported_exchange_descriptor(head)?.context(
             "missing custody descriptor; use the original archive or a trusted legacy export",
-        )?)?)
+        )
+    }
+
+    pub(in crate::store) fn exchange_access_scope(&self, head: Id) -> Result<Option<Id>> {
+        let scoped = (has_table(&self.db, "archive_exchange_sessions")?
+            && self.db.prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM archive_exchange_sessions WHERE head=? AND verified AND complete)",
+            )?.query_row([head.to_string()], |row| row.get::<_, bool>(0))?)
+            || (has_table(&self.db, "archive_member_access")?
+                && self.db.prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM archive_member_access WHERE head=?)",
+                )?.query_row([head.to_string()], |row| row.get::<_, bool>(0))?);
+        Ok(scoped.then_some(head))
+    }
+
+    // Search an authenticated custody path even if the particular member was omitted.
+    // The receiver's global object catalog cannot substitute for that proof.
+    pub(in crate::store) fn require_exchange_access(
+        &self,
+        head: Id,
+        member: Id,
+        access: Id,
+    ) -> Result<()> {
+        if let Some(descriptor) = self.imported_exchange_descriptor(head)? {
+            let mut tree = Tree::new(&self.db);
+            verify_access(&descriptor, member, access, |id| tree.read(id))
+                .context("unavailable authenticated exchange access")?;
+        } else if has_table(&self.db, "archive_member_access")? {
+            let agreed: Option<String> = self
+                .db
+                .prepare_cached(
+                    "SELECT access FROM archive_member_access WHERE head=? AND member=?",
+                )?
+                .query_row(params![head.to_string(), member.to_string()], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            if let Some(agreed) = agreed {
+                ensure!(
+                    access == agreed.parse()?,
+                    "local ACL differs from scoped exchange access"
+                );
+            }
+        }
+        Ok(())
     }
 
     // The receiver already holds the inventory path for an acknowledged cursor.
@@ -365,11 +419,11 @@ impl Archive {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (cursor, seen, complete): (Option<String>, i64, bool) = tx
+        let (cursor, seen, complete, prior_supplied): (Option<String>, i64, bool, Option<i64>) = tx
             .query_row(
-                "SELECT cursor,seen,complete FROM archive_exchange_sessions WHERE head=? AND verified=?",
+                "SELECT cursor,seen,complete,supplied FROM archive_exchange_sessions WHERE head=? AND verified=?",
                 params![key, verified],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?
             .unwrap_or_default();
@@ -427,6 +481,18 @@ impl Archive {
                 })?;
             }
             let record = p.decode(&mut bytes)?;
+            if conflicts_with_local_access(&tx, p.id, p.access)? {
+                // A range acknowledged earlier can be redelivered after local admission
+                // made its payload incompatible. Preserve the acknowledgement and omission.
+                ensure!(
+                    duplicate,
+                    "conflicting access for immutable object {}",
+                    p.id
+                );
+                witnesses.link(p.id, &bytes)?;
+                previous = Some(p.id);
+                continue;
+            }
             if complete {
                 insert(&tx, p.id, &bytes, p.access)?;
             } else {
@@ -483,7 +549,7 @@ impl Archive {
                 )?;
             }
             if finished {
-                publish_packets(&tx, &key, verified)?;
+                supplied -= publish_packets(&tx, &key, verified)?;
                 let snapshot = StoredHeader::Current(page.manifest.clone()).into_snapshot();
                 save_imported_head(&tx, head, &snapshot)?;
             }
@@ -491,7 +557,7 @@ impl Archive {
                 "INSERT INTO archive_exchange_sessions(head,verified,cursor,seen,complete,descriptor,supplied)
                  VALUES(?,?,?,?,?,?,?) ON CONFLICT(head,verified) DO UPDATE SET
                      cursor=excluded.cursor,seen=excluded.seen,complete=excluded.complete,
-                     supplied=archive_exchange_sessions.supplied+excluded.supplied",
+                     supplied=excluded.supplied",
                 params![
                     key,
                     verified,
@@ -499,7 +565,8 @@ impl Archive {
                     i64::try_from(total)?,
                     finished,
                     descriptor.map(serde_json::to_vec).transpose()?,
-                    supplied,
+                    if cursor.is_none() && seen == 0 { Some(supplied) }
+                    else { prior_supplied.map(|n| n + supplied) },
                 ],
             )?;
         }
@@ -525,11 +592,9 @@ pub(super) fn verify_access(
 }
 
 fn has_table(db: &Connection, table: &str) -> Result<bool> {
-    Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?)",
-        [table],
-        |row| row.get(0),
-    )?)
+    Ok(db
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?)")?
+        .query_row([table], |row| row.get(0))?)
 }
 
 fn has_supplied_column(db: &Connection) -> Result<bool> {
@@ -573,18 +638,30 @@ fn stage_packet(
     Ok(added)
 }
 
-fn publish_packets(db: &Connection, head: &str, verified: bool) -> Result<()> {
-    let conflict: Option<String> = db
-        .query_row(
-            "SELECT p.id FROM archive_exchange_staged p JOIN objects o ON o.id=p.id
-             WHERE p.head=? AND p.verified=? AND o.access<>p.access LIMIT 1",
-            params![head, verified],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(id) = conflict {
-        anyhow::bail!("conflicting access for immutable object {id}");
+fn conflicts_with_local_access(db: &Connection, id: Id, access: Id) -> Result<bool> {
+    Ok(db
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM objects WHERE id=? AND access<>?)")?
+        .query_row([id.to_string(), access.to_string()], |row| row.get(0))?)
+}
+
+fn publish_packets(db: &Connection, head: &str, verified: bool) -> Result<i64> {
+    if !verified {
+        // Legacy senders are trusted for their packet ACL. Preserve the agreed ACL for
+        // a conflicting member even though the receiver cannot admit its payload.
+        db.execute(
+            "INSERT OR IGNORE INTO archive_member_access(head,member,access)
+             SELECT p.head,p.id,p.access FROM archive_exchange_staged p JOIN objects o ON o.id=p.id
+             WHERE p.head=? AND NOT p.verified AND o.access<>p.access",
+            [head],
+        )?;
     }
+    // A local admission between pages owns its immutable ACL. Keep the remote member
+    // in the pinned inventory, but treat the conflicting payload as omitted.
+    let conflicts = db.execute(
+        "DELETE FROM archive_exchange_staged AS p WHERE p.head=? AND p.verified=?
+         AND EXISTS(SELECT 1 FROM objects o WHERE o.id=p.id AND o.access<>p.access)",
+        params![head, verified],
+    )?;
     // The content is already in its final storage. Catalog membership controls visibility.
     db.execute(
         "INSERT OR IGNORE INTO objects(id,data,access)
@@ -595,5 +672,5 @@ fn publish_packets(db: &Connection, head: &str, verified: bool) -> Result<()> {
         "DELETE FROM archive_exchange_staged WHERE head=? AND verified=?",
         params![head, verified],
     )?;
-    Ok(())
+    Ok(i64::try_from(conflicts)?)
 }

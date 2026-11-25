@@ -35,6 +35,9 @@ pub struct ReplayArguments {
     /// Restrict replay to this snapshot. By default, read the receipt directly from the archive.
     #[arg(long)]
     pub(super) head: Option<Id>,
+    /// Verify a separately supplied native format mapping from the selected snapshot. Repeat for multiple mappings.
+    #[arg(long, requires = "head")]
+    pub(super) mapping: Vec<Id>,
     /// Print the replay report and exit unsuccessfully if the receipt differs.
     #[arg(long)]
     pub(super) require_match: bool,
@@ -48,6 +51,9 @@ pub struct ReassessArguments {
     /// Add an argument to the saved query. Repeat for additional arguments.
     #[arg(long)]
     pub(super) argument: Vec<Id>,
+    /// Add a native format mapping from the selected snapshot. Repeat for multiple mappings.
+    #[arg(long)]
+    pub(super) mapping: Vec<Id>,
     /// Override the saved query time for freshness checks.
     #[arg(long)]
     pub(super) at: Option<u64>,

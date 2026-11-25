@@ -262,15 +262,25 @@ impl Archive {
         ensure!(s.objects.contains(&id), "outside snapshot");
         let (b, acl) = self.raw(id)?.context("unavailable")?;
         ensure!(s.objects.contains(&acl), "missing access descriptor");
+        self.require_snapshot_exchange_access(s, id, acl)?;
         self.check_access(acl, allows)?;
         Ok((b, acl))
     }
     /// Check presence and read permission without materializing the payload.
     pub(crate) fn readable(&self, s: &Snapshot, id: Id) -> Result<()> {
-        self.readable_with(id, |key| Ok(s.objects.contains(&key)))
+        self.readable_with(
+            id,
+            |key| Ok(s.objects.contains(&key)),
+            |acl| self.require_snapshot_exchange_access(s, id, acl),
+        )
     }
 
-    fn readable_with(&self, id: Id, mut contains: impl FnMut(Id) -> Result<bool>) -> Result<()> {
+    fn readable_with(
+        &self,
+        id: Id,
+        mut contains: impl FnMut(Id) -> Result<bool>,
+        require_access: impl FnOnce(Id) -> Result<()>,
+    ) -> Result<()> {
         ensure!(contains(id)?, "outside snapshot");
         let acl: String = self.db.query_row(
             "SELECT access FROM objects WHERE id = ?1 AND data IS NOT NULL",
@@ -279,6 +289,7 @@ impl Archive {
         )?;
         let acl = acl.parse()?;
         ensure!(contains(acl)?, "missing access descriptor");
+        require_access(acl)?;
         self.check_access(acl, |policy| crate::profile::allows(policy, "read"))
     }
     pub(crate) fn check_access(&self, acl: Id, allows: impl FnOnce(&[u8]) -> bool) -> Result<()> {

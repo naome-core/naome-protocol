@@ -38,7 +38,7 @@ fn anchors(document: &Document, role: &str) -> bool {
         Kind::Occurrence | Kind::Derivation => {
             matches!(role, "question" | "plan" | "context" | "occurrence")
         }
-        Kind::Argument => role == "claim",
+        Kind::Argument => matches!(role, "claim" | "plan"),
         Kind::Assessment => matches!(role, "claim" | "argument"),
         Kind::Notice => matches!(role, "target" | "calibration" | "source-version"),
         Kind::Decision => matches!(role, "question" | "plan" | "claim" | "assessment"),
@@ -216,6 +216,10 @@ impl QuestionWalk<'_> {
         );
         while let Some(id) = queue.pop_front() {
             if self.load(id)? == RecordState::Readable && related.insert(id) {
+                let document = &self.documents[&id];
+                if document.kind == Kind::Argument {
+                    queue.extend(document.roles("claim").filter(|id| id.format().is_some()));
+                }
                 queue.extend(self.inbound(id, |_| true)?);
             }
         }

@@ -646,11 +646,12 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         ArchiveCommand::Replay(DeferredArgs(research::ReplayArguments {
             receipt,
             head,
+            mapping,
             require_match,
         })) => {
             let db = reader()?;
             let report = match head {
-                Some(head) => db.replay_assessment_at(head, receipt)?,
+                Some(head) => db.replay_assessment_at(head, receipt, &mapping)?,
                 None => db.replay_local_assessment(receipt)?,
             };
             let matches = report.matches;
@@ -665,8 +666,9 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             receipt,
             head,
             argument,
+            mapping,
             at,
-        })) => print(open()?.reassess(head, receipt, &argument, at, f)?),
+        })) => print(open()?.reassess_with_mappings(head, receipt, &argument, &mapping, at, f)?),
         ArchiveCommand::Export {
             head,
             member,

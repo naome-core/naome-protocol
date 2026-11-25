@@ -108,30 +108,50 @@ fn assessment_document(document: Document) -> Result<Document> {
 impl Archive {
     /// Re-run the recorded evaluator on the original evidence horizon without storing anything.
     pub fn replay_assessment(&self, view: &Snapshot, id: Id) -> Result<ReceiptReplay> {
-        self.replay_receipt(Some(InventoryReader::materialized(self, view)), id)
+        self.replay_assessment_with_mappings(view, id, &[])
+    }
+
+    /// Replay a receipt using additional checked format mappings from the selected view.
+    pub fn replay_assessment_with_mappings(
+        &self,
+        view: &Snapshot,
+        id: Id,
+        mappings: &[Id],
+    ) -> Result<ReceiptReplay> {
+        self.replay_receipt(
+            Some(InventoryReader::materialized(self, view)),
+            id,
+            mappings,
+        )
     }
 
     #[cfg(feature = "cli")]
-    pub(crate) fn replay_assessment_at(&self, head: Id, id: Id) -> Result<ReceiptReplay> {
+    pub(crate) fn replay_assessment_at(
+        &self,
+        head: Id,
+        id: Id,
+        mappings: &[Id],
+    ) -> Result<ReceiptReplay> {
         self.with_read_view(|| {
             let header = self.snapshot_header(self.selected_search_id(Some(head))?)?;
             let view = match &header.manifest {
                 Some(manifest) => InventoryReader::paged(self, manifest.clone()),
                 None => InventoryReader::materialized(self, &header),
             };
-            self.replay_receipt(Some(view), id)
+            self.replay_receipt(Some(view), id, mappings)
         })
     }
 
     /// Replay an authorized local receipt directly, including before the next snapshot.
     pub fn replay_local_assessment(&self, id: Id) -> Result<ReceiptReplay> {
-        self.replay_receipt(None, id)
+        self.replay_receipt(None, id, &[])
     }
 
     fn replay_receipt(
         &self,
         mut view: Option<InventoryReader<'_>>,
         id: Id,
+        mappings: &[Id],
     ) -> Result<ReceiptReplay> {
         self.with_read_view(|| {
             let recorded = match view.as_mut() {
@@ -148,7 +168,11 @@ impl Archive {
             };
             let mut aliases = Equivalence::default();
             let mut local = InventoryReader::materialized(self, &historical);
-            for mapping in recorded.roles("mapping") {
+            let verification_mappings: BTreeSet<_> = recorded
+                .roles("mapping")
+                .chain(mappings.iter().copied())
+                .collect();
+            for mapping in verification_mappings {
                 let encoding = manifest_encoding(&evaluator)?;
                 aliases.add(match view.as_mut() {
                     Some(view) => self.verify_mapping_in(view, mapping, encoding)?,
@@ -184,6 +208,19 @@ impl Archive {
         current_at: Option<u64>,
         format: Format,
     ) -> Result<Reassessment> {
+        self.reassess_with_mappings(head, previous, arguments, &[], current_at, format)
+    }
+
+    /// Reassess with additional native format mappings in the selected inventory.
+    pub fn reassess_with_mappings(
+        &self,
+        head: Id,
+        previous: Id,
+        arguments: &[Id],
+        mappings: &[Id],
+        current_at: Option<u64>,
+        format: Format,
+    ) -> Result<Reassessment> {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let view = self.active_head(head)?;
         let recorded = saved_assessment(self, &view, previous)?;
@@ -193,6 +230,11 @@ impl Archive {
         for &argument in arguments {
             if !query.arguments.contains(&argument) {
                 query.arguments.push(argument);
+            }
+        }
+        for &mapping in mappings {
+            if !query.mappings.contains(&mapping) {
+                query.mappings.push(mapping);
             }
         }
         query.current_at = current_at.or(query.current_at);

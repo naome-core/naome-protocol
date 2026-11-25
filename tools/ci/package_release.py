@@ -50,9 +50,9 @@ def verify_research_handoff(run):
     initial = fixture["published"]
     transfer_paged(run, initial, "initial-research", receiver, sender=origin)
     receipt = fixture["receipts"][2]
-    replay = ["--db", receiver, "replay", receipt]
+    replay = ["--db", receiver, "replay", receipt, "--require-match"]
     label = ["--db", receiver, "label", initial, receipt, "synthetic"]
-    historical = run(*replay)
+    historical = run(*replay, "--head", initial)
     if not historical["matches"] or historical["head"] != fixture["s0"]:
         raise ValueError("received archive did not replay the historical receipt")
     if run(*label) != fixture["labels"][2]:
@@ -64,7 +64,7 @@ def verify_research_handoff(run):
     affected = {item for ids in impact["by_kind"].values() for item in ids}
     if not set(fixture["labels"]) <= affected:
         raise ValueError("received correction did not route original labels")
-    if run(*replay) != historical or run(*label) != fixture["labels"][2]:
+    if run(*replay, "--head", current) != historical or run(*label) != fixture["labels"][2]:
         raise ValueError("received correction changed historical replay or label derivation")
 
 
