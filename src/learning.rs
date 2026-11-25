@@ -4,11 +4,13 @@ pub use crate::evaluation::Impact;
 use crate::{
     evaluation::{
         Assessment, EVALUATOR_ID, EvidenceView, ReadInventory, assess_with_inventory,
+        check_receipt_budget,
         correction::Notice,
         dependency_correction::{
             CorrectionImpact, CorrectionKeys, DependencyCorrection, admitted_corrections,
             correction_keys,
         },
+        rebuild_receipt,
     },
     migration::Equivalence,
     profile::{Document, Kind, PUBLIC, link, verify_attestation},
@@ -305,11 +307,7 @@ impl TrainingReview<'_> {
             "receipt policy differs from admitted training policy"
         );
         let receipt_head = receipt.one("snapshot")?;
-        ensure!(
-            original.budget <= 100_000
-                && original.byte_limit <= crate::evaluation::default_byte_limit(),
-            "label replay exceeds local extraction budget"
-        );
+        check_receipt_budget(&original)?;
         let evaluator: String = receipt.field("evaluator")?;
         if self.requires_legacy_mapping {
             ensure!(
@@ -342,23 +340,20 @@ impl TrainingReview<'_> {
             .historical
             .as_mut()
             .context("missing receipt inventory")?;
-        let replay =
-            assess_with_inventory(store, historical, &original, &evaluator, inventory)?.receipt;
-        let expected = crate::evaluation::receipt_document(
+        let rebuilt = rebuild_receipt(
             store,
             historical,
             *historical_head,
             &original,
-            &replay,
             &evaluator,
-        )?
-        .encode(Id::blob(PUBLIC))?;
+            &receipt,
+            inventory,
+        )?;
         ensure!(
-            [Format::A, Format::B]
-                .iter()
-                .any(|f| aliases.equivalent(receipt_id, Id::record(*f, &expected.encode(*f)))),
+            rebuilt.matches(receipt_id, aliases),
             "receipt fields or dependencies do not replay"
         );
+        let replay = rebuilt.receipt;
         ensure!(
             &label_value(&replay, check, condition)? == value,
             "label disagrees with the assessed predicate"

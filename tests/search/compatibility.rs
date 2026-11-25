@@ -8,6 +8,81 @@ const MIGRATED_V012_HEAD: &str =
     "1:1:39c8c44763994015d4e11e591b2d2ca612eadea8d75edfc71a5669e99280ed82";
 
 #[test]
+fn prepared_text_search_and_session_can_read_during_a_reserved_write() -> Result<()> {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("archive.sqlite");
+    let archive = Archive::open(&database)?;
+    let id = claim(
+        &archive,
+        "Readings",
+        "instrument calibration",
+        Id::blob(PUBLIC),
+        Format::A,
+    )?;
+    let snapshot = archive.snapshot("readings", BTreeSet::new())?;
+    assert!(archive.prepare_search(&snapshot, 100, None)?.index_complete);
+    let mut writer = rusqlite::Connection::open(&database)?;
+    let lock = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    for (args, request) in [
+        (&["find", "calibration"][..], None),
+        (
+            &["search-session"][..],
+            Some(b"{\"op\":\"find\",\"query\":\"calibration\"}\n".as_slice()),
+        ),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nao"))
+            .current_dir(directory.path())
+            .arg("--db")
+            .arg(&database)
+            .env_remove("NAOME_SEARCH_MODEL")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Some(request) = request {
+            child
+                .stdin
+                .take()
+                .expect("piped input")
+                .write_all(request)?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait()?.is_none() {
+            if Instant::now() >= deadline {
+                child.kill()?;
+                child.wait()?;
+                anyhow::bail!("{args:?} did not finish while the archive had a reserved writer");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let report = if request.is_some() {
+            &report["ok"]
+        } else {
+            &report
+        };
+        assert_eq!(report["index_complete"], true);
+        assert_eq!(report["hits"][0]["id"], json!(id));
+    }
+    lock.rollback()?;
+    Ok(())
+}
+
+#[test]
 fn invalid_cli_search_preserves_the_index_and_session_validation() -> Result<()> {
     use std::{
         io::Write,
@@ -124,13 +199,16 @@ fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
         &db,
         include_bytes!("../fixtures/search-upgrade-v0.1.2.sqlite"),
     )?;
-    let run = |args: &[&str]| -> Result<serde_json::Value> {
-        let output = Command::new(env!("CARGO_BIN_EXE_nao"))
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_nao"))
             .arg("--db")
             .arg(&db)
             .args(args)
             .env_remove("NAOME_SEARCH_MODEL")
-            .output()?;
+            .output()
+    };
+    let run = |args: &[&str]| -> Result<serde_json::Value> {
+        let output = invoke(args)?;
         anyhow::ensure!(
             output.status.success(),
             "{}",
@@ -138,13 +216,14 @@ fn released_v012_archive_upgrades_in_place_through_the_cli() -> Result<()> {
         );
         Ok(serde_json::from_slice(&output.stdout)?)
     };
+    let original = fs::read(&db)?;
+    let read = invoke(&["heads"])?;
+    assert!(!read.status.success());
+    assert!(String::from_utf8(read.stderr)?.contains("nao migrate-archive"));
+    assert_eq!(fs::read(&db)?, original);
+    run(&["init"])?;
     assert_eq!(run(&["heads"])?, json!([MIGRATED_V012_HEAD]));
-    let unsupported = Command::new(env!("CARGO_BIN_EXE_nao"))
-        .arg("--db")
-        .arg(&db)
-        .args(["find", "anything", "--mode", "hybrid"])
-        .env_remove("NAOME_SEARCH_MODEL")
-        .output()?;
+    let unsupported = invoke(&["find", "anything", "--mode", "hybrid"])?;
     assert!(!unsupported.status.success());
     let report = run(&["find", "interferometer drift"])?;
     assert_eq!(report["head"], MIGRATED_V012_HEAD);

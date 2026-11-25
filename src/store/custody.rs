@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tree::Tree;
 
 pub const BLOCK: usize = 256 * 1024;
+pub(super) const MAX_INDEXED_EDGES: usize = 4096;
 pub const MEMBERS: usize = 64;
 pub const BATCH_BYTES: usize = 4 * 1024 * 1024;
 const SCHEMA: &str = include_str!("custody/schema.sql");
@@ -85,6 +86,7 @@ impl Head {
         })
     }
 }
+
 #[derive(Serialize)]
 pub struct Admission {
     pub head: Id,
@@ -118,16 +120,28 @@ impl Archive {
     }
 
     pub fn custody_head(&self, id: Id) -> Result<Head> {
-        let data = self.custody_head_bytes(id)?;
-        let h: Head = serde_json::from_slice(&data)?;
-        h.manifest()?.verify(id)?;
-        Ok(h)
+        self.custody_head_if_present(id)?
+            .context("unadmitted paged head")
     }
-    fn custody_head_bytes(&self, id: Id) -> Result<Vec<u8>> {
+
+    pub(super) fn custody_head_if_present(&self, id: Id) -> Result<Option<Head>> {
+        self.custody_head_data(id)?
+            .map(|data| {
+                let h: Head = serde_json::from_slice(&data)?;
+                h.manifest()?.verify(id)?;
+                Ok(h)
+            })
+            .transpose()
+    }
+    fn custody_head_data(&self, id: Id) -> Result<Option<Vec<u8>>> {
         self.db
             .prepare_cached("SELECT data FROM custody_heads WHERE id=?")?
             .query_row([id.to_string()], |r| r.get(0))
-            .context("unadmitted paged head")
+            .optional()
+            .map_err(Into::into)
+    }
+    fn custody_head_bytes(&self, id: Id) -> Result<Vec<u8>> {
+        self.custody_head_data(id)?.context("unadmitted paged head")
     }
 
     /// Independently authored children of the same parent each retain an addressable head.
@@ -243,7 +257,13 @@ impl Archive {
                     "absent member carries data"
                 );
                 let key = object(id);
-                if changes.insert(key.clone(), access).is_none() && !known.contains_key(&key) {
+                if let Some(&old) = known.get(&key) {
+                    ensure!(old == access, "conflicting access");
+                    continue;
+                }
+                if let Some(old) = changes.insert(key, access) {
+                    ensure!(old == access, "conflicting access");
+                } else {
                     added.insert(id);
                     opaque += 1;
                     restricted = true;
@@ -281,7 +301,7 @@ impl Archive {
             }
             if let Some(record) = record {
                 // Large historical records remain readable. An unindexed edge leaves coverage open.
-                let index_edges = edges.saturating_add(record.edges.len()) <= 4096;
+                let index_edges = edges.saturating_add(record.edges.len()) <= MAX_INDEXED_EDGES;
                 if index_edges {
                     edges += record.edges.len();
                     match Document::decode(&record) {
@@ -323,6 +343,8 @@ impl Archive {
                 if !exists {
                     slots.push((id, access, pack.len(), item.bytes.len()));
                     pack.extend_from_slice(&item.bytes);
+                } else {
+                    super::point::promote(&self.db, &id.to_string())?;
                 }
             } else {
                 ensure!(
@@ -359,19 +381,22 @@ impl Archive {
                 .execute("INSERT INTO custody_packs(data) VALUES(?)", [pack])?;
             let segment = self.db.last_insert_rowid();
             for (id, access, start, len) in slots {
-                let catalog=self.db.prepare_cached("INSERT INTO objects(id,data,access) VALUES(?,x'',?) ON CONFLICT(id) DO UPDATE SET data=x''
+                let key = id.to_string();
+                let catalog = self.db.prepare_cached("INSERT INTO objects(id,data,access) VALUES(?,x'',?) ON CONFLICT(id) DO UPDATE SET data=x''
                  WHERE objects.data IS NOT NULL AND objects.access=excluded.access")?
-                    .execute(params![id.to_string(),access.to_string()])?;
+                    .execute(params![key, access.to_string()])?;
                 ensure!(catalog == 1, "conflicting custody for packed record");
+                super::point::promote(&self.db, &key)?;
                 self.db
                     .prepare_cached("INSERT INTO custody_records VALUES(?,?,?,?,?)")?
                     .execute(params![
-                        id.to_string(),
+                        key,
                         segment,
                         start as i64,
                         len as i64,
                         access.to_string()
                     ])?;
+                super::extents::remove(&self.db, &key)?;
             }
         }
         let members = added.iter().map(|id| (id.to_string(), *id)).collect();

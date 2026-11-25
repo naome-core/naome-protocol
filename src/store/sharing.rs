@@ -5,18 +5,26 @@ use super::{
     snapshot::save_imported_head,
 };
 use crate::{
-    profile::{Document, Kind, PROFILE, verify_attestation},
+    profile::{Document, Kind, PROFILE, allows, verify_attestation},
     wire::{Id, Record},
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 pub use super::inventory::MAX_MANIFEST_PARENTS;
 pub const CATALOG_PAGE_SIZE: usize = 32;
 pub const MAX_MEMBERS: usize = 512;
 pub const MAX_MEMBER_BYTES: usize = 1024 * 1024;
 pub const MAX_RELEASE_BYTES: usize = 16 * 1024 * 1024;
+
+pub(super) fn review_withheld_access() -> Id {
+    // The reserved ID does not identify a readable access policy.
+    Id::blob(b"naome-review-withheld")
+}
 
 #[derive(Debug)]
 struct ReleaseUnavailable(&'static str);
@@ -48,13 +56,22 @@ fn charge_member(total: usize, size: usize) -> Result<usize> {
     Ok(total)
 }
 
-fn check_manifest(head: Id, snapshot: &Snapshot) -> Result<()> {
+fn check_manifest_bounds(snapshot: &Snapshot) -> Result<()> {
+    let count = snapshot
+        .manifest
+        .as_ref()
+        .map_or(snapshot.objects.len() as u64, |manifest| manifest.count);
     ensure!(
         snapshot.source.len() <= 256
             && snapshot.parents.len() <= MAX_MANIFEST_PARENTS
-            && (1..=MAX_MEMBERS).contains(&snapshot.objects.len()),
+            && (1..=MAX_MEMBERS as u64).contains(&count),
         "invalid or oversized release manifest"
     );
+    Ok(())
+}
+
+fn check_manifest(head: Id, snapshot: &Snapshot) -> Result<()> {
+    check_manifest_bounds(snapshot)?;
     snapshot
         .verify_head(head)
         .context("invalid or oversized release manifest")
@@ -153,17 +170,83 @@ impl Replica {
 }
 
 impl Archive {
+    pub(super) fn upgrade_release_access(&self) -> Result<()> {
+        if self.db.execute(
+            "INSERT OR IGNORE INTO archive_release_access_state VALUES(1)",
+            [],
+        )? != 0
+        {
+            self.db.execute(
+                "INSERT OR IGNORE INTO suspended_releases
+                 SELECT r.head FROM archive_point_only p
+                 CROSS JOIN archive_release_members r ON r.member=p.id",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn suspend_release_on_exchange_access(&self, head: Id) -> Result<()> {
+        let key = head.to_string();
+        let available: bool = self
+            .db
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM releases r WHERE r.head=?1 AND NOT EXISTS
+                 (SELECT 1 FROM suspended_releases WHERE head=?1))",
+            )?
+            .query_row([&key], |row| row.get(0))?;
+        if available {
+            let mut acl = self
+                .db
+                .prepare_cached("SELECT access FROM objects WHERE id=?")?;
+            for &id in &self.head(head)?.objects {
+                let access: String = acl.query_row([id.to_string()], |row| row.get(0))?;
+                if self
+                    .require_exchange_access(head, id, access.parse()?, false)
+                    .is_err()
+                {
+                    self.db
+                        .execute("INSERT OR IGNORE INTO suspended_releases VALUES(?)", [&key])?;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An older archive can be opened for inspection without applying the migration.
+    fn catalog_suspensions(&self) -> Result<Cow<'static, str>> {
+        const SUSPENDED: &str = "SELECT head FROM suspended_releases";
+        let (current, indexed): (bool, bool) = self.db.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='archive_release_access_state'),
+                    EXISTS(SELECT 1 FROM sqlite_schema WHERE name='archive_release_members')",
+        )?.query_row([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        if current || !indexed {
+            return Ok(Cow::Borrowed(SUSPENDED));
+        }
+        let points = super::point::catalog(&self.db)?;
+        Ok(Cow::Owned(format!(
+            "{SUSPENDED} UNION SELECT r.head FROM ({points}) p
+             CROSS JOIN archive_release_members r ON r.member=p.id"
+        )))
+    }
+
     pub fn releases(&self) -> Result<BTreeSet<Id>> {
-        self.id_set("SELECT head FROM available_releases")
+        let suspended = self.catalog_suspensions()?;
+        self.id_set(&format!(
+            "SELECT head FROM releases EXCEPT SELECT head FROM ({suspended})"
+        ))
     }
 
     pub fn catalog_state(&self) -> Result<CatalogState> {
         // Both tables are append-only. Each admission or first suspension changes the revision.
-        let (observed, suspended): (i64, i64) = self.db.query_row(
-            "SELECT (SELECT count(*) FROM releases), (SELECT count(*) FROM suspended_releases)",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+        let access = self.catalog_suspensions()?;
+        let (observed, suspended): (i64, i64) = self
+            .db
+            .prepare_cached(&format!(
+                "SELECT (SELECT count(*) FROM releases), (SELECT count(*) FROM ({access}))",
+            ))?
+            .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(CatalogState {
             revision: observed as u64 + suspended as u64,
             available: usize::try_from(observed - suspended)?,
@@ -173,12 +256,13 @@ impl Archive {
     pub fn release_page(&self, after: Option<Id>) -> Result<ReleasePage> {
         let tx = self.db.unchecked_transaction()?;
         let state = self.catalog_state()?;
+        let suspended = self.catalog_suspensions()?;
         let mut heads = tx
-            .prepare(
+            .prepare_cached(&format!(
                 "SELECT head FROM releases r WHERE head > ? AND NOT EXISTS
-             (SELECT 1 FROM suspended_releases s WHERE s.head=r.head)
-             ORDER BY head LIMIT ?",
-            )?
+                 (SELECT 1 FROM ({suspended}) s WHERE s.head=r.head)
+                 ORDER BY head LIMIT ?",
+            ))?
             .query_map(
                 rusqlite::params![
                     after.map(|id| id.to_string()).unwrap_or_default(),
@@ -209,12 +293,13 @@ impl Archive {
     }
 
     pub fn announcements_after(&self, cursor: i64) -> Result<Vec<(i64, Id)>> {
+        let suspended = self.catalog_suspensions()?;
         self.db
-            .prepare(
+            .prepare_cached(&format!(
                 "SELECT rowid,head FROM releases r WHERE rowid > ? AND NOT EXISTS
-             (SELECT 1 FROM suspended_releases s WHERE s.head=r.head)
-             ORDER BY rowid LIMIT ?",
-            )?
+                 (SELECT 1 FROM ({suspended}) s WHERE s.head=r.head)
+                 ORDER BY rowid LIMIT ?",
+            ))?
             .query_map(rusqlite::params![cursor, CATALOG_PAGE_SIZE as i64], |row| {
                 Ok((row.get(0)?, row.get::<_, String>(1)?))
             })?
@@ -239,12 +324,14 @@ impl Archive {
     }
 
     fn ensure_released(&self, head: Id) -> Result<()> {
-        let released: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT head FROM releases WHERE head=?1
-                           EXCEPT SELECT head FROM suspended_releases WHERE head=?1)",
-            [head.to_string()],
-            |r| r.get(0),
-        )?;
+        let suspended = self.catalog_suspensions()?;
+        let released: bool = self
+            .db
+            .prepare_cached(&format!(
+                "SELECT EXISTS(SELECT 1 FROM releases WHERE head=?1 AND NOT EXISTS
+                           (SELECT 1 FROM ({suspended}) s WHERE s.head=?1))",
+            ))?
+            .query_row([head.to_string()], |r| r.get(0))?;
         ensure!(released, "inventory has not been released");
         Ok(())
     }
@@ -278,18 +365,18 @@ impl Archive {
         };
         include(snapshot.manifest()?, &mut total)?;
         for &id in &snapshot.objects {
+            if self.point_only(id)? {
+                return Err(ReleaseUnavailable("member requires independent admission").into());
+            }
             let size = self.size(id)?;
             total = charge_member(total, size)?;
             if id.format().is_none() && size <= 32768 {
-                let bytes = self.resolve(snapshot, id, "read")?;
+                let (bytes, _) = self.resolve_with(snapshot, id, false, |p| allows(p, "read"))?;
                 if let Some(m) = super::Manifest::from_packet(id, &bytes) {
                     include(&m, &mut total).map_err(|err| {
                         if err.is::<InvalidInventory>() {
                             err.context(ReleaseUnavailable("invalid linked inventory witness"))
-                        } else if matches!(
-                            err.downcast_ref::<rusqlite::Error>(),
-                            Some(rusqlite::Error::QueryReturnedNoRows)
-                        ) {
+                        } else if err.is::<super::custody::tree::MissingPage>() {
                             err.context(ReleaseUnavailable("missing inventory page"))
                         } else {
                             err
@@ -309,7 +396,7 @@ impl Archive {
             self.size(id)? <= MAX_MEMBER_BYTES,
             "object exceeds network limit"
         );
-        let (bytes, access) = self.resolve_member(&m, id, "read")?;
+        let (bytes, access) = self.resolve_member(&m, id, "read", false)?;
         if let Some(format) = id.format() {
             ensure!(
                 Record::decode(&bytes, format)?.access == access,
@@ -327,7 +414,9 @@ impl Archive {
     pub fn release(&self, head: Id) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let head = self.current_head_id(head)?;
-        let snapshot = self.head(head)?;
+        let mut snapshot = self.snapshot_header(head)?;
+        check_manifest_bounds(&snapshot)?;
+        snapshot.load_pages(&self.db)?;
         self.save(&snapshot)?;
         self.register_release(head, &snapshot)?;
         tx.commit()?;
@@ -349,7 +438,7 @@ impl Archive {
     fn register_release(&self, head: Id, s: &Snapshot) -> Result<()> {
         self.release_pages(head, s)?;
         for &id in &s.objects {
-            let bytes = self.resolve(s, id, "read")?;
+            let (bytes, _) = self.resolve_with(s, id, false, |p| allows(p, "read"))?;
             if let Some(format) = id.format() {
                 let record = Record::decode(&bytes, format)?;
                 if record.profile == Id::blob(PROFILE) && record.kind == Kind::Attestation as u64 {
@@ -367,6 +456,14 @@ impl Archive {
                 }
             }
         }
+        let suspended: bool = self
+            .db
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM suspended_releases WHERE head=?)")?
+            .query_row([head.to_string()], |row| row.get(0))?;
+        ensure!(
+            !suspended,
+            "release is suspended; seal a new snapshot to publish"
+        );
         self.db.execute(
             "INSERT OR IGNORE INTO releases(head) VALUES(?)",
             [head.to_string()],
@@ -419,10 +516,37 @@ pub struct ReplicaReview {
 impl Archive {
     fn seal_review_union(&self, parents: BTreeSet<Id>) -> Result<Id> {
         let mut objects = BTreeSet::new();
+        let mut withheld = BTreeSet::new();
+        let mut access = self
+            .db
+            .prepare_cached("SELECT access FROM objects WHERE id=? AND data IS NOT NULL")?;
         for &head in &parents {
-            objects.extend(&self.head(head)?.objects);
+            let snapshot = self.head(head)?;
+            for &id in &snapshot.objects {
+                if !objects.insert(id) && !withheld.contains(&id) {
+                    continue;
+                }
+                let local_acl: Option<String> = access
+                    .query_row([id.to_string()], |row| row.get(0))
+                    .optional()?;
+                let admitted = match local_acl {
+                    Some(acl) => {
+                        let acl = acl.parse()?;
+                        snapshot.objects.contains(&acl)
+                            && !self.point_only(id)?
+                            && self.require_exchange_access(head, id, acl, false).is_ok()
+                            && self.check_access(acl, |_| true).is_ok()
+                    }
+                    None => false,
+                };
+                if admitted {
+                    withheld.remove(&id);
+                } else {
+                    withheld.insert(id);
+                }
+            }
         }
-        self.seal_members("local replica review", parents, objects)?
+        self.seal_members_withheld("local replica review", parents, objects, &withheld)?
             .id()
     }
 
@@ -468,5 +592,214 @@ impl Archive {
             review_receipt,
             extraction,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::PUBLIC;
+
+    #[test]
+    fn review_preserves_the_native_grant_of_a_later_deposited_member() -> Result<()> {
+        use crate::{
+            profile::READ_ONLY,
+            store::custody::{Item, Member},
+        };
+        let archive = Archive::memory()?;
+        let bytes = b"later deposit under a separate grant";
+        let member = Id::blob(bytes);
+        let public = Id::blob(PUBLIC);
+        let question = archive.document(
+            &Document::new(
+                Kind::Question,
+                "native source question",
+                "test",
+                serde_json::json!({}),
+                vec![crate::profile::link("evidence", member)],
+            )?,
+            crate::wire::Format::A,
+            public,
+        )?;
+        let question_item = Item {
+            member: Member {
+                id: question,
+                access: public,
+                position: None,
+                absent: false,
+            },
+            bytes: archive.raw(question)?.context("missing question")?.0,
+        };
+        let absent = Item {
+            member: Member {
+                id: member,
+                access: Id::blob(READ_ONLY),
+                position: None,
+                absent: true,
+            },
+            bytes: Vec::new(),
+        };
+        let source = archive
+            .custody_append("native source", None, &[absent, question_item])?
+            .head;
+        archive.blob(bytes, public)?;
+        assert!(archive.custody_resolve(source, member, "train").is_err());
+        assert!(archive.resolve_head(source, member, "train").is_err());
+        assert!(archive.inventory_reader(source)?.readable(member).is_err());
+        assert_eq!(
+            archive
+                .question_at(Some(source), question, 16)?
+                .unavailable_inputs,
+            [member].into()
+        );
+        archive
+            .db
+            .execute_batch("DROP INDEX custody_restricted_heads;")?;
+        assert!(archive.resolve_head(source, member, "train").is_err());
+        archive.init_custody()?;
+        let review = archive.seal_review_union([source].into())?;
+        assert!(archive.head(review)?.objects.contains(&member));
+        assert!(archive.resolve_head(review, member, "train").is_err());
+        assert!(archive.custody_resolve(review, member, "read").is_err());
+        let local = archive.snapshot_id("separate local cut", Default::default())?;
+        let combined = archive.seal_review_union([source, local].into())?;
+        assert_eq!(archive.resolve_head(combined, member, "train")?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn review_members_need_an_authorized_access_descriptor() -> Result<()> {
+        let archive = Archive::memory()?;
+        let public = Id::blob(PUBLIC);
+        let acl = archive.blob(br#"{"version":1,"purposes":["train","read"]}"#, public)?;
+        let bytes = b"observed input";
+        let member = archive.blob(bytes, acl)?;
+        let snapshot = archive.seal_members_withheld(
+            "local replica review",
+            Default::default(),
+            [public, acl, member].into(),
+            &[acl].into(),
+        )?;
+        let head = snapshot.id()?;
+        assert!(archive.resolve(&snapshot, member, "train").is_err());
+        assert!(archive.resolve_head(head, member, "read").is_err());
+        assert!(archive.custody_resolve(head, member, "read").is_err());
+
+        let inner = archive.snapshot("trusted local cut", Default::default())?;
+        let inner_id = archive.deposit_manifest(&inner)?;
+        let original = archive.snapshot_id("legacy source", Default::default())?;
+        assert_eq!(archive.resolve_head(original, member, "train")?, bytes);
+        archive.db.execute(
+            "INSERT INTO archive_member_access VALUES(?,?,?)",
+            params![
+                original.to_string(),
+                acl.to_string(),
+                Id::blob(crate::profile::READ_ONLY).to_string()
+            ],
+        )?;
+        assert!(archive.resolve_head(original, member, "train").is_err());
+        let outer = archive.head(original)?;
+        let linked =
+            archive.linked_snapshot(&outer, inner_id, crate::store::ManifestEncoding::Canonical)?;
+        assert!(archive.resolve(&linked, member, "read").is_err());
+        assert_eq!(archive.resolve(&inner, member, "train")?, bytes);
+        let review = archive.seal_review_union([original].into())?;
+        assert!(archive.head(review)?.objects.contains(&member));
+        assert!(archive.resolve_head(review, member, "train").is_err());
+        assert!(archive.custody_resolve(review, member, "read").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn upgrade_suspends_releases_containing_historical_point_bytes() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("historical release.sqlite");
+        let author = Archive::memory()?;
+        let archive = Archive::open(&path)?;
+        let public = Id::blob(PUBLIC);
+        let available = archive.snapshot_id("untouched release", Default::default())?;
+        archive.release(available)?;
+        let bytes = b"historical point transfer";
+        let member = author.blob(bytes, public)?;
+        let origin = author.snapshot_id("point origin", Default::default())?;
+        archive.blob(bytes, public)?;
+        archive.import_member(origin, &author.export_member(origin, member)?)?;
+        let unavailable = archive.snapshot_id("historical release", Default::default())?;
+        archive.release(unavailable)?;
+        archive.db.execute_batch(
+            "INSERT INTO archive_member_access SELECT * FROM archive_point_access;
+             DROP TABLE archive_point_access;
+             DROP TABLE archive_release_access_state;
+             DROP TRIGGER archive_catalog_append;
+             DROP TABLE archive_point_only;
+             CREATE TRIGGER archive_catalog_append AFTER INSERT ON objects
+             BEGIN INSERT OR IGNORE INTO archive_deposits(id) VALUES(NEW.id); END;",
+        )?;
+        drop(archive);
+
+        let check = |archive: &Archive| -> Result<()> {
+            assert_eq!(
+                archive.observed_releases()?,
+                [available, unavailable].into()
+            );
+            assert_eq!(archive.releases()?, [available].into());
+            assert_eq!(
+                archive.catalog_state()?,
+                CatalogState {
+                    revision: 3,
+                    available: 1
+                }
+            );
+            assert_eq!(archive.release_page(None)?.heads, [available]);
+            assert_eq!(
+                archive
+                    .announcements_after(0)?
+                    .iter()
+                    .map(|&(_, id)| id)
+                    .collect::<Vec<_>>(),
+                [available]
+            );
+            assert!(archive.released_manifest(unavailable).is_err());
+            assert!(archive.released_member(unavailable, member).is_err());
+            assert!(archive.head(unavailable)?.objects.contains(&member));
+            Ok(())
+        };
+        check(&Archive::open_for_read(&path)?)?;
+        let upgraded = Archive::open(&path)?;
+        check(&upgraded)?;
+        assert!(upgraded.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM suspended_releases WHERE head=?)",
+            [unavailable.to_string()],
+            |row| row.get::<_, bool>(0),
+        )?);
+        upgraded.blob(bytes, public)?;
+        assert!(upgraded.release(unavailable).is_err());
+        let fresh = upgraded.snapshot_id("independently readmitted release", Default::default())?;
+        upgraded.release(fresh)?;
+        assert_eq!(upgraded.releases()?, [available, fresh].into());
+        assert!(upgraded.observed_releases()?.contains(&unavailable));
+        drop(upgraded);
+        assert_eq!(
+            Archive::open_for_read(&path)?.releases()?,
+            [available, fresh].into()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_publication_is_rejected_before_inventory_loading() -> Result<()> {
+        let archive = Archive::memory()?;
+        for index in 0..=MAX_MEMBERS {
+            archive.blob(&index.to_be_bytes(), Id::blob(PUBLIC))?;
+        }
+        let head = archive.snapshot_id("oversized release", BTreeSet::new())?;
+        let root = archive.custody_head(head)?.inventory;
+        archive
+            .db
+            .execute("DELETE FROM custody_pages WHERE id=?", [root.to_string()])?;
+        let error = archive.release(head).unwrap_err();
+        assert_eq!(error.to_string(), "invalid or oversized release manifest");
+        assert!(archive.observed_releases()?.is_empty());
+        Ok(())
     }
 }

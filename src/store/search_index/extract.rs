@@ -4,15 +4,14 @@ use super::{
     text::{MAX_TEXT_BYTES, Utf8Check, VerifiedTextChunk, payload_passages},
 };
 use crate::{
-    profile::{Document, Kind, allows},
+    profile::{Document, Kind},
     search::{MAX_MEDIA_BYTES, MediaSpan, SearchLocation, media_type, native_media, text_media},
-    store::{Archive, Snapshot},
+    store::{Archive, InventoryReader},
     wire::Id,
 };
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
-use std::collections::BTreeSet;
 
 const MAX_PAYLOAD: u64 = 256 * 1024;
 const MAX_FIELDS: usize = 64;
@@ -117,15 +116,20 @@ fn collect_fields(
 }
 
 impl Archive {
-    pub(super) fn search_sections(&self, snapshot: &Snapshot, id: Id) -> IndexedRecord {
+    pub(super) fn search_sections(
+        &self,
+        inventory: &mut InventoryReader<'_>,
+        id: Id,
+    ) -> IndexedRecord {
         let mut dependencies = Dependencies::default();
-        let Ok(document) =
-            self.read_with(id, |id| self.search_source(snapshot, id, &mut dependencies))
-        else {
+        let Ok(document) = self.read_with(id, |id| {
+            self.search_source(inventory, id, &mut dependencies)
+        }) else {
             return IndexedRecord {
                 document: None,
                 sections: Vec::new(),
                 missing: dependencies.missing,
+                missing_pages: dependencies.missing_pages,
                 limited: true,
                 cacheable: false,
             };
@@ -166,7 +170,7 @@ impl Archive {
         if descriptor {
             let media = &document.subject;
             if text_media(media) {
-                match self.search_text(snapshot, &document, &mut dependencies) {
+                match self.search_text(inventory, &document, &mut dependencies) {
                     Ok((section, incomplete)) => {
                         sections.push(section);
                         limited |= incomplete;
@@ -177,7 +181,7 @@ impl Archive {
                     }
                 }
             } else if native_media(media) {
-                let verified = self.media_dependencies(snapshot, &document, &mut dependencies);
+                let verified = self.media_dependencies(inventory, &document, &mut dependencies);
                 match verified {
                     Ok(length) if length > 0 => sections.push(IndexedSection {
                         sources: dependencies.available,
@@ -205,6 +209,7 @@ impl Archive {
             document: Some(document),
             sections,
             missing: dependencies.missing,
+            missing_pages: dependencies.missing_pages,
             limited,
             cacheable,
         }
@@ -212,12 +217,12 @@ impl Archive {
 
     fn search_text(
         &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         document: &Document,
         dependencies: &mut Dependencies,
     ) -> Result<(IndexedSection, bool)> {
         let length: u64 = document.field("length")?;
-        let mut resolve = |id| self.search_source(snapshot, id, dependencies);
+        let mut resolve = |id| self.search_source(inventory, id, dependencies);
         let (passages, pending_text, limited) = if length <= MAX_PAYLOAD {
             let mut bytes = Vec::new();
             document.materialize(MAX_PAYLOAD, &mut bytes, &mut resolve)?;
@@ -243,9 +248,9 @@ impl Archive {
         ))
     }
 
-    fn media_dependencies(
+    pub(super) fn media_dependencies(
         &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         document: &Document,
         dependencies: &mut Dependencies,
     ) -> Result<u64> {
@@ -254,34 +259,19 @@ impl Archive {
             length <= MAX_MEDIA_BYTES && !document.inputs.is_empty(),
             "invalid media size"
         );
-        let mut checked_policies = BTreeSet::new();
         for link in &document.inputs {
             let id = link.target;
             anyhow::ensure!(
                 link.role == "chunk" && id.format().is_none(),
                 "invalid media source"
             );
-            if let Some(missing) = self.search_missing(snapshot, id)? {
-                dependencies.missing.insert(missing);
-                anyhow::bail!("media source is unavailable");
-            }
-            anyhow::ensure!(
-                snapshot.objects.contains(&id),
-                "media source is outside the snapshot"
-            );
-            let access: String = self.db.query_row(
-                "SELECT access FROM objects WHERE id=? AND data IS NOT NULL",
-                [id.to_string()],
-                |row| row.get(0),
-            )?;
-            let access = access.parse()?;
-            anyhow::ensure!(
-                snapshot.objects.contains(&access),
-                "missing media access descriptor"
-            );
-            if checked_policies.insert(access) {
-                self.check_access(access, |policy| allows(policy, "read"))?;
-            }
+            let access = match inventory.readable(id) {
+                Ok(access) => access,
+                Err(error) => {
+                    self.note_search_gap(inventory, id, dependencies, &error)?;
+                    return Err(error);
+                }
+            };
             dependencies.available.extend([id, access]);
         }
         Ok(length)
@@ -289,26 +279,39 @@ impl Archive {
 
     fn search_source(
         &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         id: Id,
         dependencies: &mut Dependencies,
     ) -> Result<Vec<u8>> {
-        match self.resolve_with(snapshot, id, |policy| allows(policy, "read")) {
+        match inventory.resolve(id) {
             Ok((bytes, access)) => {
                 dependencies.available.extend([id, access]);
                 Ok(bytes)
             }
             Err(error) => {
-                if let Some(missing) = self.search_missing(snapshot, id)? {
-                    dependencies.missing.insert(missing);
-                }
+                self.note_search_gap(inventory, id, dependencies, &error)?;
                 Err(error)
             }
         }
     }
 
-    fn search_missing(&self, snapshot: &Snapshot, id: Id) -> Result<Option<Id>> {
-        if !snapshot.objects.contains(&id) {
+    fn note_search_gap(
+        &self,
+        inventory: &mut InventoryReader<'_>,
+        id: Id,
+        dependencies: &mut Dependencies,
+        error: &anyhow::Error,
+    ) -> Result<()> {
+        if let Some(page) = error.downcast_ref::<crate::store::custody::tree::MissingPage>() {
+            dependencies.missing_pages.insert(page.0);
+        } else if let Some(missing) = self.search_missing(inventory, id)? {
+            dependencies.missing.insert(missing);
+        }
+        Ok(())
+    }
+
+    fn search_missing(&self, inventory: &mut InventoryReader<'_>, id: Id) -> Result<Option<Id>> {
+        if !inventory.contains(id)? {
             return Ok(None);
         }
         let object: Option<(String, bool)> = self
@@ -323,8 +326,11 @@ impl Archive {
             return Ok(Some(id));
         };
         let access = access.parse()?;
-        if !available || !snapshot.objects.contains(&access) {
+        if !available || !inventory.contains(access)? {
             return Ok(None);
+        }
+        if self.point_only(id)? {
+            return Ok(Some(id));
         }
         let known: bool = self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM objects WHERE id=?)",
@@ -335,10 +341,9 @@ impl Archive {
     }
 
     pub(super) fn search_snippet(
-        &self,
-        snapshot: &Snapshot,
         document: &Document,
         location: &SearchLocation,
+        resolve: impl FnMut(Id) -> Result<Vec<u8>>,
     ) -> Result<Option<String>> {
         Ok(match location {
             SearchLocation::Object | SearchLocation::Media { .. } => None,
@@ -354,12 +359,8 @@ impl Archive {
                     .and_then(|text| text.get(*start..*end).map(str::to_owned))
             }
             SearchLocation::Payload { start, end } => {
-                let bytes = VerifiedTextChunk::default().read_span(
-                    self,
-                    snapshot,
-                    document,
-                    *start..*end,
-                )?;
+                let bytes =
+                    VerifiedTextChunk::default().read_span(document, *start..*end, resolve)?;
                 Some(String::from_utf8(bytes)?)
             }
         })

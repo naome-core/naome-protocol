@@ -42,7 +42,7 @@ pub struct FindArguments {
     #[arg(long, default_value_t = SearchOptions::default().limit)]
     #[serde(default = "default_limit")]
     limit: usize,
-    /// Maximum records to prepare for a first search of this snapshot.
+    /// Maximum records to prepare per search while this snapshot's index is incomplete.
     #[arg(long, default_value_t = SearchOptions::default().index_budget)]
     #[serde(default = "default_index_budget")]
     index_budget: usize,
@@ -95,14 +95,6 @@ struct ModelArguments {
     python: Option<PathBuf>,
 }
 
-impl FindArguments {
-    pub(super) fn exact_lookup(&self) -> bool {
-        self.query
-            .as_deref()
-            .is_some_and(|text| text.trim().parse::<Id>().is_ok())
-    }
-}
-
 impl ModelArguments {
     fn directory(&self) -> Option<PathBuf> {
         self.model
@@ -118,8 +110,59 @@ struct LoadedModel {
     worker: crate::search::EmbeddingGemma,
 }
 
-/// A local search session. A caller can keep it alive across requests to reuse
-/// the model process. Archive access stays with the supplied custody connection.
+#[derive(Clone, Copy)]
+enum SearchArchive<'a> {
+    Connected(&'a Archive),
+    Path(&'a Path),
+}
+
+impl SearchArchive<'_> {
+    fn read<T>(self, run: impl FnOnce(&Archive) -> Result<T>) -> Result<T> {
+        match self {
+            Self::Connected(archive) => run(archive),
+            Self::Path(path) => run(&Archive::open_for_read(path)?),
+        }
+    }
+
+    fn write<T>(self, run: impl FnOnce(&Archive) -> Result<T>) -> Result<T> {
+        match self {
+            Self::Connected(archive) => run(archive),
+            Self::Path(path) => run(&Archive::open(path)?),
+        }
+    }
+
+    fn find(
+        self,
+        head: Option<Id>,
+        input: SearchInput<'_>,
+        options: SearchOptions<'_>,
+        model: Option<&mut dyn Embedder>,
+        preparation: IndexPreparation,
+    ) -> Result<SearchReport> {
+        if let Self::Path(path) = self
+            && matches!(preparation, IndexPreparation::Lexical)
+            && let Ok(archive) = Archive::open_for_read(path)
+            && let Some(head) = archive.prepared_search_head(head)?
+        {
+            return archive.find_selected(
+                Some(head),
+                input,
+                options,
+                model,
+                IndexPreparation::Existing,
+            );
+        }
+        let run =
+            |archive: &Archive| archive.find_selected(head, input, options, model, preparation);
+        if matches!(preparation, IndexPreparation::Existing) {
+            self.read(run)
+        } else {
+            self.write(run)
+        }
+    }
+}
+
+/// A local search session keeps one model process across requests.
 #[derive(Default)]
 pub struct LocalSearch {
     #[cfg(feature = "semantic-search")]
@@ -173,7 +216,6 @@ impl LocalSearch {
         archive: &Archive,
         args: PrepareSearchArguments,
     ) -> Result<SearchPreparation> {
-        let snapshot = archive.search_head(args.head)?;
         let model = if args.lexical {
             None
         } else {
@@ -182,10 +224,22 @@ impl LocalSearch {
                 .map(|path| self.model(path, args.model.python))
                 .transpose()?
         };
-        archive.prepare_search_index(&snapshot, args.index_budget, model, args.rebuild_index)
+        archive.prepare_selected_search(args.head, args.index_budget, model, args.rebuild_index)
     }
 
     pub fn find(&mut self, archive: &Archive, args: FindArguments) -> Result<SearchReport> {
+        self.find_using(SearchArchive::Connected(archive), args)
+    }
+
+    pub(super) fn find_path(&mut self, path: &Path, args: FindArguments) -> Result<SearchReport> {
+        self.find_using(SearchArchive::Path(path), args)
+    }
+
+    fn find_using(
+        &mut self,
+        archive: SearchArchive<'_>,
+        args: FindArguments,
+    ) -> Result<SearchReport> {
         let bytes;
         let input = match (args.query.as_deref(), args.input.as_deref()) {
             (Some(query), None) => {
@@ -243,9 +297,8 @@ impl LocalSearch {
             "exact ID lookups cannot prepare or rebuild the index; use prepare-search"
         );
         if let Some(id) = input.exact_id() {
-            return archive.find_id(args.head, id, options);
+            return archive.read(|db| db.find_id(args.head, id, options));
         }
-        let snapshot = archive.search_head(args.head)?;
         let model = if mode == SearchMode::Lexical {
             None
         } else {
@@ -262,13 +315,31 @@ impl LocalSearch {
         } else {
             IndexPreparation::Lexical
         };
-        archive.lookup_search(&snapshot, input, options, model, preparation)
+        archive.find(args.head, input, options, model, preparation)
     }
 
     /// Serve one typed search request and response per JSON line.
     pub fn serve(
         &mut self,
         archive: &Archive,
+        input: impl BufRead,
+        output: impl Write,
+    ) -> Result<()> {
+        self.serve_using(SearchArchive::Connected(archive), input, output)
+    }
+
+    pub(super) fn serve_path(
+        &mut self,
+        path: &Path,
+        input: impl BufRead,
+        output: impl Write,
+    ) -> Result<()> {
+        self.serve_using(SearchArchive::Path(path), input, output)
+    }
+
+    fn serve_using(
+        &mut self,
+        archive: SearchArchive<'_>,
         mut input: impl BufRead,
         mut output: impl Write,
     ) -> Result<()> {
@@ -294,11 +365,11 @@ impl LocalSearch {
         Ok(())
     }
 
-    fn execute_line(&mut self, archive: &Archive, line: &str) -> Result<Value> {
+    fn execute_line(&mut self, archive: SearchArchive<'_>, line: &str) -> Result<Value> {
         match serde_json::from_str(line)? {
-            SearchRequest::Find(args) => Ok(serde_json::to_value(self.find(archive, args)?)?),
+            SearchRequest::Find(args) => Ok(serde_json::to_value(self.find_using(archive, args)?)?),
             SearchRequest::PrepareSearch(args) => {
-                Ok(serde_json::to_value(self.prepare(archive, args)?)?)
+                archive.write(|db| Ok(serde_json::to_value(self.prepare(db, args)?)?))
             }
         }
     }

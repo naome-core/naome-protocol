@@ -9,7 +9,7 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 pub(super) use semantic::VectorWork;
 use semantic::semantic_passages;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy)]
 pub(super) struct RankedPassage {
@@ -61,12 +61,13 @@ pub(super) fn rank(
     options: SearchOptions<'_>,
     semantic: Option<SemanticQuery<'_>>,
     work: &mut VectorWork,
+    entry_allowed: &mut dyn FnMut(i64) -> bool,
 ) -> Result<Vec<Candidate>> {
     let bound = (options.limit * 4).max(40);
     let mut candidates = BTreeMap::new();
     if options.mode != SearchMode::Semantic {
         for (rank, (id, passage, strength, exact_key)) in
-            lexical(db, head, queries, options, bound)?
+            lexical(db, head, queries, options, bound, entry_allowed)?
                 .into_iter()
                 .enumerate()
         {
@@ -93,7 +94,7 @@ pub(super) fn rank(
     }
     if let Some(semantic) = semantic {
         for (rank, (id, passage, part, similarity)) in
-            semantic_passages(db, head, options, semantic, bound, work)?
+            semantic_passages(db, head, options, semantic, bound, work, entry_allowed)?
                 .into_iter()
                 .enumerate()
         {
@@ -133,6 +134,7 @@ fn lexical(
     queries: &[&str],
     options: SearchOptions<'_>,
     bound: usize,
+    entry_allowed: &mut dyn FnMut(i64) -> bool,
 ) -> Result<Vec<(Id, i64, f64, bool)>> {
     let queries: Vec<_> = queries
         .iter()
@@ -155,7 +157,7 @@ fn lexical(
                 json_extract(value,'$.tokens') AS tokens,json_array_length(value,'$.tokens') AS size
             FROM json_each(?2)
         ), scored AS (
-            SELECT e.object,p.id,p.location,
+            SELECT e.object,e.id AS entry,p.id,p.location,
                    1.0*COUNT(*)/q.size AS fraction,
                    instr(p.normalized,q.text)>0 AS exact,
                    p.priority>=2 AND instr(' '||p.normalized||' ', ' '||q.text||' ')>0 AS exact_key,
@@ -168,39 +170,30 @@ fn lexical(
             JOIN rep_search_visible visible ON visible.entry=e.id AND visible.head=?1
             WHERE (?3 IS NULL OR e.kind=?3) AND (?4 IS NULL OR e.subject=?4) AND (?5 IS NULL OR e.scope=?5)
             GROUP BY q.key,p.id
-        ), ordered AS (
-            SELECT object,id,score,fraction,exact,exact_key,exact_original,
-               ROW_NUMBER() OVER(PARTITION BY object ORDER BY exact_key DESC,exact_original DESC,
-                                 score DESC,exact DESC,fraction DESC,location,id) AS rank
-            FROM scored
         )
-        SELECT object,id,fraction,exact,exact_key FROM ordered
-        WHERE rank=1 ORDER BY exact_key DESC,exact_original DESC,score DESC,object LIMIT ?6",
+        SELECT object,entry,id,fraction,exact,exact_key FROM scored
+        ORDER BY exact_key DESC,exact_original DESC,score DESC,object,
+                 exact DESC,fraction DESC,location,id",
     )?;
-    statement
-        .query_map(
-            params![
-                head,
-                serde_json::to_string(&queries)?,
-                options.kind.map(|kind| kind as i64),
-                options.subject,
-                options.scope,
-                bound as i64
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, bool>(3)?,
-                    row.get::<_, bool>(4)?,
-                ))
-            },
-        )?
-        .map(|row| {
-            let (object, passage, fraction, exact, exact_key) = row?;
-            let strength = if exact { 1.0 } else { fraction.powi(2) };
-            Ok((object.parse()?, passage, strength, exact_key))
-        })
-        .collect()
+    let mut rows = statement.query(params![
+        head,
+        serde_json::to_string(&queries)?,
+        options.kind.map(|kind| kind as i64),
+        options.subject,
+        options.scope,
+    ])?;
+    let mut selected = Vec::new();
+    let mut seen = BTreeSet::new();
+    while selected.len() < bound
+        && let Some(row) = rows.next()?
+    {
+        let object = row.get::<_, String>(0)?.parse()?;
+        if !seen.contains(&object) && entry_allowed(row.get(1)?) {
+            let fraction: f64 = row.get(3)?;
+            let strength = if row.get(4)? { 1.0 } else { fraction.powi(2) };
+            selected.push((object, row.get(2)?, strength, row.get(5)?));
+            seen.insert(object);
+        }
+    }
+    Ok(selected)
 }

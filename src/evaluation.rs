@@ -6,6 +6,9 @@ mod inventory;
 #[cfg(all(test, feature = "cli"))]
 mod manifest_tests;
 mod measurement;
+pub(crate) mod notice_coverage;
+mod question;
+mod replay;
 mod rules;
 mod science;
 use calibration_identity::CalibrationIdentities;
@@ -18,10 +21,13 @@ use dependency_correction::{
 pub use impact::Impact;
 pub(crate) use inventory::{EvidenceView, ReadInventory};
 use measurement::Predicate;
+pub use question::{QuestionRecord, QuestionView};
+pub(crate) use replay::rebuild_receipt;
+pub use replay::{Reassessment, ReceiptReplay};
+use rules::EvaluatorRules;
 #[cfg(feature = "cli")]
 pub(crate) use rules::replay_evaluator_ids;
 pub(crate) use rules::{EVALUATOR_ID, manifest_encoding};
-use rules::{EvaluatorRules, NoticeBudget};
 #[cfg(feature = "cli")]
 pub(crate) use rules::{FIXTURE_EVALUATOR_ID, V0_1_0_EVALUATOR_ID};
 
@@ -68,6 +74,13 @@ impl Standing {
 pub fn default_byte_limit() -> usize {
     64 * 1024 * 1024
 }
+pub(crate) fn check_receipt_budget(query: &Query) -> Result<()> {
+    ensure!(
+        query.budget <= 100_000 && query.byte_limit <= default_byte_limit(),
+        "receipt evaluation budget exceeds 100000 steps or 64 MiB"
+    );
+    Ok(())
+}
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
@@ -108,6 +121,18 @@ pub struct Receipt {
     /// First inclusive record in the unexamined suffix at the receipt's pinned horizon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unscanned_records_from: Option<Id>,
+    /// Coverage state when the policy delegates classification of absent records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_search: Option<NoticeSearch>,
+}
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct NoticeSearch {
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classified_occurrences: Option<BTreeMap<Id, Id>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classified_records: Option<BTreeMap<Id, Id>>,
+    pub unresolved_records: BTreeSet<Id>,
 }
 impl Receipt {
     // The existing evaluator could also match a named signed test when a
@@ -600,7 +625,12 @@ pub(crate) fn assess_with_inventory(
             "unsupported query policy"
         );
         out.dependencies.extend([q.target, q.policy]);
-        inventory.search(store, s, q, out, &rules.notice_budget)?;
+        let coverage = rules
+            .notice_coverage
+            .map(|version| notice_coverage::CoverageAuthority::from_policy(version, &policy))
+            .transpose()?
+            .flatten();
+        inventory.search(store, s, q, out, &rules.notice_budget, coverage.as_ref())?;
         let mut aliases = Equivalence::default();
         for &mapping in &q.mappings {
             aliases.add(store.verify_mapping_with(s, mapping, rules.manifests)?);
@@ -649,6 +679,16 @@ pub(crate) fn assess_with_inventory(
         } else {
             Vec::new()
         };
+        if rules.notice_coverage.is_some() {
+            for entry in &input_corrections {
+                out.check(
+                    "input correction authority",
+                    Status::Pass,
+                    "verified signature for the exact source version and correction scope",
+                    &[entry.id, entry.signature],
+                );
+            }
+        }
         let mut correction_exclusions: BTreeMap<Id, usize> = BTreeMap::new();
         let mut pro = false;
         let mut con = false;
@@ -668,6 +708,14 @@ pub(crate) fn assess_with_inventory(
                 .map(|reading| store.explain_recorded_reading(s, arg, reading, q.budget));
             let premises = recorded_premises.as_ref().unwrap_or(&evidence);
             out.frontier.extend(premises.frontier.keys());
+            if rules.notice_coverage.is_some() && !premises.frontier.is_empty() {
+                out.unknown(
+                    "argument evidence",
+                    "argument has missing or restricted inputs",
+                    &[arg],
+                );
+                continue;
+            }
             let result = (|| -> Result<Vec<Standing>> {
                 ensure!(
                     premises.frontier.is_empty(),
@@ -754,6 +802,23 @@ pub(crate) fn assess_with_inventory(
                 Err(e) => out.unknown("argument warrant", &e.to_string(), &[arg]),
             }
         }
+        if rules.notice_coverage.is_some() && !q.arguments.is_empty() {
+            for entry in &input_corrections {
+                if correction_exclusions.get(&entry.id) == Some(&q.arguments.len())
+                    && !q
+                        .required_notices
+                        .iter()
+                        .any(|id| view.aliases.equivalent(*id, entry.id))
+                {
+                    out.check(
+                        "input correction applicability",
+                        Status::NotApplicable,
+                        "all query arguments exclude the corrected scope",
+                        &[entry.id, entry.signature],
+                    );
+                }
+            }
+        }
         for &notice in &q.required_notices {
             let endpoints = view.aliases.endpoints(notice);
             let applies = !endpoints.is_disjoint(&out.applicable_notices);
@@ -781,9 +846,11 @@ pub(crate) fn assess_with_inventory(
             for source in sources {
                 let mut fresh = false;
                 for (&id, d) in &view.inventory.documents {
-                    if d.kind == Kind::Occurrence
-                        && d.subject == source
-                        && d.scope == "notice-horizon"
+                    if d.subject == source
+                        && matches!(
+                            notice_coverage::search_role(d),
+                            notice_coverage::SearchRole::Freshness
+                        )
                         && let Ok(time) = d.field::<u64>("time")
                         && time <= now
                         && now - time <= max_age
@@ -791,7 +858,8 @@ pub(crate) fn assess_with_inventory(
                         && let Ok(inventory) = store.linked_snapshot(s, h, rules.manifests)
                         && inventory.source == source
                         && inventory.objects.is_subset(&s.objects)
-                        && let Ok(sig) = view.signed(id, "notice-horizon", "horizon")
+                        && let Ok(sig) =
+                            view.signed(id, notice_coverage::FRESHNESS_SCOPE, "horizon")
                     {
                         out.check(
                             "notice freshness",
@@ -835,7 +903,7 @@ pub fn deposit_receipt(
     r: &Receipt,
     f: Format,
 ) -> Result<Id> {
-    deposit_receipt_for_evaluator(store, s, q, r, f, EVALUATOR_ID)
+    deposit_receipt_for_evaluator(store, s, q, r, f, EVALUATOR_ID, None)
 }
 pub(crate) fn deposit_receipt_for_evaluator(
     store: &Archive,
@@ -844,10 +912,12 @@ pub(crate) fn deposit_receipt_for_evaluator(
     r: &Receipt,
     f: Format,
     evaluator: &str,
+    predecessor: Option<Id>,
 ) -> Result<Id> {
+    check_receipt_budget(q)?;
     let snapshot_id = store.deposit_manifest(s)?;
     store.document(
-        &receipt_document(store, s, snapshot_id, q, r, evaluator)?,
+        &receipt_document(store, s, snapshot_id, q, r, evaluator, predecessor)?,
         f,
         Id::blob(PUBLIC),
     )
@@ -859,6 +929,7 @@ pub(crate) fn receipt_document(
     q: &Query,
     r: &Receipt,
     evaluator: &str,
+    predecessor: Option<Id>,
 ) -> Result<Document> {
     let mut edges = vec![
         link("claim", q.target),
@@ -880,6 +951,7 @@ pub(crate) fn receipt_document(
             .iter()
             .map(|id| link("previous-receipt", *id)),
     );
+    edges.extend(predecessor.map(|id| link("reassessed-from", id)));
     edges.extend(q.mappings.iter().map(|x| link("mapping", *x)));
     edges.extend(
         q.required_notices

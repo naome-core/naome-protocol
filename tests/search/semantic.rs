@@ -1,4 +1,5 @@
 use super::*;
+use naome_protocol::search::{EmbeddedMedia, MediaInput, MediaPart, MediaSpan, SearchInput};
 
 #[test]
 fn hybrid_search_resumes_vector_index_and_reuses_only_matching_models() -> Result<()> {
@@ -73,56 +74,50 @@ fn hybrid_search_resumes_vector_index_and_reuses_only_matching_models() -> Resul
     Ok(())
 }
 
+struct SyntheticMedia(&'static [u8]);
+impl Embedder for SyntheticMedia {
+    fn id(&self) -> Id {
+        Id::blob(self.0)
+    }
+    fn dimensions(&self) -> usize {
+        2
+    }
+    fn embed(&mut self, _: EmbeddingInput, input: &[&str]) -> Result<Vec<Vec<f32>>> {
+        Ok(input
+            .iter()
+            .map(|text| {
+                if text.contains("bridge") || *text == "video/mp4" {
+                    vec![1.0, 0.0]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            })
+            .collect())
+    }
+    fn embed_media(&mut self, _: EmbeddingInput, input: MediaInput<'_>) -> Result<EmbeddedMedia> {
+        assert!(input.media_type == "video/mp4" || input.media_type == "image/png");
+        let span = if input.media_type == "video/mp4" {
+            MediaSpan::Time {
+                start_ms: 18_000,
+                end_ms: 25_000,
+            }
+        } else {
+            MediaSpan::Whole
+        };
+        let vector = if input.bytes == b"bridge footage" {
+            vec![1.0, 0.0]
+        } else {
+            vec![0.0, 1.0]
+        };
+        Ok(EmbeddedMedia {
+            parts: vec![MediaPart { span, vector }],
+            limited: false,
+        })
+    }
+}
+
 #[test]
 fn unified_search_accepts_media_queries_and_returns_resolvable_media_parts() -> Result<()> {
-    use naome_protocol::search::{EmbeddedMedia, MediaInput, MediaPart, MediaSpan, SearchInput};
-
-    struct SyntheticMedia;
-    impl Embedder for SyntheticMedia {
-        fn id(&self) -> Id {
-            Id::blob(b"synthetic multimodal test")
-        }
-        fn dimensions(&self) -> usize {
-            2
-        }
-        fn embed(&mut self, _: EmbeddingInput, input: &[&str]) -> Result<Vec<Vec<f32>>> {
-            Ok(input
-                .iter()
-                .map(|text| {
-                    if text.contains("bridge") {
-                        vec![1.0, 0.0]
-                    } else {
-                        vec![0.0, 1.0]
-                    }
-                })
-                .collect())
-        }
-        fn embed_media(
-            &mut self,
-            _: EmbeddingInput,
-            input: MediaInput<'_>,
-        ) -> Result<EmbeddedMedia> {
-            assert!(input.media_type == "video/mp4" || input.media_type == "image/png");
-            let span = if input.media_type == "video/mp4" {
-                MediaSpan::Time {
-                    start_ms: 18_000,
-                    end_ms: 25_000,
-                }
-            } else {
-                MediaSpan::Whole
-            };
-            let vector = if input.bytes == b"bridge footage" {
-                vec![1.0, 0.0]
-            } else {
-                vec![0.0, 1.0]
-            };
-            Ok(EmbeddedMedia {
-                parts: vec![MediaPart { span, vector }],
-                limited: false,
-            })
-        }
-    }
-
     let archive = Archive::memory()?;
     let public = Id::blob(PUBLIC);
     let original = b"bridge footage";
@@ -139,7 +134,7 @@ fn unified_search_accepts_media_queries_and_returns_resolvable_media_parts() -> 
         mode: SearchMode::Hybrid,
         ..Default::default()
     };
-    let mut model = SyntheticMedia;
+    let mut model = SyntheticMedia(b"synthetic multimodal test");
     let report = archive.find(&snapshot, "bridge", options, Some(&mut model))?;
     assert_eq!(report.semantic_index_complete, Some(true));
     let hit = report.hits.iter().find(|hit| hit.id == video).unwrap();
@@ -178,8 +173,423 @@ fn unified_search_accepts_media_queries_and_returns_resolvable_media_parts() -> 
 }
 
 #[test]
+fn media_search_respects_imported_chunk_access_even_with_a_prepared_cache() -> Result<()> {
+    use naome_protocol::profile::READ_ONLY;
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("media.sqlite");
+    let mut receiver = Archive::open(&path)?;
+    let source = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let bytes = b"bridge footage";
+    let video = receiver.capture(
+        bytes.as_slice(),
+        "video/mp4",
+        bytes.len(),
+        public,
+        Format::A,
+    )?;
+    let local = receiver.snapshot("local media", BTreeSet::new())?;
+    let descriptor = receiver.read(&local, video, "read")?;
+    let chunk = descriptor.inputs[0].target;
+    assert_eq!(source.blob(bytes, Id::blob(READ_ONLY))?, chunk);
+    assert_eq!(source.document(&descriptor, Format::A, public)?, video);
+    let remote = source.snapshot_id("remote media", BTreeSet::new())?;
+    source.withdraw(chunk)?;
+    let page = source.export_exchange_page(remote, None, 64)?;
+    assert!(
+        receiver
+            .import_pinned_exchange_page(remote, &page)?
+            .complete
+    );
+    let scoped = receiver.head(remote)?;
+    assert!(receiver.resolve_head(remote, chunk, "read").is_err());
+    assert_eq!(receiver.read(&scoped, video, "read")?, descriptor);
+
+    let options = SearchOptions {
+        mode: SearchMode::Semantic,
+        kind: Some(Kind::Descriptor),
+        ..Default::default()
+    };
+    let mut model = SyntheticMedia(b"scoped multimodal test");
+    let warm = receiver.find(&local, "bridge", options, Some(&mut model))?;
+    assert_eq!(warm.hits.first().map(|hit| hit.id), Some(video));
+    let scoped_report = receiver.find(&scoped, "bridge", options, Some(&mut model))?;
+    assert!(scoped_report.limited_coverage && scoped_report.hits.is_empty());
+
+    // Recreate visibility left by an older prepared search, without preparing it again.
+    receiver.clear_search_index(remote)?;
+    let db = rusqlite::Connection::open(path)?;
+    let remote = remote.to_string();
+    db.execute(
+        "INSERT INTO rep_search_heads(head,finished) VALUES(?,1)",
+        [&remote],
+    )?;
+    let shared = db.execute(
+        "INSERT INTO rep_search_head_sets SELECT ?,set_id FROM rep_search_head_sets WHERE head=?",
+        rusqlite::params![remote, local.id()?.to_string()],
+    )?;
+    assert!(shared > 0);
+    let stale = receiver.search_prepared(
+        &scoped,
+        SearchInput::Text("bridge"),
+        options,
+        Some(&mut model),
+    )?;
+    assert!(stale.limited_coverage && stale.hits.is_empty());
+    assert_eq!(stale.vector_products, 0);
+    let hybrid = SearchOptions {
+        mode: SearchMode::Hybrid,
+        ..options
+    };
+    let metadata = receiver.search_prepared(
+        &scoped,
+        SearchInput::Text("video/mp4"),
+        hybrid,
+        Some(&mut model),
+    )?;
+    assert_eq!(metadata.hits.first().map(|hit| hit.id), Some(video));
+    assert!(metadata.hits[0].semantic_rank.is_none());
+    assert!(metadata.hits[0].semantic_similarity.is_none());
+    let mut new_model = SyntheticMedia(b"scoped multimodal test second model");
+    let denied = receiver.find(&scoped, "bridge", options, Some(&mut new_model))?;
+    assert!(denied.hits.is_empty());
+    let allowed = receiver.find(&local, "bridge", options, Some(&mut new_model))?;
+    assert_eq!(allowed.hits.first().map(|hit| hit.id), Some(video));
+    let warm = receiver.search_prepared(
+        &local,
+        SearchInput::Text("bridge"),
+        options,
+        Some(&mut model),
+    )?;
+    assert_eq!(warm.hits.first().map(|hit| hit.id), Some(video));
+    Ok(())
+}
+
+#[test]
+fn verified_import_rechecks_prepared_text_sources_before_ranking_and_embedding() -> Result<()> {
+    use naome_protocol::profile::READ_ONLY;
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("text cache.sqlite");
+    let mut receiver = Archive::open(&path)?;
+    let source = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let bytes = b"confidential field notes";
+    let text = receiver.capture(
+        bytes.as_slice(),
+        "text/plain",
+        bytes.len(),
+        public,
+        Format::A,
+    )?;
+    let local = receiver.snapshot("local notes", BTreeSet::new())?;
+    let descriptor = receiver.read(&local, text, "read")?;
+    let chunk = descriptor.inputs[0].target;
+    assert_eq!(source.blob(bytes, Id::blob(READ_ONLY))?, chunk);
+    assert_eq!(source.document(&descriptor, Format::A, public)?, text);
+    let head = source.snapshot_id("peer notes", BTreeSet::new())?;
+    source.withdraw(chunk)?;
+    assert!(
+        receiver
+            .import_legacy_exchange_page(
+                head,
+                &source.export_legacy_exchange_page(head, None, 64)?
+            )?
+            .complete
+    );
+    let scoped = receiver.head(head)?;
+    let mut model = TestEmbedder {
+        id: Id::blob(b"prepared text access"),
+        embedded_passages: 0,
+    };
+    let options = SearchOptions {
+        mode: SearchMode::Hybrid,
+        kind: Some(Kind::Descriptor),
+        ..Default::default()
+    };
+    receiver.prepare_search(&local, 100, Some(&mut model))?;
+    let before = receiver.find(&scoped, "confidential", options, Some(&mut model))?;
+    assert_eq!(before.hits.first().map(|hit| hit.id), Some(text));
+    assert!(before.hits[0].semantic_rank.is_some());
+
+    assert!(
+        receiver
+            .import_pinned_exchange_page(head, &source.export_exchange_page(head, None, 64)?)?
+            .complete
+    );
+    assert!(receiver.resolve_head(head, chunk, "read").is_err());
+    let stale_query = |model: &mut TestEmbedder| {
+        receiver.search_prepared(
+            &scoped,
+            SearchInput::Text("confidential"),
+            options,
+            Some(model),
+        )
+    };
+    let invalidated = stale_query(&mut model)?;
+    assert!(!invalidated.index_complete && invalidated.hits.is_empty());
+
+    // Restore an older derived view to check the read paths on existing archives.
+    let db = rusqlite::Connection::open(path)?;
+    let head = head.to_string();
+    db.execute(
+        "INSERT INTO rep_search_heads(head,finished) VALUES(?,1)",
+        [&head],
+    )?;
+    let shared = db.execute(
+        "INSERT INTO rep_search_head_sets SELECT ?,set_id FROM rep_search_head_sets WHERE head=?",
+        rusqlite::params![head, local.id()?.to_string()],
+    )?;
+    assert!(shared > 0);
+    let stale = stale_query(&mut model)?;
+    assert!(stale.limited_coverage && stale.hits.is_empty());
+    assert_eq!(stale.vector_products, 0);
+    let metadata = receiver.search_prepared(
+        &scoped,
+        SearchInput::Text("text/plain"),
+        options,
+        Some(&mut model),
+    )?;
+    assert_eq!(metadata.hits.first().map(|hit| hit.id), Some(text));
+    assert!(metadata.hits[0].semantic_rank.is_none());
+    assert!(metadata.hits[0].semantic_similarity.is_none());
+
+    let mut new_model = TestEmbedder {
+        id: Id::blob(b"missing text embeddings"),
+        embedded_passages: 0,
+    };
+    receiver.prepare_search(&scoped, 100, Some(&mut new_model))?;
+    assert_eq!(new_model.embedded_passages, 0);
+    receiver.prepare_search(&local, 100, Some(&mut new_model))?;
+    assert!(new_model.embedded_passages > 0);
+    Ok(())
+}
+
+#[test]
+fn sparse_semantic_search_fills_denied_slots_with_readable_vectors() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("old media vectors.sqlite");
+    let archive = Archive::open(&path)?;
+    let mut videos = Vec::new();
+    for bytes in [b"bridge first".as_slice(), b"bridge second".as_slice()] {
+        videos.push((
+            archive.capture(bytes, "video/mp4", bytes.len(), Id::blob(PUBLIC), Format::A)?,
+            Id::blob(bytes),
+        ));
+    }
+    videos.sort_unstable();
+    let allowed = videos[0].0;
+    let denied_chunk = videos[1].1;
+    let snapshot = archive.snapshot("two media observations", Default::default())?;
+    let mut model = SyntheticMedia(b"sparse scoped media vectors");
+    assert_eq!(
+        archive
+            .prepare_search(&snapshot, 100, Some(&mut model))?
+            .sample_positions_ready,
+        Some(true)
+    );
+    // Model an older prepared index whose second payload was later restricted.
+    let db = rusqlite::Connection::open(&path)?;
+    db.execute(
+        "INSERT INTO archive_point_only(id) VALUES(?)",
+        [denied_chunk.to_string()],
+    )?;
+    let budget = SearchOptions {
+        mode: SearchMode::Semantic,
+        vector_budget: 1,
+        ..Default::default()
+    };
+    for kind in [None, Some(Kind::Descriptor)] {
+        let report = archive.search_prepared(
+            &snapshot,
+            SearchInput::Text("scene"),
+            SearchOptions { kind, ..budget },
+            Some(&mut model),
+        )?;
+        assert_eq!(
+            report.hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            [allowed]
+        );
+        assert!(report.limited_coverage);
+        assert_eq!(report.vector_products, model.dimensions());
+        assert_eq!(report.vector_rows_loaded, 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn prepared_sparse_refill_does_not_walk_the_whole_vector_index() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("sparse refill.sqlite");
+    let archive = Archive::open(&path)?;
+    let public = Id::blob(PUBLIC);
+    let mut candidates = Vec::new();
+    for number in 0..260 {
+        let document = Document::new(
+            Kind::Claim,
+            &format!("observation {number}"),
+            "test",
+            json!({}),
+            vec![],
+        )?;
+        candidates.push(archive.document(&document, Format::A, public)?);
+    }
+    candidates.sort_unstable();
+    let snapshot = archive.snapshot("prepared observations", Default::default())?;
+    let head = snapshot.id()?.to_string();
+    let mut model = TestEmbedder {
+        id: Id::blob(b"prepared scoped refill"),
+        embedded_passages: 0,
+    };
+    assert_eq!(
+        archive
+            .prepare_search(&snapshot, 1024, Some(&mut model))?
+            .sample_positions_ready,
+        Some(true)
+    );
+    let db = rusqlite::Connection::open(path)?;
+    let read_only = Id::blob(naome_protocol::profile::READ_ONLY).to_string();
+    for id in &candidates[..candidates.len() - 1] {
+        db.execute(
+            "INSERT INTO archive_member_access VALUES(?,?,?)",
+            rusqlite::params![head, id.to_string(), read_only],
+        )?;
+    }
+    let report = archive.search_prepared(
+        &snapshot,
+        SearchInput::Text("observation"),
+        SearchOptions {
+            mode: SearchMode::Semantic,
+            vector_budget: 1,
+            ..Default::default()
+        },
+        Some(&mut model),
+    )?;
+    assert!(report.limited_coverage && report.vector_budget_exhausted);
+    assert_eq!(report.vector_rows_examined, 129);
+    assert_eq!(report.vector_rows_loaded, 0);
+    assert!(report.hits.is_empty());
+    Ok(())
+}
+
+#[test]
+fn vector_preparation_resumes_past_a_denied_prefix_after_reopen() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("vector progress.sqlite");
+    let archive = Archive::open(&path)?;
+    let public = Id::blob(PUBLIC);
+    let mut records = Vec::new();
+    for subject in ["north observation", "south observation"] {
+        let document = Document::new(Kind::Claim, subject, "test", json!({}), vec![])?;
+        records.push(archive.document(&document, Format::A, public)?);
+    }
+    records.sort_unstable();
+    let snapshot = archive.snapshot("prepared scope", Default::default())?;
+    assert!(archive.prepare_search(&snapshot, 100, None)?.index_complete);
+    let db = rusqlite::Connection::open(&path)?;
+    db.execute(
+        "INSERT INTO archive_member_access VALUES(?,?,?)",
+        rusqlite::params![
+            snapshot.id()?.to_string(),
+            records[0].to_string(),
+            Id::blob(naome_protocol::profile::READ_ONLY).to_string()
+        ],
+    )?;
+    drop(db);
+    let mut model = TestEmbedder {
+        id: Id::blob(b"scoped preparation progress"),
+        embedded_passages: 0,
+    };
+    archive.prepare_search(&snapshot, 1, Some(&mut model))?;
+    assert_eq!(model.embedded_passages, 0);
+    drop(archive);
+
+    let archive = Archive::open(&path)?;
+    archive.prepare_search(&snapshot, 1, Some(&mut model))?;
+    assert_eq!(model.embedded_passages, 1);
+    let report = archive.search_prepared(
+        &snapshot,
+        SearchInput::Text("observation"),
+        SearchOptions {
+            mode: SearchMode::Semantic,
+            ..Default::default()
+        },
+        Some(&mut model),
+    )?;
+    assert_eq!(
+        report.hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        [records[1]]
+    );
+
+    let independent = archive.snapshot("independently authorized", Default::default())?;
+    archive.prepare_search(&independent, 100, Some(&mut model))?;
+    assert_eq!(model.embedded_passages, 2);
+    Ok(())
+}
+
+#[test]
+fn old_local_prepared_media_respects_point_restrictions_before_and_after_upgrade() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("older cached media.sqlite");
+    let source = Archive::memory()?;
+    let archive = Archive::open(&path)?;
+    let bytes = b"bridge footage";
+    let public = Id::blob(PUBLIC);
+    let video = archive.capture(
+        bytes.as_slice(),
+        "video/mp4",
+        bytes.len(),
+        public,
+        Format::A,
+    )?;
+    let local = archive.snapshot("old local media", Default::default())?;
+    let chunk = archive.read(&local, video, "read")?.inputs[0].target;
+    assert_eq!(source.blob(bytes, public)?, chunk);
+    let origin = source.snapshot_id("point custodian", Default::default())?;
+    archive.import_member(origin, &source.export_member(origin, chunk)?)?;
+
+    let options = SearchOptions {
+        mode: SearchMode::Semantic,
+        kind: Some(Kind::Descriptor),
+        ..Default::default()
+    };
+    let mut model = SyntheticMedia(b"historical media model");
+    assert_eq!(
+        archive
+            .find(&local, "bridge", options, Some(&mut model))?
+            .hits[0]
+            .id,
+        video
+    );
+    drop(archive);
+    let database = rusqlite::Connection::open(&path)?;
+    database.execute_batch(
+        "INSERT INTO archive_member_access SELECT * FROM archive_point_access;
+         DROP TABLE archive_point_access;
+         DROP TRIGGER archive_catalog_append;
+         DROP TABLE archive_point_only;
+         CREATE TRIGGER archive_catalog_append AFTER INSERT ON objects
+         BEGIN INSERT OR IGNORE INTO archive_deposits(id) VALUES(NEW.id); END;",
+    )?;
+    drop(database);
+
+    let verify = |archive: Archive, model: &mut SyntheticMedia| -> Result<()> {
+        assert!(archive.resolve(&local, chunk, "read").is_err());
+        assert_eq!(archive.resolve_head(origin, chunk, "read")?, bytes);
+        let report =
+            archive.search_prepared(&local, SearchInput::Text("bridge"), options, Some(model))?;
+        assert!(report.hits.is_empty() && report.limited_coverage);
+        assert_eq!(report.vector_products, 0);
+        Ok(())
+    };
+    verify(Archive::open_for_read(&path)?, &mut model)?;
+    verify(Archive::open(&path)?, &mut model)?;
+    Ok(())
+}
+
+#[test]
 fn a_failed_media_embedding_preserves_other_hits_and_is_not_retried_per_query() -> Result<()> {
-    use naome_protocol::search::{EmbeddedMedia, MediaInput, SearchInput};
     struct Failing {
         text: TestEmbedder,
         attempts: usize,

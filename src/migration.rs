@@ -3,7 +3,7 @@ pub use equivalence::Equivalence;
 
 use crate::{
     profile::{Document, Kind, PROFILE, PUBLIC, link},
-    store::{Archive, ManifestEncoding, Snapshot},
+    store::{Archive, InventoryReader, ManifestEncoding, Snapshot},
     wire::{Format, Id, Record},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -22,8 +22,11 @@ pub struct Migration {
 fn rewrite(mut r: Record, pairs: &BTreeMap<Id, Id>) -> Result<Record> {
     let doc = Document::decode(&r)?;
     for (e, l) in r.edges.iter_mut().zip(&doc.inputs) {
-        // Detached attestations and historic inventories continue to name the original bytes.
-        if doc.kind == Kind::Attestation && l.role == "signed-original" {
+        // Historical provenance continues to name the original bytes.
+        if matches!(
+            (doc.kind, l.role.as_str()),
+            (Kind::Attestation, "signed-original") | (Kind::Assessment, "reassessed-from")
+        ) {
             continue;
         }
         if let Some(id) = pairs.get(&e.target) {
@@ -160,7 +163,16 @@ impl Archive {
         id: Id,
         encoding: ManifestEncoding,
     ) -> Result<BTreeMap<Id, Id>> {
-        let d = self.read(s, id, "read")?;
+        self.verify_mapping_in(&mut InventoryReader::materialized(self, s), id, encoding)
+    }
+
+    pub(crate) fn verify_mapping_in(
+        &self,
+        view: &mut InventoryReader<'_>,
+        id: Id,
+        encoding: ManifestEncoding,
+    ) -> Result<BTreeMap<Id, Id>> {
+        let d = view.read(id)?;
         ensure!(
             d.kind == Kind::Mapping
                 && d.scope == "research-native-1"
@@ -177,8 +189,8 @@ impl Archive {
                     }),
             "unknown mapping kit"
         );
-        let source = self.linked_snapshot(s, d.one("source-inventory")?, encoding)?;
-        let target = self.linked_snapshot(s, d.one("target-inventory")?, encoding)?;
+        let source = self.linked_snapshot_in(view, d.one("source-inventory")?, encoding)?;
+        let target = self.linked_snapshot_in(view, d.one("target-inventory")?, encoding)?;
         let old = d.roles("source").collect::<Vec<_>>();
         let new = d.roles("target").collect::<Vec<_>>();
         ensure!(old.len() == new.len(), "unpaired endpoints");
@@ -195,14 +207,14 @@ impl Archive {
                     && target.objects.contains(&b),
                 "endpoint outside inventory"
             );
-            let r = Record::decode(&self.resolve(s, a, "read")?, f)?;
+            let r = Record::decode(&view.resolve(a)?.0, f)?;
             for dep in r.inputs() {
                 ensure!(source.objects.contains(&dep), "missing source dependency");
-                self.resolve(s, dep, "read")?;
+                view.resolve(dep)?;
             }
             let expected = rewrite(r, &pairs)?;
             ensure!(
-                expected.encode(format) == self.resolve(s, b, "read")?,
+                expected.encode(format) == view.resolve(b)?.0,
                 "translation does not preserve referenced structure"
             );
         }

@@ -119,12 +119,21 @@ fn stream_budget_commits_the_complete_input_or_nothing() -> Result<()> {
 #[test]
 fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -> Result<()> {
     use super::ExchangePage;
-    use crate::{profile::PUBLIC, store::Archive, wire::Id};
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::Archive,
+        wire::Id,
+    };
     let origin = Archive::memory()?;
     let public = Id::blob(PUBLIC);
     let mut readings = Vec::new();
     for ordinal in 0..75u32 {
-        readings.push(origin.blob(&ordinal.to_be_bytes(), public)?);
+        let access = if ordinal == 1 {
+            Id::blob(READ_ONLY)
+        } else {
+            public
+        };
+        readings.push(origin.blob(&ordinal.to_be_bytes(), access)?);
     }
     let snapshot = origin.snapshot("paged read", Default::default())?;
     let head = snapshot.id()?;
@@ -139,25 +148,62 @@ fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -
     let first = fetch(None)?;
     let next = fetch(first.progress().continuation)?;
     let mut receiver = Archive::open(&path)?;
-    assert!(receiver.import_exchange_page(&next).is_err());
+    assert!(
+        receiver
+            .import_pinned_exchange_page(Id::blob(b"other snapshot"), &first)
+            .is_err()
+    );
+    assert!(receiver.import_exchange_page(&first).is_err());
+    assert!(receiver.import_pinned_exchange_page(head, &next).is_err());
     assert!(receiver.head(head).is_err());
-    let initial = receiver.import_exchange_page(&first)?;
+    let initial = receiver.import_pinned_exchange_page(head, &first)?;
     assert_eq!(initial.continuation, first.progress().continuation);
+    let status = &Archive::open_for_read(&path)?.exchange_import_status(head)?[0];
+    assert!(status.verified);
+    assert_eq!(status.cursor, initial.continuation);
+    assert_eq!(status.examined, 6);
+    assert_eq!(status.supplied, Some(initial.packets as u64));
+    assert!(!status.complete);
+    assert!(
+        readings
+            .iter()
+            .all(|id| receiver.raw(*id).unwrap().is_none())
+    );
     assert!(receiver.head(head).is_err());
+    assert!(receiver.backlink_index(head)?.is_none());
     drop(receiver);
     let mut receiver = Archive::open(&path)?;
-    let mut progress = receiver.import_exchange_page(&next)?;
+    let local = receiver.snapshot("local research", Default::default())?;
+    assert!(readings.iter().all(|id| !local.objects.contains(id)));
+    let mut progress = receiver.import_pinned_exchange_page(head, &next)?;
     assert_eq!(
-        receiver.import_exchange_page(&first)?.continuation,
+        receiver
+            .import_pinned_exchange_page(head, &first)?
+            .continuation,
         progress.continuation
     );
     while !progress.complete {
         assert!(receiver.head(head).is_err());
-        progress = receiver.import_exchange_page(&fetch(progress.continuation)?)?;
+        progress = receiver.import_pinned_exchange_page(head, &fetch(progress.continuation)?)?;
     }
-    assert!(receiver.import_exchange_page(&next)?.complete);
+    assert!(receiver.import_pinned_exchange_page(head, &next)?.complete);
     assert!(progress.continuation.is_none());
+    let status = &receiver.exchange_import_status(head)?[0];
+    assert!(status.complete);
+    assert_eq!(status.examined, snapshot.objects.len() as u64);
+    assert_eq!(status.supplied, Some(status.examined - 1));
+    assert_eq!(status.omitted, Some(1));
+    assert!(receiver.backlink_index(head)?.unwrap().complete);
     assert_eq!(receiver.head(head)?.objects, snapshot.objects);
+    assert!(receiver.resolve_head(head, readings[1], "train").is_err());
+    let mut relay = Archive::memory()?;
+    let forwarded = receiver.export_exchange_page(head, None, 6)?;
+    assert_eq!(
+        relay
+            .import_pinned_exchange_page(head, &forwarded)?
+            .continuation,
+        first.progress().continuation
+    );
     for (ordinal, id) in readings.into_iter().enumerate() {
         if id == withheld {
             assert!(receiver.resolve_head(head, id, "read").is_err());
@@ -168,6 +214,108 @@ fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn verified_exchange_with_an_omitted_record_keeps_backlink_coverage_open() -> Result<()> {
+    use crate::{
+        profile::{Document, Kind, PUBLIC, link},
+        store::Archive,
+        wire::{Format, Id},
+    };
+    use serde_json::json;
+
+    let sender = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let question = sender.document(
+        &Document::new(Kind::Question, "example", "scope", json!({}), vec![])?,
+        Format::A,
+        public,
+    )?;
+    let plan = sender.document(
+        &Document::new(
+            Kind::Plan,
+            "example",
+            "scope",
+            json!({}),
+            vec![link("question", question)],
+        )?,
+        Format::A,
+        public,
+    )?;
+    let head = sender.snapshot_id("notebook", Default::default())?;
+    // Model a sender whose inventory is pinned but whose record bytes are unavailable.
+    sender.db.execute(
+        "UPDATE objects SET data=NULL WHERE id=?",
+        [plan.to_string()],
+    )?;
+
+    let mut receiver = Archive::memory()?;
+    let page = sender.export_exchange_page(head, None, 64)?;
+    assert!(receiver.import_pinned_exchange_page(head, &page)?.complete);
+    assert!(!receiver.backlink_index(head)?.unwrap().complete);
+    assert!(
+        receiver
+            .question_at(Some(head), question, 2)?
+            .limited_coverage
+    );
+    assert!(receiver.read_head(head, plan, "read").is_err());
+    Ok(())
+}
+
+#[test]
+fn historical_ranges_require_trusted_compatibility_mode() -> Result<()> {
+    use crate::{profile::PUBLIC, store::Archive, wire::Id};
+    let source = Archive::memory()?;
+    let reading = source.blob(b"historical reading", Id::blob(PUBLIC))?;
+    let snapshot =
+        source.selected_snapshot("historic sender", Default::default(), [reading].into())?;
+    let head = snapshot.id()?;
+    let mut receiver = Archive::memory()?;
+    let first = source.export_legacy_exchange_page(head, None, 1)?;
+    assert!(receiver.import_pinned_exchange_page(head, &first).is_err());
+    let progress = receiver.import_legacy_exchange_page(head, &first)?;
+    assert!(!progress.complete);
+    let next = source.export_legacy_exchange_page(head, progress.continuation, 1)?;
+    assert!(receiver.import_legacy_exchange_page(head, &next)?.complete);
+    let verified = source.export_exchange_page(head, None, 1)?;
+    assert!(
+        !receiver
+            .import_pinned_exchange_page(head, &verified)?
+            .complete
+    );
+    let sessions = receiver.exchange_import_status(head)?;
+    assert_eq!(sessions.len(), 2);
+    assert!(sessions[0].verified && !sessions[0].complete);
+    assert!(!sessions[1].verified && sessions[1].complete);
+    assert_eq!(sessions[1].supplied, Some(snapshot.objects.len() as u64));
+    assert_eq!(
+        receiver.resolve_head(head, reading, "read")?,
+        b"historical reading"
+    );
+    Ok(())
+}
+
+#[test]
+fn custody_witness_distinguishes_read_only_and_public_evidence() -> Result<()> {
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::{Archive, custody::tree::Tree},
+        wire::Id,
+    };
+    let archive = Archive::memory()?;
+    let read_only = Id::blob(READ_ONLY);
+    let reading = archive.blob(b"permitted for reading", read_only)?;
+    let snapshot =
+        archive.selected_snapshot("access check", Default::default(), [reading].into())?;
+    let descriptor = archive.custody_head(snapshot.id()?)?;
+    let mut tree = Tree::new(&archive.db);
+    super::page::verify_access(&descriptor, reading, read_only, |id| tree.read(id))?;
+    assert!(
+        super::page::verify_access(&descriptor, reading, Id::blob(PUBLIC), |id| tree.read(id))
+            .is_err()
+    );
     Ok(())
 }
 
@@ -198,7 +346,7 @@ fn disclosed_historical_inventory_is_reachable_in_each_read_exchange() -> Result
                 let mut cursor = None;
                 loop {
                     let page = origin.export_exchange_page(head, cursor, 1)?;
-                    let ack = receiver.import_exchange_page(&page)?;
+                    let ack = receiver.import_pinned_exchange_page(head, &page)?;
                     if ack.complete {
                         break;
                     }
@@ -237,5 +385,627 @@ fn a_witness_needs_a_verified_inventory_before_commit() -> Result<()> {
         assert!(pending.finish().is_err());
     }
     assert_eq!(count(&receiver)?, before);
+    Ok(())
+}
+
+#[test]
+fn pending_imports_share_bytes_and_respect_intervening_admission_and_withdrawal() -> Result<()> {
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::Archive,
+        wire::Id,
+    };
+    let source = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let mut payloads = std::collections::BTreeMap::new();
+    for n in 0..10u8 {
+        let bytes = vec![n; 24];
+        payloads.insert(source.blob(&bytes, public)?, bytes);
+    }
+    let (&payload, bytes) = payloads.first_key_value().unwrap();
+    let first = source.snapshot("first transfer", Default::default())?;
+    let second = source.snapshot("second transfer", Default::default())?;
+    let heads = [first.id()?, second.id()?];
+    let limit = first.objects.len() - 1;
+    let mut receiver = Archive::memory()?;
+    let mut pages = Vec::new();
+    for head in heads {
+        let start = source.export_exchange_page(head, None, limit)?;
+        let progress = receiver.import_pinned_exchange_page(head, &start)?;
+        assert!(!progress.complete);
+        assert!(receiver.raw(payload)?.is_none());
+        pages.push((
+            start,
+            source.export_exchange_page(head, progress.continuation, limit)?,
+        ));
+    }
+    let copies: i64 = receiver.db.query_row(
+        "SELECT (SELECT count(*) FROM archive_extent_blocks WHERE id=?1)
+              + (SELECT count(*) FROM archive_extents WHERE id=?1 AND inline_data IS NOT NULL)",
+        [payload.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(copies, 1);
+
+    assert_eq!(receiver.blob(bytes, public)?, payload);
+    assert_eq!(&receiver.resolve_local(payload)?, bytes);
+    receiver.withdraw(payload)?;
+    for (head, (initial, last)) in heads.into_iter().zip(&pages) {
+        assert!(
+            !receiver
+                .import_pinned_exchange_page(head, initial)?
+                .complete
+        );
+        assert!(receiver.import_pinned_exchange_page(head, last)?.complete);
+        assert!(
+            receiver
+                .import_pinned_exchange_page(head, initial)?
+                .complete
+        );
+        assert!(receiver.resolve_head(head, payload, "read").is_err());
+        let status = &receiver.exchange_import_status(head)?[0];
+        assert_eq!(status.supplied, Some(status.examined));
+    }
+    let retained: bool = receiver.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM archive_extents WHERE id=?1)
+             OR EXISTS(SELECT 1 FROM archive_extent_blocks WHERE id=?1)",
+        [payload.to_string()],
+        |row| row.get(0),
+    )?;
+    assert!(!retained);
+
+    for verified in [true, false] {
+        let mut conflicted = Archive::memory()?;
+        let head = heads[0];
+        let export = |after| {
+            if verified {
+                source.export_exchange_page(head, after, limit)
+            } else {
+                source.export_legacy_exchange_page(head, after, limit)
+            }
+        };
+        let import = |archive: &mut Archive, page: &_| {
+            if verified {
+                archive.import_pinned_exchange_page(head, page)
+            } else {
+                archive.import_legacy_exchange_page(head, page)
+            }
+        };
+        let initial = export(None)?;
+        let pending = import(&mut conflicted, &initial)?;
+        conflicted.blob(bytes, Id::blob(READ_ONLY))?;
+        let last = export(pending.continuation)?;
+        assert!(import(&mut conflicted, &last)?.complete);
+        assert!(import(&mut conflicted, &initial)?.complete);
+        let status = &conflicted.exchange_import_status(head)?[0];
+        assert_eq!(status.omitted, Some(1));
+        assert_eq!(status.supplied, Some(status.examined - 1));
+        assert!(conflicted.resolve_head(head, payload, "read").is_err());
+        assert_eq!(conflicted.resolve_local(payload)?, *bytes);
+        for &other in payloads.keys().filter(|&&id| id != payload) {
+            assert_eq!(
+                conflicted.resolve_head(head, other, "read")?,
+                payloads[&other]
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_pending_import_resumes_from_the_previous_blob_staging_layout() -> Result<()> {
+    use crate::{
+        profile::{Document, Kind, PUBLIC},
+        store::Archive,
+        wire::{Format, Id},
+    };
+    let source = Archive::memory()?;
+    for n in 0..12 {
+        source.document(
+            &Document::new(
+                Kind::Question,
+                "historical staging",
+                "migration",
+                serde_json::json!({"statement":format!("Question {n}")}),
+                vec![],
+            )?,
+            Format::A,
+            Id::blob(PUBLIC),
+        )?;
+    }
+    let snapshot = source.snapshot("archive migration", Default::default())?;
+    let head = snapshot.id()?;
+    let completed = Id::blob(b"old completed head");
+    let page = source.export_exchange_page(head, None, 8)?;
+    let json = serde_json::to_value(&page)?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("previous.sqlite");
+    let mut receiver = Archive::open(&path)?;
+    let initial = receiver.import_pinned_exchange_page(head, &page)?;
+    assert!(!initial.complete);
+
+    // Recreate the exact prior checkpoint layout from the accepted page.
+    receiver.db.execute_batch(
+        "ALTER TABLE archive_exchange_sessions DROP COLUMN supplied;
+         CREATE TABLE archive_exchange_packets(
+            head TEXT NOT NULL, verified INTEGER NOT NULL, id TEXT NOT NULL, access TEXT NOT NULL,
+            data BLOB NOT NULL, PRIMARY KEY(head,verified,id)
+         ) WITHOUT ROWID;
+         DROP TABLE archive_exchange_staged;
+         DELETE FROM archive_extent_blocks;
+         DELETE FROM archive_extents;
+         ALTER TABLE archive_extents DROP COLUMN inline_data;",
+    )?;
+    receiver.db.execute(
+        "INSERT INTO archive_exchange_sessions(head,verified,cursor,seen,complete)
+         VALUES(?,1,NULL,1,1)",
+        [completed.to_string()],
+    )?;
+    for packet in json["packets"].as_array().unwrap() {
+        receiver.db.execute(
+            "INSERT INTO archive_exchange_packets VALUES(?,1,?,?,?)",
+            rusqlite::params![
+                head.to_string(),
+                packet["id"].as_str().unwrap(),
+                packet["access"].as_str().unwrap(),
+                hex::decode(packet["hex"].as_str().unwrap())?,
+            ],
+        )?;
+    }
+    drop(receiver);
+
+    let reader = Archive::open_for_read(&path)?;
+    let before = reader.exchange_import_status(head)?;
+    assert_eq!(before[0].supplied, Some(initial.packets as u64));
+    assert_eq!(reader.exchange_import_status(completed)?[0].supplied, None);
+    drop(reader);
+
+    let mut receiver = Archive::open(&path)?;
+    assert_eq!(receiver.exchange_import_status(head)?, before);
+    assert_eq!(receiver.exchange_import_status(completed)?[0].omitted, None);
+    assert!(receiver.head(head).is_err());
+    let last = source.export_exchange_page(head, initial.continuation, 64)?;
+    assert!(receiver.import_pinned_exchange_page(head, &last)?.complete);
+    assert_eq!(receiver.head(head)?.objects, snapshot.objects);
+    for id in snapshot
+        .objects
+        .iter()
+        .copied()
+        .filter(|id| id.format().is_some())
+    {
+        assert_eq!(
+            receiver.resolve_head(head, id, "read")?,
+            source.resolve_head(head, id, "read")?
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_read_handle_keeps_resolving_payloads_across_the_extent_upgrade() -> Result<()> {
+    use crate::{
+        profile::PUBLIC,
+        store::{Archive, custody::BLOCK},
+        wire::Id,
+    };
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("receiver.sqlite");
+    let public = Id::blob(PUBLIC);
+    let receiver = Archive::open(&path)?;
+    let large = vec![0x75; BLOCK + 1];
+    let blocked = receiver.blob(&large, public)?;
+    receiver
+        .db
+        .execute_batch("ALTER TABLE archive_extents DROP COLUMN inline_data;")?;
+    drop(receiver);
+
+    let reader = Archive::open_for_read(&path)?;
+    assert_eq!(reader.resolve_local(blocked)?, large);
+
+    let source = Archive::memory()?;
+    let tiny_bytes = b"short observation";
+    let tiny = source.blob(tiny_bytes, public)?;
+    let empty = source.blob(b"", public)?;
+    let head = source.snapshot_id("inline transfer", Default::default())?;
+    let mut receiver = Archive::open(&path)?;
+    let page = source.export_exchange_page(head, None, 64)?;
+    assert!(receiver.import_pinned_exchange_page(head, &page)?.complete);
+
+    assert_eq!(reader.resolve_head(head, tiny, "read")?, tiny_bytes);
+    assert_eq!(reader.resolve_head(head, empty, "read")?, b"");
+    assert_eq!(reader.resolve_local(blocked)?, large);
+    receiver.withdraw(tiny)?;
+    assert!(reader.resolve_head(head, tiny, "read").is_err());
+    Ok(())
+}
+
+#[test]
+fn omitted_blobs_cannot_inherit_a_conflicting_local_acl() -> Result<()> {
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::Archive,
+        wire::Id,
+    };
+    let source = Archive::memory()?;
+    let bytes = b"read-only from the publisher, public only in the local archive";
+    let payload = source.blob(bytes, Id::blob(READ_ONLY))?;
+    let historical = source.snapshot("publisher historical snapshot", Default::default())?;
+    let historical_id = source.deposit_manifest(&historical)?;
+    let cut = source.snapshot("publisher", [historical_id].into())?;
+    let head = cut.id()?;
+    source.withdraw(payload)?;
+
+    let mut receiver = Archive::memory()?;
+    assert_eq!(receiver.blob(bytes, Id::blob(PUBLIC))?, payload);
+    let local = receiver.snapshot("local", Default::default())?;
+    let legacy = source.export_legacy_exchange_page(head, None, 64)?;
+    assert!(
+        receiver
+            .import_legacy_exchange_page(head, &legacy)?
+            .complete
+    );
+    receiver.release(head)?;
+    assert_eq!(receiver.released_member(head, payload)?.bytes, bytes);
+    let page = source.export_exchange_page(head, None, 64)?;
+    assert!(receiver.import_pinned_exchange_page(head, &page)?.complete);
+    assert!(receiver.has_observed_release(head)?);
+    assert!(receiver.releases()?.is_empty());
+    assert!(receiver.released_member(head, payload).is_err());
+    let scoped = receiver.head(head)?;
+    assert!(receiver.resolve_head(head, payload, "train").is_err());
+    assert!(receiver.resolve(&scoped, payload, "train").is_err());
+    assert!(receiver.readable(&scoped, payload).is_err());
+    let linked = receiver.linked_snapshot(
+        &scoped,
+        historical_id,
+        crate::store::ManifestEncoding::Canonical,
+    )?;
+    assert!(receiver.resolve(&linked, payload, "train").is_err());
+    assert_eq!(receiver.resolve(&local, payload, "train")?, bytes);
+    Ok(())
+}
+
+#[test]
+fn point_grant_restores_only_read_access_after_verified_paged_import() -> Result<()> {
+    use crate::{profile::PUBLIC, store::Archive, wire::Id};
+    let source = Archive::memory()?;
+    let mut payloads = std::collections::BTreeMap::new();
+    for n in 0..160 {
+        let bytes = format!("supplemental observation {n}").into_bytes();
+        payloads.insert(source.blob(&bytes, Id::blob(PUBLIC))?, bytes);
+    }
+    let head = source.snapshot_id("supplemental point grant", Default::default())?;
+    let disclosures: Vec<_> = payloads
+        .keys()
+        .step_by(16)
+        .map(|&id| Ok((id, source.export_member(head, id)?)))
+        .collect::<Result<_>>()?;
+    for &id in payloads.keys() {
+        source.withdraw(id)?;
+    }
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("point grant.sqlite");
+    let mut receiver = Archive::open(&path)?;
+    let page = source.export_exchange_page(head, None, 1024)?;
+    assert!(receiver.import_pinned_exchange_page(head, &page)?.complete);
+    let (payload, disclosure) = disclosures
+        .into_iter()
+        .find(|(id, _)| {
+            receiver
+                .require_exchange_access(head, *id, Id::blob(PUBLIC), false)
+                .is_err()
+        })
+        .expect("a custody leaf omitted from the paged exchange");
+    let bytes = &payloads[&payload];
+    assert_eq!(receiver.blob(bytes, Id::blob(PUBLIC))?, payload);
+    assert!(receiver.resolve_head(head, payload, "read").is_err());
+    let status = receiver.exchange_import_status(head)?;
+
+    assert_eq!(receiver.import_member(head, &disclosure)?, payload);
+    assert_eq!(receiver.import_member(head, &disclosure)?, payload);
+    assert_eq!(receiver.exchange_import_status(head)?, status);
+    let snapshot = receiver.head(head)?;
+    assert_eq!(receiver.resolve(&snapshot, payload, "read")?, *bytes);
+    assert!(receiver.resolve(&snapshot, payload, "train").is_err());
+    assert_eq!(receiver.inventory_reader(head)?.resolve(payload)?.0, *bytes);
+    drop(receiver);
+    let receiver = Archive::open_for_read(&path)?;
+    assert_eq!(receiver.resolve_head(head, payload, "read")?, *bytes);
+    assert!(receiver.resolve_head(head, payload, "train").is_err());
+    drop(receiver);
+
+    let receiver = Archive::open(&path)?;
+    receiver.db.execute_batch(
+        "INSERT INTO archive_member_access SELECT * FROM archive_point_access;
+         DROP TABLE archive_point_access;",
+    )?;
+    drop(receiver);
+    let historical = Archive::open_for_read(&path)?;
+    assert_eq!(historical.resolve_head(head, payload, "read")?, *bytes);
+    assert!(historical.resolve_head(head, payload, "train").is_err());
+    Ok(())
+}
+
+#[test]
+fn point_only_bytes_do_not_become_independently_admitted_until_a_full_packet_arrives() -> Result<()>
+{
+    use crate::{profile::PUBLIC, store::Archive, wire::Id};
+    let source = Archive::memory()?;
+    let bytes = b"omitted observation with its ACL already authenticated";
+    let id = source.blob(bytes, Id::blob(PUBLIC))?;
+    let head = source.snapshot_id("complete disclosure", Default::default())?;
+    let other = source.snapshot_id("separate disclosure", Default::default())?;
+    let admission = source.snapshot_id("independent admission", Default::default())?;
+    let point = source.export_member(head, id)?;
+    let full_page = source.export_exchange_page(admission, None, 64)?;
+    source.withdraw(id)?;
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("recipient.sqlite");
+    let mut receiver = Archive::open(&path)?;
+    for cut in [head, other] {
+        let page = source.export_exchange_page(cut, None, 64)?;
+        assert!(receiver.import_pinned_exchange_page(cut, &page)?.complete);
+        receiver.require_exchange_access(cut, id, Id::blob(PUBLIC), false)?;
+    }
+    assert_eq!(receiver.import_member(head, &point)?, id);
+    assert_eq!(receiver.resolve_head(head, id, "read")?, bytes);
+    assert!(receiver.resolve_head(head, id, "train").is_err());
+    assert!(receiver.resolve_head(other, id, "read").is_err());
+    let snapshot = receiver.head(head)?;
+    assert!(receiver.resolve(&snapshot, id, "train").is_err());
+    assert!(receiver.release(head).is_err());
+    assert!(!receiver.has_observed_release(head)?);
+    // A release registered by an older writer still cannot deliver the point-only payload.
+    receiver
+        .db
+        .execute("INSERT INTO releases VALUES(?)", [head.to_string()])?;
+    assert!(receiver.released_manifest(head).is_err());
+    assert!(receiver.released_member(head, id).is_err());
+    assert!(
+        !receiver
+            .snapshot("independent local inventory", Default::default())?
+            .objects
+            .contains(&id)
+    );
+    let relayed = serde_json::to_value(receiver.export_exchange_page(head, None, 64)?)?;
+    assert!(
+        relayed["packets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|packet| packet["id"] != serde_json::json!(id))
+    );
+    receiver.db.execute_batch(
+        "DROP TRIGGER archive_catalog_append;
+         DROP TABLE archive_point_only;
+         CREATE TRIGGER archive_catalog_append AFTER INSERT ON objects
+         BEGIN INSERT OR IGNORE INTO archive_deposits(id) VALUES(NEW.id); END;",
+    )?;
+    drop(receiver);
+    let legacy_reader = Archive::open_for_read(&path)?;
+    assert_eq!(legacy_reader.resolve_head(head, id, "read")?, bytes);
+    assert!(legacy_reader.resolve_head(head, id, "train").is_err());
+    drop(legacy_reader);
+    let mut receiver = Archive::open(&path)?;
+    assert_eq!(receiver.resolve_head(head, id, "read")?, bytes);
+    assert!(receiver.resolve_head(head, id, "train").is_err());
+
+    assert!(
+        receiver
+            .import_pinned_exchange_page(admission, &full_page)?
+            .complete
+    );
+    assert_eq!(receiver.resolve_head(head, id, "train")?, bytes);
+    assert_eq!(receiver.resolve_head(other, id, "read")?, bytes);
+    receiver.release(head)?;
+    let mut replica = crate::store::sharing::Replica::new(head, receiver.released_manifest(head)?)?;
+    while let Some(member) = replica.next_member() {
+        replica.accept(member, receiver.released_member(head, member)?)?;
+    }
+    let replica_store = Archive::memory()?;
+    replica.commit(&replica_store)?;
+    assert_eq!(replica_store.resolve_head(head, id, "train")?, bytes);
+    assert!(
+        receiver
+            .snapshot("independent local inventory", Default::default())?
+            .objects
+            .contains(&id)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_completed_page_retry_refreshes_prepared_search_gaps() -> Result<()> {
+    use crate::{
+        profile::PUBLIC,
+        search::{SearchInput, SearchOptions},
+        store::Archive,
+        wire::{Format, Id},
+    };
+    let source = Archive::memory()?;
+    let mut receiver = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let mut records = Vec::new();
+    for n in 0..96 {
+        let text = format!("retrywitness{n}");
+        let capture = |archive: &Archive| {
+            archive.capture(text.as_bytes(), "text/plain", text.len(), public, Format::A)
+        };
+        let id = capture(&source)?;
+        assert_eq!(capture(&receiver)?, id);
+        records.push((id, text));
+    }
+    let head = source.snapshot_id("retry witnesses", Default::default())?;
+    let mirror = source.snapshot_id("shared retry witnesses", Default::default())?;
+    assert_eq!(
+        source.custody_head(head)?.tree,
+        source.custody_head(mirror)?.tree
+    );
+    let complete = source.export_exchange_page(head, None, 1024)?;
+    for (_, text) in &records {
+        source.withdraw(Id::blob(text.as_bytes()))?;
+    }
+    for cut in [head, mirror] {
+        let omitted = source.export_exchange_page(cut, None, 1024)?;
+        assert!(
+            receiver
+                .import_pinned_exchange_page(cut, &omitted)?
+                .complete
+        );
+    }
+    let (id, text) = records
+        .into_iter()
+        .find(|(_, text)| {
+            receiver
+                .resolve_head(head, Id::blob(text.as_bytes()), "read")
+                .is_err()
+        })
+        .expect("a payload with an omitted access witness");
+    let options = SearchOptions::default();
+    let status = receiver.exchange_import_status(head)?;
+    let mirror_status = receiver.exchange_import_status(mirror)?;
+    let query = SearchInput::Text(&text);
+    for cut in [head, mirror] {
+        let snapshot = receiver.head(cut)?;
+        let prepared = receiver.prepare_search(&snapshot, 128, None)?;
+        assert!(prepared.index_complete && prepared.limited_coverage);
+        assert!(
+            receiver
+                .search_prepared(&snapshot, query, options, None)?
+                .hits
+                .iter()
+                .all(|hit| hit.id != id)
+        );
+    }
+
+    assert!(
+        receiver
+            .import_pinned_exchange_page(head, &complete)?
+            .complete
+    );
+    assert_eq!(receiver.exchange_import_status(head)?, status);
+    assert_eq!(receiver.exchange_import_status(mirror)?, mirror_status);
+    for cut in [head, mirror] {
+        assert_eq!(
+            receiver.resolve_head(cut, Id::blob(text.as_bytes()), "read")?,
+            text.as_bytes()
+        );
+        let snapshot = receiver.head(cut)?;
+        let prepared = receiver.prepare_search(&snapshot, 128, None)?;
+        assert!(prepared.index_complete && !prepared.limited_coverage);
+        assert!(
+            receiver
+                .search_prepared(&snapshot, query, options, None)?
+                .hits
+                .iter()
+                .any(|hit| hit.id == id)
+        );
+    }
+    assert!(
+        receiver
+            .import_pinned_exchange_page(head, &complete)?
+            .complete
+    );
+    assert_eq!(receiver.exchange_import_status(head)?, status);
+    let snapshot = receiver.head(head)?;
+    assert!(
+        receiver
+            .search_prepared(&snapshot, query, options, None)?
+            .index_complete
+    );
+    Ok(())
+}
+
+#[test]
+fn a_legacy_retry_retains_the_access_of_a_previously_omitted_conflict() -> Result<()> {
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::Archive,
+        wire::Id,
+    };
+    let source = Archive::memory()?;
+    let bytes = b"sender read-only, independently public";
+    let id = source.blob(bytes, Id::blob(READ_ONLY))?;
+    let head = source.snapshot_id("legacy sender", Default::default())?;
+    let original = source.export_legacy_exchange_page(head, None, 64)?;
+    source.withdraw(id)?;
+    let omitted = source.export_legacy_exchange_page(head, None, 64)?;
+    let mut receiver = Archive::memory()?;
+    receiver.blob(bytes, Id::blob(PUBLIC))?;
+    assert!(
+        receiver
+            .import_legacy_exchange_page(head, &omitted)?
+            .complete
+    );
+    let checkpoint = receiver.exchange_import_status(head)?;
+    receiver.release(head)?;
+    assert_eq!(receiver.released_member(head, id)?.bytes, bytes);
+    let before = receiver.catalog_state()?;
+    assert_eq!(before.available, 1);
+    assert!(
+        receiver
+            .import_legacy_exchange_page(head, &original)?
+            .complete
+    );
+    assert!(
+        receiver
+            .import_legacy_exchange_page(head, &original)?
+            .complete
+    );
+    assert_eq!(receiver.exchange_import_status(head)?, checkpoint);
+    assert!(receiver.resolve_head(head, id, "train").is_err());
+    assert!(receiver.resolve_head(head, id, "read").is_err());
+    assert_eq!(receiver.resolve_local(id)?, bytes);
+    assert!(receiver.has_observed_release(head)?);
+    assert!(receiver.release_page(None)?.heads.is_empty());
+    assert!(receiver.announcements_after(0)?.is_empty());
+    assert!(receiver.releases()?.is_empty());
+    assert!(receiver.released_member(head, id).is_err());
+    assert_eq!(receiver.catalog_state()?.revision, before.revision + 1);
+    Ok(())
+}
+
+#[test]
+fn conflicting_packet_does_not_advance_either_exchange_mode() -> Result<()> {
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::Archive,
+        wire::Id,
+    };
+    let source = Archive::memory()?;
+    let bytes = b"access conflict before the first page";
+    let key = source.blob(bytes, Id::blob(READ_ONLY))?;
+    let cut = source.snapshot("source", Default::default())?;
+    let head = cut.id()?;
+    for verified in [true, false] {
+        let mut receiver = Archive::memory()?;
+        receiver.blob(bytes, Id::blob(PUBLIC))?;
+        let export = |source: &Archive| {
+            if verified {
+                source.export_exchange_page(head, None, 64)
+            } else {
+                source.export_legacy_exchange_page(head, None, 64)
+            }
+        };
+        let import = |receiver: &mut Archive, page: &_| {
+            if verified {
+                receiver.import_pinned_exchange_page(head, page)
+            } else {
+                receiver.import_legacy_exchange_page(head, page)
+            }
+        };
+        let page = export(&source)?;
+        assert!(import(&mut receiver, &page).is_err());
+        assert!(receiver.exchange_import_status(head)?.is_empty());
+        assert!(receiver.head(head).is_err());
+    }
+    source.withdraw(key)?;
+    let mut receiver = Archive::memory()?;
+    receiver.blob(bytes, Id::blob(PUBLIC))?;
+    let page = source.export_exchange_page(head, None, 64)?;
+    assert!(receiver.import_pinned_exchange_page(head, &page)?.complete);
+    assert!(receiver.resolve_head(head, key, "read").is_err());
     Ok(())
 }

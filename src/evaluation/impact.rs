@@ -218,8 +218,7 @@ impl Archive {
         };
         let withdrawal =
             !calibration && n.fields.get("action").and_then(Value::as_str) == Some("withdraw");
-        let (inventory, mut frontier, unscanned) =
-            ReadInventory::bounded(self, s, "read", budget, None, |_| true);
+        let (inventory, mut frontier, unscanned) = ReadInventory::bounded(self, s, budget);
         if !compact && let Some(tail) = unscanned {
             tail.expand(s, &mut frontier);
         }
@@ -228,7 +227,7 @@ impl Archive {
         let mut correction_authority = None;
         if let Some(policy_id) = policy
             && unscanned.is_none()
-            && frontier.is_empty()
+            && (frontier.is_empty() || input_correction.is_some())
         {
             let policy = self.read(s, policy_id, "read")?;
             ensure!(

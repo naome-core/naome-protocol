@@ -34,6 +34,7 @@ struct Scope<'a> {
     options: SearchOptions<'a>,
     model: &'a str,
     positions: Option<(i64, i64)>,
+    entry_allowed: &'a mut dyn FnMut(i64) -> bool,
 }
 
 type Match = (Id, i64, i64, f32);
@@ -72,6 +73,7 @@ pub(super) fn semantic_passages(
     semantic: SemanticQuery<'_>,
     bound: usize,
     work: &mut VectorWork,
+    entry_allowed: &mut dyn FnMut(i64) -> bool,
 ) -> Result<Vec<Match>> {
     let dimensions = semantic.vectors[0].len();
     let query_count = semantic.vectors.len().min(options.vector_budget);
@@ -82,7 +84,7 @@ pub(super) fn semantic_passages(
         .collect();
     let budget = options.vector_budget.saturating_mul(dimensions);
     let exact_cost = queries.len() * dimensions;
-    let scope = Scope {
+    let mut scope = Scope {
         db,
         head,
         options,
@@ -94,6 +96,7 @@ pub(super) fn semantic_passages(
         } else {
             None
         },
+        entry_allowed,
     };
     let count = scope.count()?;
     work.bounded = query_count < semantic.vectors.len() || count > budget / exact_cost;
@@ -122,8 +125,8 @@ pub(super) fn semantic_passages(
     };
 
     if count <= budget / exact_cost {
-        scope.visit(dimensions, count, count, work, &mut exact)?;
-        work.products = count * exact_cost;
+        let scored = scope.visit(dimensions, count, count, work, &mut exact)?;
+        work.products = scored * exact_cost;
     } else {
         let coarse_budget = (budget - exact_cost) / 2;
         let width = (coarse_budget / query_count / count).clamp(1, dimensions.min(128));
@@ -131,12 +134,13 @@ pub(super) fn semantic_passages(
         if samples == 0 {
             // Tiny caller-supplied budgets can only afford sampled exact comparisons.
             let samples = count.min(budget / exact_cost);
-            scope.visit(dimensions, count, samples, work, &mut exact)?;
-            work.products = samples * exact_cost;
+            let scored = scope.visit(dimensions, count, samples, work, &mut exact)?;
+            work.products = scored * exact_cost;
         } else {
             let coarse_products = samples * query_count * width;
             let finalists = samples.min((budget - coarse_products) / exact_cost);
-            let shortlist = shortlist(&scope, &queries, width, count, samples, finalists, work)?;
+            let shortlist =
+                shortlist(&mut scope, &queries, width, count, samples, finalists, work)?;
             let mut statement = db.prepare_cached(
                 "SELECT e.object,p.id,p.location,v.part,v.vector FROM rep_search_vectors v
                  JOIN rep_search_passages p ON p.id=v.passage JOIN rep_search_entries e ON e.id=p.entry
@@ -149,7 +153,7 @@ pub(super) fn semantic_passages(
                     work.vectors_loaded += 1;
                 }
             }
-            work.products = coarse_products + shortlist.len() * exact_cost;
+            work.products += shortlist.len() * exact_cost;
         }
     }
 
@@ -172,7 +176,7 @@ pub(super) fn semantic_passages(
 }
 
 fn shortlist(
-    scope: &Scope<'_>,
+    scope: &mut Scope<'_>,
     queries: &[&[f32]],
     width: usize,
     count: usize,
@@ -188,7 +192,7 @@ fn shortlist(
     let mut decoded = Vec::with_capacity(width);
     let mut best = BinaryHeap::with_capacity(finalists);
     let mut order = 0;
-    scope.visit(width, count, samples, work, |row| {
+    let scored = scope.visit(width, count, samples, work, |row| {
         let values = decode(row, width, &mut decoded)?;
         let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
         let similarity = if norm > 0.0 {
@@ -211,6 +215,7 @@ fn shortlist(
         }
         Ok(())
     })?;
+    work.products = scored * queries.len() * width;
     Ok(best.into_iter().map(|item| item.0).collect())
 }
 
@@ -234,57 +239,54 @@ impl Scope<'_> {
     }
 
     fn visit(
-        &self,
+        &mut self,
         width: usize,
         count: usize,
         samples: usize,
         work: &mut VectorWork,
-        mut visit: impl FnMut(&Row<'_>) -> Result<()>,
-    ) -> Result<()> {
+        mut score: impl FnMut(&Row<'_>) -> Result<()>,
+    ) -> Result<usize> {
         if samples == 0 {
-            return Ok(());
+            return Ok(0);
         }
-        // Sparse scans read ordered keys first. Materialize embedding BLOBs
-        // only for sampled rows, even when the eligible inventory is large.
-        let sparse = samples < count;
         let width = (width * 4) as i64;
-        if sparse && let Some((sample, _)) = self.positions {
-            let mut lookup=self.db.prepare_cached("SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?4)
-                FROM rep_search_positions s CROSS JOIN rep_search_vectors v ON v.model=?3 AND v.passage=s.passage AND v.part=s.part
-                CROSS JOIN rep_search_passages p ON p.id=v.passage CROSS JOIN rep_search_entries e ON e.id=p.entry
-                WHERE s.sample=?1 AND s.ordinal=?2")?;
-            for visited in 0..samples {
-                let ordinal = midpoint(visited, count, samples) as i64;
-                let mut rows = lookup.query(params![sample, ordinal, self.model, width])?;
-                let row = rows
-                    .next()?
-                    .ok_or_else(|| anyhow::anyhow!("missing prepared sample position"))?;
-                visit(row)?;
-                work.rows_examined += 1;
-                work.vectors_loaded += 1;
-            }
-            return Ok(());
+        if samples < count {
+            return self.visit_sparse(width, count, samples, work, &mut score);
         }
-        let (columns, index) = if sparse {
-            ("p.id,v.part", COVERING_VECTORS)
-        } else {
-            ("e.object,p.id,p.location,v.part,substr(v.vector,1,?6)", "")
-        };
         let sql = format!(
-            "SELECT {columns} {} ORDER BY visible.object,visible.section,p.location,v.part",
-            scope_sql(index)
+            "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?6),p.entry {}
+             ORDER BY visible.object,visible.section,p.location,v.part",
+            scope_sql("")
         );
         let mut statement = self.db.prepare_cached(&sql)?;
-        let kind = self.options.kind.map(|kind| kind as i64);
-        let bound: [&dyn rusqlite::ToSql; 6] = [
-            &self.head,
-            &self.model,
-            &kind,
-            &self.options.subject,
-            &self.options.scope,
-            &width,
-        ];
-        let mut rows = statement.query(&bound[..if sparse { 5 } else { 6 }])?;
+        let mut rows = statement.query(params![
+            self.head,
+            self.model,
+            self.options.kind.map(|kind| kind as i64),
+            self.options.subject,
+            self.options.scope,
+            width
+        ])?;
+        let mut scored = 0;
+        while let Some(row) = rows.next()? {
+            work.rows_examined += 1;
+            work.vectors_loaded += 1;
+            if (self.entry_allowed)(row.get(5)?) {
+                score(row)?;
+                scored += 1;
+            }
+        }
+        Ok(scored)
+    }
+
+    fn visit_sparse(
+        &mut self,
+        width: i64,
+        count: usize,
+        samples: usize,
+        work: &mut VectorWork,
+        mut score: impl FnMut(&Row<'_>) -> Result<()>,
+    ) -> Result<usize> {
         let mut vectors = self.db.prepare_cached(
             "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?3)
              FROM json_each(?2) sample
@@ -294,40 +296,115 @@ impl Scope<'_> {
              CROSS JOIN rep_search_passages p ON p.id=v.passage
              CROSS JOIN rep_search_entries e ON e.id=p.entry ORDER BY sample.key",
         )?;
+        let model = self.model;
         let mut keys = Vec::with_capacity(SAMPLE_BATCH);
-        let mut available = 0;
-        let mut visited = 0;
-        while let Some(row) = rows.next()? {
-            work.rows_examined += 1;
-            if available == midpoint(visited, count, samples) {
-                if sparse {
-                    keys.push((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?));
-                    if keys.len() == SAMPLE_BATCH {
-                        work.vectors_loaded +=
-                            visit_samples(&mut vectors, self.model, width, &keys, &mut visit)?;
-                        keys.clear();
-                    }
-                } else {
-                    visit(row)?;
-                    work.vectors_loaded += 1;
+        let mut loaded = 0;
+        {
+            let mut load = |key| -> Result<()> {
+                keys.push(key);
+                if keys.len() == SAMPLE_BATCH {
+                    loaded += visit_samples(&mut vectors, model, width, &keys, &mut score)?;
+                    keys.clear();
                 }
-                visited += 1;
-                if visited == samples {
-                    break;
-                }
+                Ok(())
+            };
+            let primary = (0..samples).map(|index| midpoint(index, count, samples));
+            let accepted = self.visit_sparse_keys(primary, samples, work, &mut load)?;
+            if accepted < samples {
+                // Bound extra permission probes and distribute them across the
+                // remaining positions. A prepared index can seek directly to each.
+                let probes = samples.max(SAMPLE_BATCH).min(count - samples);
+                let reserve = reserve_ordinals(count, samples, probes);
+                self.visit_sparse_keys(reserve, samples - accepted, work, &mut load)?;
             }
-            available += 1;
         }
         if !keys.is_empty() {
-            work.vectors_loaded +=
-                visit_samples(&mut vectors, self.model, width, &keys, &mut visit)?;
+            loaded += visit_samples(&mut vectors, model, width, &keys, &mut score)?;
         }
-        Ok(())
+        work.vectors_loaded += loaded;
+        Ok(loaded)
+    }
+
+    fn visit_sparse_keys(
+        &mut self,
+        ordinals: impl Iterator<Item = usize>,
+        limit: usize,
+        work: &mut VectorWork,
+        mut visit: impl FnMut((i64, i64)) -> Result<()>,
+    ) -> Result<usize> {
+        let mut accepted = 0;
+        if let Some((sample, _)) = self.positions {
+            let mut lookup = self.db.prepare_cached(
+                "SELECT s.passage,s.part,p.entry FROM rep_search_positions s
+                 CROSS JOIN rep_search_passages p ON p.id=s.passage
+                 WHERE s.sample=?1 AND s.ordinal=?2",
+            )?;
+            for ordinal in ordinals {
+                let (passage, part, entry) = lookup
+                    .query_row(params![sample, ordinal as i64], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?;
+                work.rows_examined += 1;
+                if (self.entry_allowed)(entry) {
+                    visit((passage, part))?;
+                    accepted += 1;
+                    if accepted == limit {
+                        break;
+                    }
+                }
+            }
+            return Ok(accepted);
+        }
+        let sql = format!(
+            "SELECT p.id,v.part,p.entry {}
+             ORDER BY visible.object,visible.section,p.location,v.part",
+            scope_sql(COVERING_VECTORS)
+        );
+        let mut statement = self.db.prepare_cached(&sql)?;
+        let mut rows = statement.query(params![
+            self.head,
+            self.model,
+            self.options.kind.map(|kind| kind as i64),
+            self.options.subject,
+            self.options.scope
+        ])?;
+        let mut ordinals = ordinals.peekable();
+        let mut ordinal = 0;
+        while let Some(&target) = ordinals.peek() {
+            let Some(row) = rows.next()? else {
+                break;
+            };
+            work.rows_examined += 1;
+            if ordinal == target {
+                ordinals.next();
+                if (self.entry_allowed)(row.get(2)?) {
+                    visit((row.get(0)?, row.get(1)?))?;
+                    accepted += 1;
+                    if accepted == limit {
+                        break;
+                    }
+                }
+            }
+            ordinal += 1;
+        }
+        Ok(accepted)
     }
 }
 
 fn midpoint(index: usize, count: usize, samples: usize) -> usize {
     (((2 * index as u128 + 1) * count as u128) / (2 * samples as u128)) as usize
+}
+
+fn reserve_ordinals(count: usize, samples: usize, probes: usize) -> impl Iterator<Item = usize> {
+    let mut skipped = 0;
+    (0..probes).map(move |index| {
+        let mut ordinal = midpoint(index, count - samples, probes) + skipped;
+        while skipped < samples && midpoint(skipped, count, samples) <= ordinal {
+            skipped += 1;
+            ordinal += 1;
+        }
+        ordinal
+    })
 }
 
 fn visit_samples(

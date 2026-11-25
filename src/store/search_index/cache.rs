@@ -1,17 +1,33 @@
 use super::{
-    Archive, IndexedRecord, Passage, Snapshot,
+    Archive, IndexedRecord, InventoryReader, Passage,
     lexical::{normalize, terms},
-    text::VerifiedTextChunk,
+    text::{VerifiedTextChunk, index_text_window},
 };
 use crate::{profile::Document, wire::Id};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    CachedStatement, Connection, OptionalExtension, Transaction, TransactionBehavior, params,
+};
+use std::collections::BTreeSet;
 
 pub(super) const INDEX_VERSION: u32 = 7;
 const BATCH: usize = 16;
 const TEXT_BATCH: usize = 4;
 const ADD_MEDIA_PASSAGE_INDEX: &str = "CREATE INDEX IF NOT EXISTS rep_search_media_passages
     ON rep_search_passages(entry) WHERE semantic AND text=''";
+const ADD_VECTOR_PROGRESS: &str = "CREATE TABLE IF NOT EXISTS rep_search_vector_progress(
+    head TEXT NOT NULL REFERENCES rep_search_heads(head) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    cursor INTEGER NOT NULL,
+    PRIMARY KEY(head,model)
+) WITHOUT ROWID;";
+const ADD_WITNESS_ARRIVAL: &str = "CREATE TRIGGER rep_search_witness_arrival
+    AFTER INSERT ON custody_pages
+    WHEN EXISTS(SELECT 1 FROM rep_search_waiting WHERE source='page/' || NEW.id AND NOT ready)
+    BEGIN
+        UPDATE rep_search_waiting SET ready=1 WHERE source='page/' || NEW.id;
+        UPDATE rep_search_revision SET value=value+1;
+    END;";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct State {
@@ -26,13 +42,9 @@ enum Record {
 
 impl Archive {
     pub(super) fn init_search(&self) -> Result<()> {
-        if installed_version(&self.db)? == Some(INDEX_VERSION)
-            && self.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema
-                    WHERE type='index' AND name='rep_search_media_passages')",
-                [],
-                |row| row.get::<_, bool>(0),
-            )?
+        if current_schema(&self.db)?
+            && vector_progress_installed(&self.db)?
+            && witness_arrival_installed(&self.db)?
         {
             return Ok(());
         }
@@ -80,17 +92,30 @@ impl Archive {
             tx.execute_batch(include_str!("vector_visibility.sql"))?;
         }
         tx.execute_batch(ADD_MEDIA_PASSAGE_INDEX)?;
+        tx.execute_batch(ADD_VECTOR_PROGRESS)?;
+        if !witness_arrival_installed(&tx)? {
+            tx.execute_batch(ADD_WITNESS_ARRIVAL)?;
+            // Earlier prepared gaps may have been recorded without a missing page ID.
+            tx.execute_batch(
+                "INSERT INTO rep_search_waiting(source,head,object,ready)
+                 SELECT g.object,g.head,g.object,1 FROM rep_search_gaps g
+                 JOIN archive_exchange_sessions s ON s.head=g.head
+                 WHERE s.verified AND s.complete
+                 ON CONFLICT(source,head,object) DO UPDATE SET ready=1;
+                 UPDATE rep_search_revision SET value=value+1;",
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
 
     pub(super) fn refresh_search(
         &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         head: &str,
         mut budget: usize,
     ) -> Result<()> {
-        self.initialize_visibility(snapshot, head)?;
+        self.initialize_visibility(inventory.id()?, head)?;
         let mut state = state(&self.db, head)?.context("search snapshot missing")?;
         while budget > 0 {
             let revision = revision(&self.db)?;
@@ -101,10 +126,7 @@ impl Archive {
                 if state.finished {
                     break;
                 }
-                snapshot
-                    .records_after(state.cursor)
-                    .take(count + 1)
-                    .collect()
+                inventory.records_after(state.cursor, count + 1)?
             } else {
                 ready
             };
@@ -113,8 +135,8 @@ impl Archive {
                 .into_iter()
                 .take(count)
                 .map(|id| {
-                    let record = cached_record(&self.db, snapshot, id)?
-                        .unwrap_or_else(|| Record::Extracted(self.search_sections(snapshot, id)));
+                    let record = cached_record(&self.db, inventory, id)?
+                        .unwrap_or_else(|| Record::Extracted(self.search_sections(inventory, id)));
                     Ok((id, record))
                 })
                 .collect::<Result<_>>()?;
@@ -136,10 +158,15 @@ impl Archive {
             tx.commit()?;
             budget -= indexed.len();
         }
-        self.refresh_text(snapshot, head, budget.min(TEXT_BATCH))
+        self.refresh_text(inventory, head, budget.min(TEXT_BATCH))
     }
 
-    fn refresh_text(&self, snapshot: &Snapshot, head: &str, budget: usize) -> Result<()> {
+    fn refresh_text(
+        &self,
+        inventory: &mut InventoryReader<'_>,
+        head: &str,
+        budget: usize,
+    ) -> Result<()> {
         let mut chunk = VerifiedTextChunk::default();
         let mut chunk_revision = None;
         for _ in 0..budget {
@@ -170,8 +197,8 @@ impl Archive {
             else {
                 break;
             };
-            let indexed = self.index_text_window(
-                snapshot,
+            let indexed = index_text_window(
+                inventory,
                 object.parse()?,
                 usize::try_from(cursor)?,
                 usize::try_from(length)?,
@@ -206,6 +233,36 @@ impl Archive {
         }
         Ok(())
     }
+}
+
+pub(super) fn current_schema(db: &Connection) -> Result<bool> {
+    if installed_version(db)? != Some(INDEX_VERSION) {
+        return Ok(false);
+    }
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+            WHERE type='index' AND name='rep_search_media_passages')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn witness_arrival_installed(db: &Connection) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE
+            type='trigger' AND name='rep_search_witness_arrival')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn vector_progress_installed(db: &Connection) -> Result<bool> {
+    Ok(db
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE
+            type='table' AND name='rep_search_vector_progress')",
+        )?
+        .query_row([], |row| row.get(0))?)
 }
 
 pub(super) fn prepared_cache_version(db: &Connection) -> Result<Option<u32>> {
@@ -279,7 +336,11 @@ fn ready_objects(db: &Connection, head: &str, limit: usize) -> Result<Vec<Id>> {
     .collect()
 }
 
-fn cached_record(db: &Connection, snapshot: &Snapshot, id: Id) -> Result<Option<Record>> {
+fn cached_record(
+    db: &Connection,
+    inventory: &mut InventoryReader<'_>,
+    id: Id,
+) -> Result<Option<Record>> {
     let key = id.to_string();
     let limited: Option<bool> = db.query_row(
         "SELECT coverage FROM rep_search_entries WHERE object=? AND section=0 AND coverage IS NOT NULL",
@@ -294,9 +355,10 @@ fn cached_record(db: &Connection, snapshot: &Snapshot, id: Id) -> Result<Option<
     )?;
     let mut rows = statement.query([key])?;
     let mut entries = Vec::new();
+    let mut checked = BTreeSet::new();
     while let Some(row) = rows.next()? {
         let id = row.get::<_, String>(1)?.parse()?;
-        if !snapshot.objects.contains(&id) {
+        if checked.insert(id) && inventory.readable(id).is_err() {
             return Ok(None);
         }
         let entry: i64 = row.get(0)?;
@@ -305,6 +367,63 @@ fn cached_record(db: &Connection, snapshot: &Snapshot, id: Id) -> Result<Option<
         }
     }
     Ok(Some(Record::Cached { entries, limited }))
+}
+
+pub(super) struct EntryAccess<'a> {
+    db: &'a Connection,
+    scoped: bool,
+    point_check: Option<CachedStatement<'a>>,
+}
+
+impl<'a> EntryAccess<'a> {
+    pub(super) fn new(db: &'a Connection, inventory: &InventoryReader<'_>) -> Result<Self> {
+        let scoped = inventory.has_exchange_scope()?;
+        let point_check = if scoped {
+            None
+        } else {
+            crate::store::point::search_entry_check(db)?
+        };
+        Ok(Self {
+            db,
+            scoped,
+            point_check,
+        })
+    }
+
+    pub(super) fn allows(&mut self, inventory: &mut InventoryReader<'_>, entry: i64) -> bool {
+        let checked = (|| {
+            let requires_check = match &mut self.point_check {
+                Some(query) => query.query_row([entry], |row| row.get(0))?,
+                None => self.scoped,
+            };
+            if requires_check {
+                entry_readable(self.db, inventory, entry)
+            } else {
+                Ok(true)
+            }
+        })();
+        checked.unwrap_or(false)
+    }
+}
+
+fn entry_readable(
+    db: &Connection,
+    inventory: &mut InventoryReader<'_>,
+    entry: i64,
+) -> Result<bool> {
+    let mut statement = db.prepare_cached("SELECT source FROM rep_search_sources WHERE entry=?")?;
+    let mut rows = statement.query([entry])?;
+    let mut found = false;
+    while let Some(row) = rows.next()? {
+        found = true;
+        if inventory
+            .readable(row.get::<_, String>(0)?.parse()?)
+            .is_err()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(found)
 }
 
 fn publish(db: &Connection, head: &str, id: Id, record: &Record) -> Result<()> {
@@ -335,6 +454,13 @@ fn publish(db: &Connection, head: &str, id: Id, record: &Record) -> Result<()> {
                 db.execute(
                     "INSERT OR IGNORE INTO rep_search_waiting(source,head,object) VALUES(?,?,?)",
                     params![missing.to_string(), head, key],
+                )?;
+            }
+            for page in &extracted.missing_pages {
+                db.execute(
+                    "INSERT OR IGNORE INTO rep_search_waiting(source,head,object,ready)
+                     VALUES('page/' || ?1,?2,?3,EXISTS(SELECT 1 FROM custody_pages WHERE id=?1))",
+                    params![page.to_string(), head, key],
                 )?;
             }
             (entries, extracted.limited)
@@ -434,4 +560,48 @@ fn write_passages(db: &Connection, entry: i64, passages: &[Passage]) -> Result<(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        profile::{Kind, PUBLIC},
+        wire::Format,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn lexical_preparation_seeks_across_blob_pages_between_record_formats() -> Result<()> {
+        let archive = Archive::memory()?;
+        let public = Id::blob(PUBLIC);
+        let record = Document::new(
+            Kind::Question,
+            "samples",
+            "notebook",
+            json!({"statement":"Which leaf belongs in the sample?"}),
+            vec![],
+        )?;
+        let first = archive.document(&record, Format::A, public)?;
+        let last = archive.document(&record, Format::B, public)?;
+        for sample in 0..2048u16 {
+            archive.blob(&sample.to_be_bytes(), public)?;
+        }
+        let head = archive.snapshot_id("notebook", Default::default())?;
+        let full_page_count = archive.head(head)?.pages.len() as u64;
+        let key = head.to_string();
+
+        for (record, complete) in [(first, false), (last, true)] {
+            let mut inventory = archive.inventory_reader(head)?;
+            archive.prepare_lexical_index(&mut inventory, &key, 1, false)?;
+            let state = state(&archive.db, &key)?.expect("search was prepared");
+            assert_eq!(state.cursor, Some(record));
+            assert_eq!(coverage(&archive.db, &key)?, (complete, false));
+            assert!(
+                inventory.tree.io.backing_reads < full_page_count / 2,
+                "a one-record step must not load the blob range"
+            );
+        }
+        Ok(())
+    }
 }

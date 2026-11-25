@@ -1,4 +1,5 @@
 mod custody;
+mod research;
 mod search;
 #[cfg(windows)]
 mod windows_key;
@@ -10,7 +11,7 @@ use crate::{
     store::{Archive, Bundle},
     wire::{Format, Id, MAX_BYTES, Record},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 use ed25519_dalek::SigningKey;
 use serde::{Serialize, de::DeserializeOwned};
@@ -65,19 +66,14 @@ pub enum ArchiveCommand {
     },
     /// Create or open a custody database.
     Init,
-    /// Release a complete, readable inventory to the configured replicas.
+    /// Show the active archive, full snapshot and count of deposited objects awaiting a snapshot.
+    Status,
+    /// Register a complete, readable inventory in the local replica release catalog.
     Publish { head: Id },
     /// List the complete inventories available for replication.
     Heads,
     /// Capture a complete file atomically as a digest-checked descriptor for recover.
-    Capture {
-        file: PathBuf,
-        media: String,
-        #[arg(long, default_value_t = 1048576)]
-        chunk_size: usize,
-        #[arg(long)]
-        access: Option<Id>,
-    },
+    Capture(DeferredArgs<research::CaptureArguments>),
     /// Verify and recover a complete chunked payload into a new file.
     Recover {
         head: Id,
@@ -113,10 +109,11 @@ pub enum ArchiveCommand {
     },
     /// Seal the local inventory, or the readable dependencies of selected roots.
     Snapshot {
-        source: String,
+        #[arg(required_unless_present = "continue_tip")]
+        source: Option<String>,
         #[arg(long)]
         parent: Vec<Id>,
-        /// Continue the sole full local tip for this source, retaining its history.
+        /// Continue the sole full local tip, inferring the source if omitted.
         #[arg(long = "continue", conflicts_with_all = ["parent", "root"])]
         continue_tip: bool,
         /// Select an object and its transitive inputs. Repeat for multiple roots.
@@ -130,6 +127,8 @@ pub enum ArchiveCommand {
         #[arg(long, default_value = "read")]
         purpose: String,
     },
+    /// Inspect a question and the evidence, claims and assessments linked to it.
+    Question(DeferredArgs<research::QuestionArguments>),
     /// Write verified, permitted bytes. The output path must be new.
     Resolve {
         head: Id,
@@ -138,7 +137,7 @@ pub enum ArchiveCommand {
         #[arg(long, default_value = "read")]
         purpose: String,
     },
-    /// Discover typed records within a bounded inventory page.
+    /// List typed records by kind, subject or scope within a bounded inventory page.
     #[command(visible_alias = "search")]
     Discover {
         head: Id,
@@ -153,12 +152,12 @@ pub enum ArchiveCommand {
         #[arg(long, default_value_t = 100)]
         budget: usize,
     },
-    /// Search authorized archive records and text passages by word or meaning.
+    /// Find authorized content by exact ID, words or meaning.
     Find(DeferredArgs<FindArguments>),
     /// Show or pin the active search snapshot.
     SearchHead {
         head: Option<Id>,
-        /// Use the newest local snapshot, or the first import if there is no local snapshot.
+        /// Follow the newest full local snapshot when one exists.
         #[arg(long, conflicts_with = "head")]
         clear: bool,
     },
@@ -184,8 +183,15 @@ pub enum ArchiveCommand {
         #[arg(long, default_value = "read")]
         purpose: String,
     },
-    /// Evaluate a query and persist its immutable receipt.
+    /// Save an assessment receipt with checked query limits.
+    ///
+    /// The query accepts a step budget up to 100,000 and a notice-scan byte limit up to 64 MiB.
+    /// The evaluator applies that step budget to notice discovery and to each argument separately.
     Assess { head: Id, query: PathBuf },
+    /// Re-run the recorded evaluator and compare the result with the saved receipt.
+    Replay(DeferredArgs<research::ReplayArguments>),
+    /// Re-evaluate a saved query at the given snapshot and save a linked successor receipt.
+    Reassess(DeferredArgs<research::ReassessArguments>),
     /// Serialize a bounded inventory with its permitted objects for offline exchange.
     Export {
         head: Id,
@@ -199,6 +205,9 @@ pub enum ArchiveCommand {
         /// Send the next read-only range with witnesses shared across acknowledged pages.
         #[arg(long, conflicts_with = "stream")]
         paged: bool,
+        /// Write a page for v0.1.8 recipients, without custody access witnesses.
+        #[arg(long, requires = "paged")]
+        legacy_page: bool,
         /// Write the inventory once, followed by an ordered stream of packets.
         #[arg(long, conflicts_with_all = ["after", "limit"])]
         stream: bool,
@@ -206,22 +215,36 @@ pub enum ArchiveCommand {
         #[arg(long, default_value = "read")]
         purpose: String,
     },
-    /// Verify and reconcile an exchange file atomically.
+    /// Import an exchange file into the archive.
+    #[command(
+        long_about = "Import an exchange file into the archive.\n\nVerified paged imports require an independently obtained --expected-head. JSON bundles, --stream and --legacy-page rely on the sender for blob access policies."
+    )]
     Import {
         file: PathBuf,
-        /// Accept the next verified range from a paged read exchange.
+        /// Verify and stage the next range, then publish the inventory after the final range.
         #[arg(long, conflicts_with_all = ["stream", "member_head"])]
         paged: bool,
+        /// Accept a v0.1.8 page without custody access witnesses from a trusted sender.
+        #[arg(long, requires = "paged")]
+        legacy_page: bool,
+        /// Independently obtained snapshot ID. Required for verified paged imports.
+        #[arg(long, requires = "paged")]
+        expected_head: Option<Id>,
         /// Interpret a point disclosure against this independently obtained head.
         #[arg(long, conflicts_with = "stream")]
         member_head: Option<Id>,
         /// Maximum stream input in bytes, including metadata (default 256 MiB).
         #[arg(long, requires = "stream")]
         max_bytes: Option<u64>,
-        /// Read the streaming exchange format.
+        /// Read a stream from a trusted sender that supplies the blob access policies.
         #[arg(long)]
         stream: bool,
     },
+    /// Inspect verified and trusted paged import checkpoints for a snapshot.
+    #[command(
+        long_about = "Inspect paged import checkpoints for this snapshot without changing the archive. Supplies and omissions describe the last checkpoint through completion. Older imports may have unknown counts. Completion means the inventory was examined; omitted objects may be unavailable."
+    )]
+    ImportStatus { head: Id },
     /// Sign a minimal scoring-hull disclosure and write its packet to a new file.
     Project {
         head: Id,
@@ -270,6 +293,9 @@ pub enum ArchiveCommand {
     /// Create an Ed25519 signing seed in a new private file.
     Keygen { output: PathBuf },
     /// Attest to the exact original record under a role and scope.
+    #[command(
+        long_about = "Attest to the exact original record under a role and scope. Use role notice-search-exclusion and scope notice-coverage-1 to certify that a readable record is outside direct notice discovery."
+    )]
     Sign {
         head: Id,
         id: Id,
@@ -278,6 +304,9 @@ pub enum ArchiveCommand {
         scope: String,
     },
     /// Verify detached attestation bytes under an explicit trusted public key.
+    #[command(
+        long_about = "Verify detached attestation bytes under an explicit trusted public key. For a notice-search-exclusion attestation, the target must be in the selected inventory and its bytes may be unavailable."
+    )]
     Verify {
         head: Id,
         attestation: Id,
@@ -378,6 +407,10 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             "receipt_evaluator": evaluation::EVALUATOR_ID,
             "calibration_identity_evaluator": evaluation::EVALUATOR_ID,
             "input_correction_evaluator": evaluation::EVALUATOR_ID,
+            "notice_coverage": {
+                "role": evaluation::notice_coverage::Exclusion::Record.role(),
+                "scope": evaluation::notice_coverage::SCOPE,
+            },
             "replay_evaluators": evaluation::replay_evaluator_ids().collect::<Vec<_>>(),
             "evaluators": ["simultaneous-bounds","certified-hull","signed-tests","typed-outcome","delegated","recorded-difference","least-zero","domain-inclusion","source-independence","sample-description","survey-identification","unit-grid-map"],
         })),
@@ -415,18 +448,32 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         ArchiveCommand::Value { model } => {
             print(input::<crate::investigation::ObservationModel>(&model)?.evaluate()?)
         }
-        ArchiveCommand::Capture {
+        ArchiveCommand::Capture(DeferredArgs(research::CaptureArguments {
             file,
             media,
             chunk_size,
             access,
-        } => print(open()?.capture(
-            File::open(file)?,
-            &media,
-            chunk_size,
-            access.unwrap_or(public),
-            f,
-        )?),
+            context,
+            note,
+        })) => {
+            let source = File::open(file)?;
+            let db = open()?;
+            if let Some(target) = context {
+                print(db.capture_for(
+                    source,
+                    &media,
+                    chunk_size,
+                    crate::payload::CaptureContext {
+                        target,
+                        note: note.as_deref(),
+                        access,
+                    },
+                    f,
+                )?)
+            } else {
+                print(db.capture(source, &media, chunk_size, access.unwrap_or(public), f)?)
+            }
+        }
         ArchiveCommand::Recover {
             head,
             descriptor,
@@ -434,9 +481,8 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             bytes,
         } => {
             let db = reader()?;
-            let s = db.active_head(head)?;
             print(publish(&path, |file| {
-                db.materialize(&s, descriptor, "read", bytes, file)
+                db.materialize_at(head, descriptor, bytes, file)
             })?)
         }
         ArchiveCommand::Select { head, request } => {
@@ -462,6 +508,15 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         ArchiveCommand::Init => {
             open()?;
             print(json!({"profile":Id::blob(profile::PROFILE),"public":public}))
+        }
+        ArchiveCommand::Status => {
+            let path = std::path::absolute(&db_path)?;
+            let state = if path.try_exists()? {
+                Some(reader()?.status()?)
+            } else {
+                None
+            };
+            print(json!({"path":path,"archive":state}))
         }
         ArchiveCommand::Publish { head } => {
             open()?.release(head)?;
@@ -489,17 +544,28 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             let db = open()?;
             let parents = parent.into_iter().collect();
             let head = if continue_tip {
-                db.continue_snapshot(&source)?
-            } else if root.is_empty() {
-                db.snapshot_id(&source, parents)?
+                db.continue_local_tip(source.as_deref())?
             } else {
-                db.selected_snapshot(&source, parents, root.into_iter().collect())?
-                    .id()?
+                let source = source.as_deref().context("snapshot source is required")?;
+                if root.is_empty() {
+                    db.snapshot_id(source, parents)?
+                } else {
+                    db.selected_snapshot(source, parents, root.into_iter().collect())?
+                        .id()?
+                }
             };
             print(head)
         }
         ArchiveCommand::Show { head, id, purpose } => {
             print(reader()?.read_head(head, id, &purpose)?)
+        }
+        ArchiveCommand::Question(DeferredArgs(research::QuestionArguments {
+            id,
+            head,
+            budget,
+        })) => {
+            let db = reader()?;
+            print(db.question_at(head, id, budget)?)
         }
         ArchiveCommand::Resolve {
             head,
@@ -533,12 +599,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             )?)
         }
         ArchiveCommand::Find(DeferredArgs(arguments)) => {
-            let db = if arguments.exact_lookup() {
-                reader()?
-            } else {
-                open()?
-            };
-            print(LocalSearch::default().find(&db, arguments)?)
+            print(LocalSearch::default().find_path(&db_path, arguments)?)
         }
         ArchiveCommand::SearchHead { head, clear } => {
             let db = if head.is_some() || clear {
@@ -554,8 +615,8 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         ArchiveCommand::PrepareSearch(DeferredArgs(arguments)) => {
             print(LocalSearch::default().prepare(&open()?, arguments)?)
         }
-        ArchiveCommand::SearchSession => LocalSearch::default().serve(
-            &open()?,
+        ArchiveCommand::SearchSession => LocalSearch::default().serve_path(
+            &db_path,
             std::io::stdin().lock(),
             std::io::stdout().lock(),
         ),
@@ -569,22 +630,48 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             after,
         } => {
             let db = reader()?;
-            let snapshot = db.active_head(head)?;
             let report = if compact {
-                db.argument_graph_page(&snapshot, id, &purpose, budget, depth, after)?
+                db.argument_graph_at(head, id, &purpose, budget, depth, after)?
             } else {
-                db.argument_graph(&snapshot, id, &purpose, budget, depth)?
+                db.argument_graph(&db.active_head(head)?, id, &purpose, budget, depth)?
             };
             print(report)
         }
         ArchiveCommand::Assess { head, query } => {
+            let q = input(&query)?;
+            evaluation::check_receipt_budget(&q)?;
             let db = open()?;
             let s = db.active_head(head)?;
-            let q = input(&query)?;
             let r = evaluation::assess(&db, &s, &q)?;
             let id = evaluation::deposit_receipt(&db, &s, &q, &r, f)?;
             print(json!({"id":id,"receipt":r}))
         }
+        ArchiveCommand::Replay(DeferredArgs(research::ReplayArguments {
+            receipt,
+            head,
+            mapping,
+            require_match,
+        })) => {
+            let db = reader()?;
+            let report = match head {
+                Some(head) => db.replay_assessment_at(head, receipt, &mapping)?,
+                None => db.replay_local_assessment(receipt)?,
+            };
+            let matches = report.matches;
+            print(report)?;
+            ensure!(
+                !require_match || matches,
+                "saved receipt differs from replay"
+            );
+            Ok(())
+        }
+        ArchiveCommand::Reassess(DeferredArgs(research::ReassessArguments {
+            receipt,
+            head,
+            argument,
+            mapping,
+            at,
+        })) => print(open()?.reassess_with_mappings(head, receipt, &argument, &mapping, at, f)?),
         ArchiveCommand::Export {
             head,
             member,
@@ -594,12 +681,18 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             limit,
             stream,
             paged,
+            legacy_page,
         } => {
             let db = reader()?;
             let head = db.current_head_id(head)?;
             if paged {
                 ensure!(purpose == "read", "incremental pages require read purpose");
-                let page = db.export_exchange_page(head, after, limit.unwrap_or(64))?;
+                let limit = limit.unwrap_or(64);
+                let page = if legacy_page {
+                    db.export_legacy_exchange_page(head, after, limit)?
+                } else {
+                    db.export_exchange_page(head, after, limit)?
+                };
                 output_json(&path, &page)?;
                 return print(page.progress());
             }
@@ -635,19 +728,39 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
                 json!({"head":packet.head,"continuation":packet.continuation,"packets":packet.packets.len()}),
             )
         }
+        ArchiveCommand::ImportStatus { head } => {
+            print(json!({"head": head, "sessions": reader()?.exchange_import_status(head)?}))
+        }
         ArchiveCommand::Import {
             file,
             stream,
             max_bytes,
             paged,
             member_head,
+            legacy_page,
+            expected_head,
         } => {
-            let mut db = open()?;
             let file = File::open(file)?;
             if paged {
                 let page = crate::store::ExchangePage::read(file)?;
-                return print(db.import_exchange_page(&page)?);
+                let head = expected_head
+                    .or_else(|| legacy_page.then(|| page.progress().head))
+                    .context(
+                        "verified paged import requires an independently obtained --expected-head",
+                    )?;
+                ensure!(
+                    page.progress().head == head,
+                    "exchange page does not match expected head"
+                );
+                let mut db = open()?;
+                let progress = if legacy_page {
+                    db.import_legacy_exchange_page(head, &page)?
+                } else {
+                    db.import_pinned_exchange_page(head, &page)?
+                };
+                return print(progress);
             }
+            let mut db = open()?;
             if let Some(head) = member_head {
                 let ids = db.import_members(head, &crate::store::MemberProof::read(file)?)?;
                 match ids.as_slice() {
@@ -736,7 +849,15 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             scope,
         } => {
             let db = open()?;
-            db.resolve(&db.active_head(head)?, id, "read")?;
+            let snapshot = db.active_head(head)?;
+            if let Some(exclusion) = evaluation::notice_coverage::Exclusion::for_role(&role) {
+                ensure!(
+                    scope == evaluation::notice_coverage::SCOPE,
+                    "invalid notice coverage scope"
+                );
+                return print(exclusion.certify(&db, &snapshot, id, &signing_key(&key)?, f)?);
+            }
+            db.resolve(&snapshot, id, "read")?;
             print(db.document(
                 &profile::attest(id, &scope, &role, "research-policy-1", &signing_key(&key)?)?,
                 f,
@@ -752,6 +873,20 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             public_key,
         } => {
             let db = reader()?;
+            if let Some(exclusion) = evaluation::notice_coverage::Exclusion::for_role(&role) {
+                ensure!(
+                    scope == evaluation::notice_coverage::SCOPE,
+                    "invalid notice coverage scope"
+                );
+                exclusion.verify_at(
+                    &db,
+                    &db.active_head(head)?,
+                    target,
+                    attestation,
+                    &[public_key].into(),
+                )?;
+                return print("pass");
+            }
             db.resolve_head(head, target, "read")?;
             profile::verify_attestation(
                 &db.read_head(head, attestation, "read")?,

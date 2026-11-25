@@ -109,9 +109,11 @@ fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
         let after = archive.snapshot("correction receipt", [head.id()?].into())?;
         let stored = archive.read(&after, id, "read")?;
         assert_eq!(capabilities[capability], stored.fields["evaluator"]);
-        assert_eq!(capabilities[capability], "rep-rust-rules-7");
+        assert_eq!(capabilities[capability], "rep-rust-rules-9");
     }
     let expected = [
+        "rep-rust-rules-9",
+        "rep-rust-rules-8",
         "rep-rust-rules-7",
         "rep-rust-rules-6",
         "rep-rust-rules-5",
@@ -809,6 +811,159 @@ fn legacy_calibration_fixture_retains_its_published_identity() -> Result<()> {
     assert_ne!(active, original);
     for head in [original, active] {
         receipt.verify(&archive.resolve(&archive.head(head)?, receipt, "read")?)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn partial_notice_coverage_works_for_formal_and_documentary_evidence() -> Result<()> {
+    let author = Archive::memory()?;
+    let f = Format::B;
+    let signer = fixture::fixture_key(24);
+    let key = hex::encode(signer.verifying_key().to_bytes());
+    let policy = put(
+        &author,
+        f,
+        Kind::Policy,
+        "recipient",
+        "research-policy-1",
+        json!({"keys":{"notice-search-exclusion":[key],"notice":[key]}}),
+        vec![],
+    )?;
+    let math =
+        |kind, fields, inputs| put(&author, f, kind, "least element", "formal", fields, inputs);
+    let theorem = math(
+        Kind::Claim,
+        json!({"predicate":"least-element","domain":"finite-nat-sets-containing-zero"}),
+        vec![],
+    )?;
+    let proof = math(
+        Kind::Derivation,
+        json!({"kernel":"nat-order-zero-v1","steps":["member-zero","zero-le-every-nat","least-intro"]}),
+        vec![],
+    )?;
+    let deduction = math(
+        Kind::Argument,
+        json!({"method":"least-zero"}),
+        vec![link("claim", theorem), link("proof", proof)],
+    )?;
+
+    let text_record =
+        |kind, fields, inputs| put(&author, f, kind, "witnesses", "documentary", fields, inputs);
+    let independence = text_record(
+        Kind::Claim,
+        json!({"predicate":"independent-witnesses"}),
+        vec![],
+    )?;
+    let original = text_record(Kind::Occurrence, json!({"text":"local manuscript"}), vec![])?;
+    let [first, second] = [1, 2].map(|edition| {
+        text_record(
+            Kind::Derivation,
+            json!({"edition":edition}),
+            vec![link("manuscript", original)],
+        )
+    });
+    let first = first?;
+    let second = second?;
+    let textual = text_record(
+        Kind::Argument,
+        json!({"method":"source-independence"}),
+        vec![
+            link("claim", independence),
+            link("transcription", first),
+            link("transcription", second),
+        ],
+    )?;
+    let other_scope_notice = put(
+        &author,
+        f,
+        Kind::Notice,
+        "edition review",
+        "other scope",
+        json!({"action":"withdraw","reason":"review opened"}),
+        vec![link("target", proof)],
+    )?;
+    let correction_attestation =
+        fixture::sign(&author, f, other_scope_notice, "other scope", "notice", 24)?;
+    let before = author.snapshot("complete evidence", BTreeSet::new())?;
+    let proof_class = author.certify_notice_search_exclusion(&before, proof, &signer, f)?;
+    let text_class = author.certify_notice_search_exclusion(&before, second, &signer, f)?;
+    assert!(
+        author
+            .certify_notice_search_exclusion(&before, other_scope_notice, &signer, f)
+            .is_err()
+    );
+    assert!(
+        author
+            .certify_notice_search_exclusion(&before, correction_attestation, &signer, f)
+            .is_err()
+    );
+
+    let head = author.snapshot("classified evidence", [before.id()?].into())?;
+    let full = serde_json::to_value(author.export(&head, "read")?)?;
+    let query = |target, argument| Query {
+        target,
+        arguments: vec![argument],
+        policy,
+        budget: 1000,
+        byte_limit: 1_000_000,
+        mappings: vec![],
+        previous_receipts: vec![],
+        required_notices: vec![],
+        current_at: None,
+    };
+    let formal = query(theorem, deduction);
+    let documentary = query(independence, textual);
+    for (missing, sig, affected, complete, standing) in [
+        (proof, proof_class, &formal, &documentary, Standing::Refuted),
+        (
+            second,
+            text_class,
+            &documentary,
+            &formal,
+            Standing::Supported,
+        ),
+    ] {
+        let mut bundle = full.clone();
+        bundle["packets"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|p| p["id"] != json!(missing));
+        let mut receiver = Archive::memory()?;
+        let received = receiver.import(&serde_json::from_value(bundle.clone())?)?;
+        assert_eq!(received, head.id()?);
+        let pinned = receiver.head(received)?;
+        receiver.verify_notice_search_exclusion(&pinned, missing, sig, &[key.clone()].into())?;
+
+        let other = evaluation::assess(&receiver, &pinned, complete)?;
+        assert_eq!(other.result, Some(standing));
+        assert!(other.horizon_complete && other.frontier.is_empty());
+        assert_eq!(
+            other.notice_search.unwrap().classified_records,
+            Some([(missing, sig)].into())
+        );
+
+        let dependent = evaluation::assess(&receiver, &pinned, affected)?;
+        assert_eq!(dependent.result, Some(Standing::Unresolved));
+        assert!(dependent.horizon_complete);
+        assert_eq!(dependent.frontier, [missing].into());
+
+        bundle["packets"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|p| p["id"] != json!(other_scope_notice));
+        let mut no_notice = Archive::memory()?;
+        no_notice.import(&serde_json::from_value(bundle)?)?;
+        let unknown = evaluation::assess(&no_notice, &no_notice.head(received)?, complete)?;
+        assert_eq!(unknown.result, Some(Standing::Unresolved));
+        assert!(!unknown.horizon_complete);
+        assert!(
+            unknown
+                .notice_search
+                .unwrap()
+                .unresolved_records
+                .contains(&other_scope_notice)
+        );
     }
     Ok(())
 }

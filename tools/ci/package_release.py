@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import tomllib
 
@@ -19,7 +20,64 @@ PUBLISHED_PROFILES = {
 }
 
 
+def transfer_paged(run, head, prefix, receiver, *, sender=None, limit=16):
+    origin = ["--db", sender] if sender else []
+    receive = ["--db", receiver, "import"]
+    pin = ["--paged", "--expected-head", head]
+    cursor = None
+    for index in range(64):
+        page = f"{prefix}-{index}.json"
+        after = ["--after", cursor] if cursor else []
+        sent = run(*origin, "export", head, page, "--paged", "--limit", str(limit), *after)
+        accepted = run(*receive, page, *pin)
+        if accepted != sent:
+            raise ValueError("receiver acknowledged a different exchange range")
+        if index == 1:
+            retry = run(*receive, f"{prefix}-0.json", *pin)
+            if (retry["complete"], retry["continuation"]) != (accepted["complete"], accepted["continuation"]):
+                raise ValueError("repeated delivery changed the exchange checkpoint")
+        if accepted["complete"]:
+            return
+        cursor = accepted["continuation"]
+    raise ValueError("paged transfer never completed")
+
+
+def verify_research_handoff(run):
+    study = run("trial", "research trial")
+    fixture = study["fixture"]
+    origin = Path("research trial") / "east.sqlite"
+    receiver = "research receiver.sqlite"
+    initial = fixture["published"]
+    transfer_paged(run, initial, "initial-research", receiver, sender=origin)
+    receipt = fixture["receipts"][2]
+    replay = ["--db", receiver, "replay", receipt, "--require-match"]
+    label = ["--db", receiver, "label", initial, receipt, "synthetic"]
+    historical = run(*replay, "--head", initial)
+    if not historical["matches"] or historical["head"] != fixture["s0"]:
+        raise ValueError("received archive did not replay the historical receipt")
+    if run(*label) != fixture["labels"][2]:
+        raise ValueError("received archive derived a different historical label")
+
+    current = run("--db", origin, "snapshot", "release correction review")
+    transfer_paged(run, current, "corrected-research", receiver, sender=origin)
+    impact = run("--db", receiver, "impact", current, study["N"], "--mapping", study["mapping"])
+    affected = {item for ids in impact["by_kind"].values() for item in ids}
+    if not set(fixture["labels"]) <= affected:
+        raise ValueError("received correction did not route original labels")
+    if run(*replay, "--head", current) != historical or run(*label) != fixture["labels"][2]:
+        raise ValueError("received correction changed historical replay or label derivation")
+
+
 def verify(nao, directory, version):
+    environment = os.environ.copy()
+    environment.pop("NAO_ARCHIVE", None)
+
+    def invoke(*args, **options):
+        return subprocess.run([nao, *args], cwd=directory, env=environment, timeout=60, **options)
+
+    def run(*args):
+        return json.loads(invoke(*args, stdout=subprocess.PIPE, check=True).stdout)
+
     readme = (directory / "README.md").read_text(encoding="utf-8")
     for link in re.findall(r"\]\((spec/[^)]+)\)", readme):
         expected = ROOT / link
@@ -27,14 +85,11 @@ def verify(nao, directory, version):
         if not packaged.is_file() or packaged.read_bytes() != expected.read_bytes():
             raise ValueError(f"missing or altered README target in release download: {link}")
 
-    version_line = subprocess.check_output([nao, "--version"], cwd=directory, text=True, timeout=60)
-    help_text = subprocess.check_output([nao, "--help"], cwd=directory, text=True, timeout=60)
+    version_line = invoke("--version", stdout=subprocess.PIPE, text=True, check=True).stdout
+    help_text = invoke("--help", stdout=subprocess.PIPE, text=True, check=True).stdout
     usage = next((line for line in help_text.splitlines() if line.startswith("Usage: ")), "")
     if version_line.strip() != f"nao {version}" or not usage.startswith("Usage: nao "):
         raise ValueError(f"unexpected packaged version or help: {version_line.strip()!r}, {usage!r}")
-
-    def run(*args):
-        return json.loads(subprocess.check_output([nao, *args], cwd=directory, timeout=60))
 
     capabilities = run("capabilities")
     if capabilities["version"] != version:
@@ -52,11 +107,26 @@ def verify(nao, directory, version):
         receiver = f"{mode} receiver.sqlite"
         resolved = f"{mode} reading.txt"
         run("export", head, exchange, *options)
-        run("--db", receiver, "import", exchange, *options)
-        subprocess.run([nao, "--db", receiver, "resolve", head, object_id, resolved],
-                       cwd=directory, timeout=60, check=True)
+        pin = ["--expected-head", head] if mode == "paged" else []
+        run("--db", receiver, "import", exchange, *options, *pin)
+        invoke("--db", receiver, "resolve", head, object_id, resolved, check=True)
         if (directory / resolved).read_bytes() != reading:
             raise ValueError(f"{mode} exchange changed the payload")
+
+    retired = run("blob", "README.md")
+    transfer_head = run("snapshot", "paged release qualification", "--root", object_id, "--root", retired)
+    invoke("withdraw", retired, check=True)
+    transfer_paged(run, transfer_head, "transfer", "continued receiver.sqlite", limit=1)
+    invoke("--db", "continued receiver.sqlite", "resolve", transfer_head, object_id,
+           "continued-reading.txt", check=True)
+    if (directory / "continued-reading.txt").read_bytes() != reading:
+        raise ValueError("continued transfer changed the available payload")
+    unavailable = invoke("--db", "continued receiver.sqlite", "resolve", transfer_head,
+                         retired, "withdrawn.txt", capture_output=True)
+    if unavailable.returncode == 0 or b"unavailable" not in unavailable.stderr:
+        raise ValueError("finished inventory incorrectly supplied withdrawn evidence")
+
+    verify_research_handoff(run)
 
     (directory / "stream.txt").write_bytes(b"instrument capture stream")
     stream = run("blob", "stream.txt")
@@ -67,13 +137,12 @@ def verify(nao, directory, version):
     first = run(*origin, "append", "lab", "members.json")["head"]
     captured = run(*origin, "capture", "lab", stream, "Messung µ.txt", "--parent", first)
     tip = captured["head"]
-    subprocess.run([nao, *origin, "share", tip], cwd=directory, check=True, timeout=60)
+    invoke(*origin, "share", tip, check=True)
     run(*origin, "export-step", tip, "first.frame")
     assert run(*receiver, "import-step", tip, "first.frame")["head"] == first
     transfer = run(*receiver, "pull", "origin.sqlite", tip)
     assert transfer["complete"] and transfer["batches"] == 1
-    subprocess.run([nao, *receiver, "range", tip, stream, "0", str(len(reading)), "range.bin"],
-                   cwd=directory, check=True, timeout=60)
+    invoke(*receiver, "range", tip, stream, "0", str(len(reading)), "range.bin", check=True)
     assert (directory / "range.bin").read_bytes() == reading
     (directory / "sources.json").write_text(json.dumps([{"head": tip, "db": "receiver.sqlite"}]))
     result = run(*receiver, "review", "sources.json", object_id, "--corrections", "--receipt")
@@ -107,6 +176,24 @@ def verify(nao, directory, version):
     if seed.stat().st_size != 32:
         raise ValueError("key generation did not write a 32-byte seed")
     print(f"Verified {nao.name}: published profiles, archive exchange, custody transfer and review, and key generation")
+
+
+def source_package():
+    with (ROOT / "Cargo.toml").open("rb") as manifest:
+        version = tomllib.load(manifest)["package"]["version"]
+    name = f"naome-protocol-{version}"
+    archive = ROOT / "target/package" / f"{name}.crate"
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    with tarfile.open(archive, "r:gz") as package:
+        with package.extractfile(f"{name}/.cargo_vcs_info.json") as info:
+            git = json.load(info)["git"]
+    if git.get("sha1") != commit or git.get("dirty"):
+        raise ValueError(f"source package does not match clean checkout {commit}")
+    output = ROOT / "target/source-distribution"
+    output.mkdir(exist_ok=True)
+    shutil.copy2(archive, output)
+    shutil.copy2(ROOT / "spec/research-evidence-protocol.pdf", output)
+    print(f"Staged {archive.name} from {commit}")
 
 
 def package(target, model):
@@ -163,7 +250,12 @@ def package(target, model):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("target")
+    platform = parser.add_mutually_exclusive_group(required=True)
+    platform.add_argument("target", nargs="?")
+    platform.add_argument("--source", action="store_true")
     parser.add_argument("--model", action="store_true")
     args = parser.parse_args()
-    package(args.target, args.model)
+    if args.source:
+        source_package()
+    else:
+        package(args.target, args.model)

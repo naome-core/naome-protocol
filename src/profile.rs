@@ -230,7 +230,7 @@ impl Document {
             "reading" | "outcome" | "outcome-input" => DependencyRole::Outcome,
             "correction" | "previous-result" | "previous-version" => DependencyRole::Audit,
             "dependency" | "visible-notice" | "required-notice" | "previous-receipt"
-            | "mapping"
+            | "reassessed-from" | "mapping"
                 if self.kind == Kind::Assessment
                     && self.fields.contains_key("original_transcript") =>
             {

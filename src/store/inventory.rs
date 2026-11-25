@@ -134,6 +134,45 @@ fn visit(
     Ok(true)
 }
 impl Manifest {
+    /// Take a bounded page of records, skipping the intervening blob identifier range.
+    pub(super) fn record_page(
+        &self,
+        tree: &mut Tree<'_>,
+        after: Option<Id>,
+        limit: usize,
+    ) -> Result<Vec<Id>> {
+        let mut records = Vec::new();
+        if limit == 0 {
+            return Ok(records);
+        }
+        let first_blob = Id::from_blob_digest([0; 32]);
+        let last_blob = Id::from_blob_digest([u8::MAX; 32]);
+        let mut page = |id| Ok(tree.cached(id)?.as_ref().clone());
+        if after.is_none_or(|id| id < first_blob) {
+            let mut reached_blobs = false;
+            self.scan_with(after, &mut page, |id| {
+                if id.format().is_none() {
+                    reached_blobs = true;
+                    return Ok(false);
+                }
+                records.push(id);
+                Ok(records.len() < limit)
+            })?;
+            if !reached_blobs {
+                return Ok(records);
+            }
+        }
+        self.scan_with(
+            Some(after.map_or(last_blob, |id| id.max(last_blob))),
+            page,
+            |id| {
+                records.push(id);
+                Ok(records.len() < limit)
+            },
+        )?;
+        Ok(records)
+    }
+
     /// Seek strictly after the cursor and stop when the caller has enough members.
     /// This validates the visited intervals; complete inventory verification uses walk().
     pub(super) fn scan_after(

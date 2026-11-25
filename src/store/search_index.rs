@@ -8,7 +8,7 @@ mod vectors;
 mod visibility;
 
 use self::rank::{SemanticQuery, VectorWork, rank};
-use super::{Archive, Snapshot};
+use super::{Archive, InventoryReader, Snapshot};
 use crate::{
     profile::Document,
     search::{
@@ -19,12 +19,25 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use cache::{INDEX_VERSION, coverage, prepared_cache_version};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeSet;
 use vectors::{embed_query, missing_vectors};
 
 const MAX_QUERY_PASSAGES: usize = 24;
 
+pub(super) fn invalidate_access_scope(db: &rusqlite::Connection, head: &str) -> Result<()> {
+    let prepared: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='rep_search_heads')",
+        [],
+        |row| row.get(0),
+    )?;
+    if prepared && db.execute("DELETE FROM rep_search_heads WHERE head=?", [head])? != 0 {
+        db.execute("UPDATE rep_search_revision SET value=value+1", [])?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
 pub(crate) enum IndexPreparation {
     Existing,
     Lexical,
@@ -42,12 +55,14 @@ struct Passage {
 struct Dependencies {
     available: BTreeSet<Id>,
     missing: BTreeSet<Id>,
+    missing_pages: BTreeSet<Id>,
 }
 
 struct IndexedRecord {
     document: Option<Document>,
     sections: Vec<IndexedSection>,
     missing: BTreeSet<Id>,
+    missing_pages: BTreeSet<Id>,
     limited: bool,
     cacheable: bool,
 }
@@ -64,26 +79,49 @@ impl Archive {
         self.head(self.selected_search_id(head)?)
     }
 
-    fn selected_search_id(&self, head: Option<Id>) -> Result<Id> {
-        let head = match head {
-            Some(head) => head,
-            None => self
-                .db
-                .query_row(
-                    "SELECT coalesce(
-                        (SELECT head FROM rep_search_selection WHERE singleton=1),
-                        (SELECT id FROM heads
-                         WHERE NOT EXISTS (SELECT 1 FROM rep_imported_heads WHERE head=heads.id)
-                         ORDER BY rowid DESC LIMIT 1),
-                        (SELECT id FROM heads ORDER BY rowid LIMIT 1)
-                    )",
-                    [],
-                    |row| row.get::<_, Option<String>>(0),
-                )?
-                .context("no archive snapshot; create one with snapshot or specify --head")?
-                .parse()?,
-        };
-        self.current_head_id(head)
+    pub(crate) fn selected_search_id(&self, head: Option<Id>) -> Result<Id> {
+        if let Some(head) = head {
+            return self.current_head_id(head);
+        }
+        let pin = self.search_pin()?;
+        let full = self.latest_full_seal()?.map(|seal| seal.0);
+        self.default_search_head(pin, full)?
+            .context("no archive snapshot; create one with snapshot or specify --head")
+    }
+
+    pub(super) fn search_pin(&self) -> Result<Option<Id>> {
+        let pin: Option<String> = self
+            .db
+            .query_row(
+                "SELECT head FROM rep_search_selection WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        pin.map(|head| head.parse()).transpose()
+    }
+
+    pub(super) fn default_search_head(
+        &self,
+        pin: Option<Id>,
+        full: Option<Id>,
+    ) -> Result<Option<Id>> {
+        if let Some(head) = pin.or(full) {
+            return self.current_head_id(head).map(Some);
+        }
+        // Older archives may contain only retained snapshots, without full-seal metadata.
+        let fallback: Option<String> = self.db.query_row(
+            "SELECT coalesce(
+                (SELECT id FROM heads WHERE NOT EXISTS (
+                     SELECT 1 FROM rep_imported_heads WHERE head=heads.id
+                 ) ORDER BY rowid DESC LIMIT 1),
+                (SELECT id FROM heads ORDER BY rowid LIMIT 1))",
+            [],
+            |row| row.get(0),
+        )?;
+        fallback
+            .map(|head| self.current_head_id(head.parse()?))
+            .transpose()
     }
 
     /// Return the authenticated selected header without loading its inventory.
@@ -100,12 +138,9 @@ impl Archive {
         options: SearchOptions,
     ) -> Result<SearchReport> {
         self.with_read_view(|| {
-            let m = self.active_manifest(self.selected_search_id(head)?)?;
-            let report = SearchReport::start(m.id()?, options, false)?;
-            let mut tree = super::custody::tree::Tree::new(&self.db);
-            Self::exact_report(report, id, options, |key| {
-                Ok(self.resolve_member_in(&m, key, "read", &mut tree)?.0)
-            })
+            let mut inventory = self.inventory_reader(self.selected_search_id(head)?)?;
+            let report = SearchReport::start(inventory.id()?, options, false)?;
+            Self::exact_report(report, id, options, |key| Ok(inventory.resolve(key)?.0))
         })
     }
 
@@ -137,7 +172,7 @@ impl Archive {
 
     fn prepare_lexical_index(
         &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         head: &str,
         budget: usize,
         rebuild: bool,
@@ -146,7 +181,7 @@ impl Archive {
         if rebuild {
             self.clear_index_view(head)?;
         }
-        self.refresh_search(snapshot, head, budget)
+        self.refresh_search(inventory, head, budget)
     }
 
     pub fn find(
@@ -171,7 +206,13 @@ impl Archive {
         } else {
             IndexPreparation::Full { rebuild: false }
         };
-        self.lookup_search(snapshot, input, options, model, preparation)
+        self.lookup_search(
+            InventoryReader::materialized(self, snapshot),
+            input,
+            options,
+            model,
+            preparation,
+        )
     }
 
     /// Query the prepared lexical and embedding cache.
@@ -182,7 +223,13 @@ impl Archive {
         options: SearchOptions<'_>,
         model: Option<&mut dyn Embedder>,
     ) -> Result<SearchReport> {
-        self.lookup_search(snapshot, input, options, model, IndexPreparation::Existing)
+        self.lookup_search(
+            InventoryReader::materialized(self, snapshot),
+            input,
+            options,
+            model,
+            IndexPreparation::Existing,
+        )
     }
 
     /// Prepare a bounded slice independently of any query.
@@ -192,23 +239,40 @@ impl Archive {
         budget: usize,
         model: Option<&mut dyn Embedder>,
     ) -> Result<SearchPreparation> {
-        self.prepare_search_index(snapshot, budget, model, false)
+        self.prepare_search_index(
+            InventoryReader::materialized(self, snapshot),
+            budget,
+            model,
+            false,
+        )
     }
 
-    pub(crate) fn prepare_search_index(
+    #[cfg(feature = "cli")]
+    pub(crate) fn prepare_selected_search(
         &self,
-        snapshot: &Snapshot,
+        head: Option<Id>,
+        budget: usize,
+        model: Option<&mut dyn Embedder>,
+        rebuild: bool,
+    ) -> Result<SearchPreparation> {
+        let inventory = self.inventory_reader(self.selected_search_id(head)?)?;
+        self.prepare_search_index(inventory, budget, model, rebuild)
+    }
+
+    fn prepare_search_index(
+        &self,
+        mut inventory: InventoryReader<'_>,
         budget: usize,
         model: Option<&mut dyn Embedder>,
         rebuild: bool,
     ) -> Result<SearchPreparation> {
         ensure!(budget > 0, "positive index budget required");
-        let head = snapshot.id()?;
+        let head = inventory.id()?;
         let key = head.to_string();
-        self.prepare_lexical_index(snapshot, &key, budget, rebuild)?;
+        self.prepare_lexical_index(&mut inventory, &key, budget, rebuild)?;
         let model_key = if let Some(model) = model {
             let id = model.id().to_string();
-            self.refresh_search_vectors(snapshot, &key, model, budget)?;
+            self.refresh_search_vectors(&mut inventory, &key, model, budget)?;
             Some(id)
         } else {
             None
@@ -236,9 +300,34 @@ impl Archive {
         })
     }
 
-    pub(crate) fn lookup_search(
+    #[cfg(feature = "cli")]
+    pub(crate) fn prepared_search_head(&self, head: Option<Id>) -> Result<Option<Id>> {
+        self.with_read_view(|| {
+            let head = self.search_head_id(head)?;
+            if cache::current_schema(&self.db)? && coverage(&self.db, &head.to_string())?.0 {
+                Ok(Some(head))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    #[cfg(feature = "cli")]
+    pub(crate) fn find_selected(
         &self,
-        snapshot: &Snapshot,
+        head: Option<Id>,
+        input: SearchInput<'_>,
+        options: SearchOptions<'_>,
+        model: Option<&mut dyn Embedder>,
+        preparation: IndexPreparation,
+    ) -> Result<SearchReport> {
+        let inventory = self.inventory_reader(self.selected_search_id(head)?)?;
+        self.lookup_search(inventory, input, options, model, preparation)
+    }
+
+    fn lookup_search(
+        &self,
+        mut inventory: InventoryReader<'_>,
         input: SearchInput<'_>,
         options: SearchOptions<'_>,
         model: Option<&mut dyn Embedder>,
@@ -279,13 +368,11 @@ impl Archive {
                 (Vec::new(), Some(media), false)
             }
         };
-        let mut report = SearchReport::start(snapshot.id()?, options, limited)?;
+        let mut report = SearchReport::start(inventory.id()?, options, limited)?;
         let head = report.head;
         if let Some(id) = input.exact_id() {
             return self.with_read_view(|| {
-                Self::exact_report(report, id, options, |key| {
-                    self.resolve(snapshot, key, "read")
-                })
+                Self::exact_report(report, id, options, |key| Ok(inventory.resolve(key)?.0))
             });
         }
 
@@ -320,12 +407,20 @@ impl Archive {
         match preparation {
             IndexPreparation::Existing => {}
             IndexPreparation::Lexical => {
-                self.prepare_lexical_index(snapshot, &head, options.index_budget, false)?;
+                self.init_search()?;
+                if !coverage(&self.db, &head)?.0 {
+                    self.refresh_search(&mut inventory, &head, options.index_budget)?;
+                }
             }
             IndexPreparation::Full { rebuild } => {
-                self.prepare_lexical_index(snapshot, &head, options.index_budget, rebuild)?;
+                self.prepare_lexical_index(&mut inventory, &head, options.index_budget, rebuild)?;
                 if let Some(model) = model {
-                    self.refresh_search_vectors(snapshot, &head, model, options.index_budget)?;
+                    self.refresh_search_vectors(
+                        &mut inventory,
+                        &head,
+                        model,
+                        options.index_budget,
+                    )?;
                 }
             }
         }
@@ -349,6 +444,20 @@ impl Archive {
             report.limited_coverage |= media_exists;
         }
         let mut work = VectorWork::default();
+        let mut access = cache::EntryAccess::new(&read, &inventory)?;
+        let mut previous_entry = None;
+        let mut rejected_entry = false;
+        let mut entry_allowed = |entry| {
+            if let Some((previous, allowed)) = previous_entry
+                && previous == entry
+            {
+                return allowed;
+            }
+            let allowed = access.allows(&mut inventory, entry);
+            previous_entry = Some((entry, allowed));
+            rejected_entry |= !allowed;
+            allowed
+        };
         let candidates = rank(
             &read,
             &head,
@@ -364,13 +473,16 @@ impl Archive {
                     minimum,
                 }),
             &mut work,
+            &mut entry_allowed,
         )?;
+        drop(access);
+        report.limited_coverage |= rejected_entry;
         report.vector_budget_exhausted = work.bounded;
         report.vector_products = work.products;
         report.vector_rows_examined = work.rows_examined;
         report.vector_rows_loaded = work.vectors_loaded;
         for candidate in candidates {
-            let Ok(document) = self.read(snapshot, candidate.id, "read") else {
+            let Ok(document) = inventory.read(candidate.id) else {
                 report.limited_coverage = true;
                 continue;
             };
@@ -381,8 +493,6 @@ impl Archive {
             )?;
             let mut location = serde_json::from_str(&location)?;
             let snippet = if let SearchLocation::Media { span, .. } = &mut location {
-                // Candidate visibility and the withdrawal trigger cover every
-                // source dependency. Recovery verifies the original payload bytes.
                 let part = candidate
                     .semantic
                     .and_then(|item| item.part)
@@ -395,10 +505,10 @@ impl Archive {
                 *span = serde_json::from_str(&encoded)?;
                 None
             } else {
-                let Some(snippet) = self
-                    .search_snippet(snapshot, &document, &location)
-                    .ok()
-                    .flatten()
+                let Some(snippet) =
+                    Self::search_snippet(&document, &location, |id| Ok(inventory.resolve(id)?.0))
+                        .ok()
+                        .flatten()
                 else {
                     report.limited_coverage = true;
                     continue;
@@ -406,7 +516,7 @@ impl Archive {
                 Some(snippet)
             };
             let mut hit = Self::search_hit(
-                |key| self.resolve(snapshot, key, "read").is_ok(),
+                |key| inventory.resolve(key).is_ok(),
                 candidate.id,
                 Some(&document),
                 location,

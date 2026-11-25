@@ -1,17 +1,24 @@
+mod backlinks;
 mod exchange;
 mod extents;
 mod inventory;
+mod point;
 mod upgrade;
 pub use inventory::Manifest;
 pub mod custody;
 mod search_index;
 pub mod sharing;
 mod snapshot;
-pub use exchange::{Bundle, ExchangePage, ExchangeProgress, MemberProof, Packet};
+pub(crate) use backlinks::BacklinkIndex;
+pub use exchange::{
+    Bundle, ExchangeImportStatus, ExchangePage, ExchangeProgress, MemberProof, Packet,
+};
 #[cfg(feature = "cli")]
 pub(crate) use search_index::IndexPreparation;
-pub(crate) use snapshot::ManifestEncoding;
 pub use snapshot::Snapshot;
+pub(crate) use snapshot::{
+    InventoryBudgetExceeded, InventoryReadBudget, InventoryReader, ManifestEncoding,
+};
 
 use crate::profile::TrainingAccess;
 use crate::{
@@ -48,6 +55,20 @@ pub struct Page {
 pub struct Archive {
     pub(crate) db: Connection,
 }
+#[derive(Serialize)]
+pub struct ArchiveStatus {
+    pub full_snapshot: Option<WorkingSnapshot>,
+    pub search_head: Option<Id>,
+    pub search_pinned: bool,
+    pub pending_objects: u64,
+}
+
+#[derive(Serialize)]
+pub struct WorkingSnapshot {
+    pub id: Id,
+    pub source: String,
+    pub withdrawals_since: i64,
+}
 impl Archive {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -67,27 +88,25 @@ impl Archive {
         }
         Self::init(Connection::open(path)?)
     }
-    /// Open a current archive without taking a writer lock. Older or new archives still
-    /// initialize through the transactional upgrade path.
+    /// Open an existing, current archive without initialization or migration.
     pub fn open_for_read(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        if path.is_file() {
-            let reader = Self::custody_reader(path)?;
-            let current: bool = reader.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='archive_member_access' AND type='table')",
-                [], |r| r.get(0),
-            )?;
-            if current
-                && reader
-                    .db
-                    .query_row("SELECT EXISTS(SELECT 1 FROM archive_layout)", [], |r| {
-                        r.get::<_, bool>(0)
-                    })?
-            {
-                return Ok(reader);
-            }
-        }
-        Self::open(path)
+        let reader = Self::custody_reader(path)?;
+        let has_layout: bool = reader.db.query_row(
+            "SELECT count(*)=2 FROM sqlite_schema
+             WHERE type='table' AND name IN ('archive_layout','archive_member_access')",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            has_layout
+                && reader.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM archive_layout)",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )?,
+            "archive needs initialization or upgrade; use nao init or nao migrate-archive"
+        );
+        Ok(reader)
     }
     pub fn memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
@@ -111,6 +130,8 @@ impl Archive {
         CREATE TABLE IF NOT EXISTS revocations(authority TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, request BLOB NOT NULL, state TEXT NOT NULL, witness TEXT);")?;
         archive.init_custody()?;
+        extents::upgrade(&archive.db)?;
+        point::upgrade(&archive.db)?;
         for bytes in [PUBLIC, READ_ONLY, PROFILE] {
             archive.blob(bytes, Id::blob(PUBLIC))?;
         }
@@ -170,10 +191,7 @@ impl Archive {
             tx.execute("UPDATE objects SET data=NULL WHERE id=?", [id.to_string()])? == 1,
             "unknown payload"
         );
-        tx.execute(
-            "DELETE FROM archive_extent_blocks WHERE id=?",
-            [id.to_string()],
-        )?;
+        extents::remove(&tx, &id.to_string())?;
         tx.execute("INSERT OR IGNORE INTO suspended_releases SELECT head FROM archive_release_members WHERE member=?",[id.to_string()])?;
         tx.commit()?;
         Ok(())
@@ -189,12 +207,32 @@ impl Archive {
         )?)
     }
     pub(crate) fn raw(&self, id: Id) -> Result<Option<(Vec<u8>, Id)>> {
-        let item: Option<(Vec<u8>, String,Option<i64>)> = self
+        if self.point_only(id)? {
+            return Ok(None);
+        }
+        self.raw_catalog_bytes(id)
+    }
+
+    fn raw_catalog_bytes(&self, id: Id) -> Result<Option<(Vec<u8>, Id)>> {
+        // Project the extent row so read-only handles also work before and across layout upgrades.
+        let item: Option<(Vec<u8>, String, Option<i64>)> = self
             .db
-            .prepare_cached("SELECT CASE WHEN r.id IS NULL THEN o.data ELSE substr(p.data,r.start+1,r.length) END,o.access,e.length FROM objects o LEFT JOIN custody_records r ON o.id=r.id
-                   LEFT JOIN custody_packs p ON p.id=r.pack
-                   LEFT JOIN archive_extents e ON e.id=o.id WHERE o.id=? AND o.data IS NOT NULL")?
-            .query_row([id.to_string()], |r| Ok((r.get(0)?, r.get(1)?,r.get(2)?)))
+            .prepare_cached(
+                "SELECT CASE WHEN r.id IS NULL THEN o.data ELSE substr(p.data,r.start+1,r.length) END,
+                        o.access,e.*
+                 FROM objects o LEFT JOIN custody_records r ON o.id=r.id
+                 LEFT JOIN custody_packs p ON p.id=r.pack LEFT JOIN archive_extents e ON e.id=o.id
+                 WHERE o.id=? AND o.data IS NOT NULL",
+            )?
+            .query_row([id.to_string()], |row| {
+                let access = row.get(1)?;
+                if let Ok(column) = row.as_ref().column_index("inline_data")
+                    && let Some(bytes) = row.get(column)?
+                {
+                    return Ok((bytes, access, None));
+                }
+                Ok((row.get(0)?, access, row.get("length")?))
+            })
             .optional()?;
         item.map(|(b, a, length)| {
             let b = if let Some(n) = length {
@@ -208,8 +246,14 @@ impl Archive {
         .transpose()
     }
     pub fn resolve(&self, s: &Snapshot, id: Id, purpose: &str) -> Result<Vec<u8>> {
-        self.resolve_with(s, id, |policy| allows(policy, purpose))
+        self.resolve_with(s, id, purpose == "read", |policy| allows(policy, purpose))
             .map(|(bytes, _)| bytes)
+    }
+
+    pub(crate) fn resolve_local(&self, id: Id) -> Result<Vec<u8>> {
+        let (bytes, access) = self.raw(id)?.context("unavailable")?;
+        self.check_access(access, |policy| allows(policy, "read"))?;
+        Ok(bytes)
     }
     pub(crate) fn resolve_for_training(
         &self,
@@ -217,34 +261,59 @@ impl Archive {
         id: Id,
         access: &TrainingAccess<'_>,
     ) -> Result<Vec<u8>> {
-        self.resolve_with(s, id, |policy| access.allows(policy))
+        self.resolve_with(s, id, false, |policy| access.allows(policy))
             .map(|(bytes, _)| bytes)
     }
     fn resolve_with(
         &self,
         s: &Snapshot,
         id: Id,
+        point_read: bool,
         allows: impl FnOnce(&[u8]) -> bool,
     ) -> Result<(Vec<u8>, Id)> {
         ensure!(s.objects.contains(&id), "outside snapshot");
-        let (b, acl) = self.raw(id)?.context("unavailable")?;
+        let (b, acl) = self.raw_catalog_bytes(id)?.context("unavailable")?;
         ensure!(s.objects.contains(&acl), "missing access descriptor");
+        self.require_point_scope(id, acl, point_read.then(|| s.id()).transpose()?)?;
+        self.require_snapshot_exchange_access(s, id, acl, point_read)?;
         self.check_access(acl, allows)?;
         Ok((b, acl))
     }
-    /// Check presence and read permission without materializing the payload.
-    pub(crate) fn readable(&self, s: &Snapshot, id: Id) -> Result<()> {
-        ensure!(s.objects.contains(&id), "outside snapshot");
-        let acl: String = self.db.query_row(
-            "SELECT access FROM objects WHERE id = ?1 AND data IS NOT NULL",
-            [id.to_string()],
-            |row| row.get(0),
-        )?;
-        let acl = acl.parse()?;
-        ensure!(s.objects.contains(&acl), "missing access descriptor");
-        self.check_access(acl, |policy| crate::profile::allows(policy, "read"))
+    /// Return the checked read grant without materializing the payload.
+    pub(crate) fn readable(&self, s: &Snapshot, id: Id) -> Result<Id> {
+        let access = self.snapshot_read_access(s, id)?;
+        self.check_access(access, |policy| allows(policy, "read"))?;
+        Ok(access)
     }
-    fn check_access(&self, acl: Id, allows: impl FnOnce(&[u8]) -> bool) -> Result<()> {
+
+    fn snapshot_read_access(&self, s: &Snapshot, id: Id) -> Result<Id> {
+        self.read_access_with(
+            id,
+            |key| Ok(s.objects.contains(&key)),
+            |acl| {
+                self.require_point_scope(id, acl, Some(s.id()?))?;
+                self.require_snapshot_exchange_access(s, id, acl, true)
+            },
+        )
+    }
+
+    fn read_access_with(
+        &self,
+        id: Id,
+        mut contains: impl FnMut(Id) -> Result<bool>,
+        require_access: impl FnOnce(Id) -> Result<()>,
+    ) -> Result<Id> {
+        ensure!(contains(id)?, "outside snapshot");
+        let acl: String = self
+            .db
+            .prepare_cached("SELECT access FROM objects WHERE id=? AND data IS NOT NULL")?
+            .query_row([id.to_string()], |row| row.get(0))?;
+        let acl = acl.parse()?;
+        ensure!(contains(acl)?, "missing access descriptor");
+        require_access(acl)?;
+        Ok(acl)
+    }
+    pub(crate) fn check_access(&self, acl: Id, allows: impl FnOnce(&[u8]) -> bool) -> Result<()> {
         let (policy, parent) = self.raw(acl)?.context("unavailable access policy")?;
         ensure!(
             acl.format().is_none() && parent == Id::blob(PUBLIC) && allows(&policy),
@@ -269,7 +338,7 @@ impl Archive {
     /// An executor authority, decision and attestation must carry the public descriptor.
     pub(crate) fn read_public(&self, s: &Snapshot, id: Id) -> Result<Document> {
         self.read_with(id, |input| {
-            self.resolve_with(s, input, |descriptor| descriptor == PUBLIC)
+            self.resolve_with(s, input, false, |descriptor| descriptor == PUBLIC)
                 .map(|(bytes, _)| bytes)
         })
     }
@@ -281,7 +350,7 @@ impl Archive {
     ) -> Result<Document> {
         self.read_with(id, |id| self.resolve_for_training(s, id, access))
     }
-    fn read_with(
+    pub(crate) fn read_with(
         &self,
         id: Id,
         mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
@@ -353,7 +422,7 @@ impl Archive {
         budget: usize,
         depth: usize,
         value_only: Option<Id>,
-        resolve: impl Fn(Id) -> Result<Vec<u8>>,
+        mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
     ) -> Closure {
         let mut result = Closure::default();
         let mut queue: VecDeque<_> = roots.iter().map(|id| (*id, 0)).collect();
@@ -439,11 +508,22 @@ impl Archive {
                     budget,
                     || {
                         let format = id.format().context("expected record")?;
-                        let (bytes, _) =
-                            self.resolve_inventory_member(&manifest, id, purpose, &mut tree)?;
+                        let (bytes, _) = self.resolve_inventory_member(
+                            &manifest,
+                            id,
+                            purpose,
+                            purpose == "read",
+                            &mut tree,
+                        )?;
                         Self::decode_document(format, &bytes, |profile| {
                             Ok(self
-                                .resolve_member_in(&manifest, profile, purpose, &mut tree)?
+                                .resolve_member_in(
+                                    &manifest,
+                                    profile,
+                                    purpose,
+                                    purpose == "read",
+                                    &mut tree,
+                                )?
                                 .0)
                         })
                     },
@@ -531,6 +611,25 @@ pub(crate) enum ObjectAvailability {
 }
 
 fn insert(db: &Connection, id: Id, b: &[u8], access: Id) -> Result<ObjectAvailability> {
+    let tx = if db.is_autocommit() {
+        Some(rusqlite::Transaction::new_unchecked(
+            db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    } else {
+        None
+    };
+    let available = insert_bytes(db, id, b, access)?;
+    if available == ObjectAvailability::Available {
+        point::promote(db, &id.to_string())?;
+    }
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
+    Ok(available)
+}
+
+fn insert_bytes(db: &Connection, id: Id, b: &[u8], access: Id) -> Result<ObjectAvailability> {
     if id.format().is_some()
         && db
             .prepare_cached("SELECT EXISTS(SELECT 1 FROM custody_records WHERE id=? AND access=?)")?
@@ -543,19 +642,26 @@ fn insert(db: &Connection, id: Id, b: &[u8], access: Id) -> Result<ObjectAvailab
     if id.format().is_none() && b.len() > custody::BLOCK {
         return extents::put(db, id, b, access);
     }
-    let added = db.execute(
-        "INSERT OR IGNORE INTO objects VALUES(?,?,?)",
-        params![id.to_string(), b, access.to_string()],
-    )?;
+    let key = id.to_string();
+    let access = access.to_string();
+    let added = db
+        .prepare_cached(
+            "INSERT OR IGNORE INTO objects
+             SELECT ?1,CASE WHEN EXISTS(SELECT 1 FROM archive_extents WHERE id=?1)
+                            THEN x'' ELSE ?2 END,?3",
+        )?
+        .execute(params![key, b, access])?;
     if added != 0 {
         return Ok(ObjectAvailability::Available);
     }
 
-    let (same, withdrawn): (bool, bool) = db.query_row(
-        "SELECT access=? AND (data IS NULL OR data=?), data IS NULL FROM objects WHERE id=?",
-        params![access.to_string(), b, id.to_string()],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
+    let (same, withdrawn): (bool, bool) = db
+        .prepare_cached(
+            "SELECT access=?2 AND (data IS NULL OR data=?3 OR
+                     EXISTS(SELECT 1 FROM archive_extents WHERE id=?1)),data IS NULL
+             FROM objects WHERE id=?1",
+        )?
+        .query_row(params![key, access, b], |r| Ok((r.get(0)?, r.get(1)?)))?;
     if !same {
         bail!("conflicting access or bytes for immutable object {id}");
     }

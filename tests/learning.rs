@@ -941,6 +941,98 @@ fn historical_extraction_reads_mapping_manifests_under_the_receipts_rules() -> R
 }
 
 #[test]
+fn replica_review_admits_only_members_authorized_by_a_selected_source() -> Result<()> {
+    use naome_protocol::store::custody::{Item, MEMBERS, Member};
+    let mut archive = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let policy = fixture::policy(&archive, Format::A)?;
+    let bytes = b"independent bytes with a conflicting legacy access grant";
+    let withheld_id = Id::blob(bytes);
+    for suffix in (0_u64..)
+        .map(u64::to_be_bytes)
+        .filter(|bytes| Id::blob(bytes) > withheld_id)
+        .take(MEMBERS)
+    {
+        archive.blob(&suffix, public)?;
+    }
+    let labels = archive.snapshot_id("local labels", Default::default())?;
+    let source = Archive::memory()?;
+    let member = source.blob(bytes, Id::blob(READ_ONLY))?;
+    let remote = source.snapshot_id("peer custody", Default::default())?;
+    let full = source.export_legacy_exchange_page(remote, None, 64)?;
+    source.withdraw(member)?;
+    let omitted = source.export_legacy_exchange_page(remote, None, 64)?;
+    assert_eq!(archive.blob(bytes, public)?, member);
+    assert!(
+        archive
+            .import_legacy_exchange_page(remote, &omitted)?
+            .complete
+    );
+    archive.release(remote)?;
+    assert!(archive.import_legacy_exchange_page(remote, &full)?.complete);
+    assert!(archive.releases()?.is_empty());
+
+    let mut request = TrainingRequest {
+        policy,
+        feature_cutoff: labels,
+        label_head: labels,
+        forecast_plan: None,
+        standing: Default::default(),
+        mappings: vec![],
+        project: None,
+        examples: vec![],
+        independent_roles: Default::default(),
+        binary: false,
+    };
+    let withheld = archive.review_releases(&request)?.review_horizon;
+    assert_eq!(archive.review_releases(&request)?.review_horizon, withheld);
+    let view = archive.head(withheld)?;
+    assert_eq!(view.parents, [labels, remote].into());
+    assert!(view.objects.contains(&member));
+    assert!(archive.custody_head(withheld)?.restricted);
+    assert!(archive.resolve(&view, member, "train").is_err());
+    assert!(archive.resolve_head(withheld, member, "read").is_err());
+    assert!(archive.custody_resolve(withheld, member, "train").is_err());
+    assert!(archive.export(&view, "train")?.omitted.contains(&member));
+    let prefix = archive.custody_head(withheld)?.parent.unwrap();
+    assert!(archive.head(prefix)?.objects.contains(&member));
+    assert!(archive.resolve_head(prefix, member, "train").is_err());
+    assert!(archive.custody_resolve(prefix, member, "train").is_err());
+    let later = archive
+        .custody_append(
+            &view.source,
+            Some(withheld),
+            &[Item::blob(b"later note".to_vec(), public)],
+        )?
+        .head;
+    assert!(archive.head(later)?.objects.contains(&member));
+    assert!(archive.resolve_head(later, member, "train").is_err());
+    assert!(archive.custody_resolve(later, member, "train").is_err());
+    let conflicting_absence = Item {
+        member: Member {
+            id: member,
+            access: public,
+            position: None,
+            absent: true,
+        },
+        bytes: Vec::new(),
+    };
+    assert!(
+        archive
+            .custody_append(&view.source, Some(later), &[conflicting_absence])
+            .is_err()
+    );
+
+    request.label_head = archive.snapshot_id("independent custody", Default::default())?;
+    let admitted = archive.review_releases(&request)?.review_horizon;
+    assert_ne!(admitted, withheld);
+    assert_eq!(archive.resolve_head(admitted, member, "train")?, bytes);
+    assert_eq!(archive.custody_resolve(admitted, member, "train")?, bytes);
+    assert!(archive.resolve_head(withheld, member, "train").is_err());
+    Ok(())
+}
+
+#[test]
 fn replica_review_preserves_all_origins_beyond_one_manifest() -> Result<()> {
     use naome_protocol::store::sharing::MAX_MANIFEST_PARENTS;
     let a = Archive::memory()?;

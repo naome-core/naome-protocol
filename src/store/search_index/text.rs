@@ -1,5 +1,5 @@
 use super::{
-    Archive, Passage, SearchLocation, Snapshot,
+    InventoryReader, Passage, SearchLocation,
     lexical::{PASSAGE_BYTES, has_oversized_word, ranges},
 };
 use crate::{profile::Document, wire::Id};
@@ -71,49 +71,46 @@ pub(super) fn payload_passages(text: &str, offset: usize) -> impl Iterator<Item 
     })
 }
 
-impl Archive {
-    pub(super) fn index_text_window(
-        &self,
-        snapshot: &Snapshot,
-        object: Id,
-        cursor: usize,
-        length: usize,
-        chunk: &mut VerifiedTextChunk,
-    ) -> Result<(Vec<Passage>, usize, bool)> {
-        let document = self.read(snapshot, object, "read")?;
-        let end = (cursor + TEXT_WINDOW).min(length);
-        let bytes = chunk.read_span(self, snapshot, &document, cursor..end)?;
-        let text = match std::str::from_utf8(&bytes) {
-            Ok(text) => text,
-            Err(error) if end < length && error.error_len().is_none() => {
-                std::str::from_utf8(&bytes[..error.valid_up_to()])?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        // Carry the final portion into the next window. A word starting
-        // here can need more bytes than this read contains.
-        let cutoff = cursor
-            + if end < length {
-                text.len()
-                    .saturating_sub(crate::search::MAX_TEXT_QUERY_BYTES + PASSAGE_BYTES)
-            } else {
-                text.len()
-            };
-        let mut next = cursor + text.len();
-        let mut passages = Vec::new();
-        for passage in payload_passages(text, cursor) {
-            let SearchLocation::Payload { start, .. } = passage.location else {
-                unreachable!("payload passages have payload locations");
-            };
-            if start >= cutoff {
-                next = start;
-                break;
-            }
-            passages.push(passage);
+pub(super) fn index_text_window(
+    inventory: &mut InventoryReader<'_>,
+    object: Id,
+    cursor: usize,
+    length: usize,
+    chunk: &mut VerifiedTextChunk,
+) -> Result<(Vec<Passage>, usize, bool)> {
+    let document = inventory.read(object)?;
+    let end = (cursor + TEXT_WINDOW).min(length);
+    let bytes = chunk.read_span(&document, cursor..end, |id| Ok(inventory.resolve(id)?.0))?;
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        Err(error) if end < length && error.error_len().is_none() => {
+            std::str::from_utf8(&bytes[..error.valid_up_to()])?
         }
-        ensure!(next > cursor, "text index did not advance");
-        Ok((passages, next, has_oversized_word(text)))
+        Err(error) => return Err(error.into()),
+    };
+    // Carry the final portion into the next window. A word starting
+    // here can need more bytes than this read contains.
+    let cutoff = cursor
+        + if end < length {
+            text.len()
+                .saturating_sub(crate::search::MAX_TEXT_QUERY_BYTES + PASSAGE_BYTES)
+        } else {
+            text.len()
+        };
+    let mut next = cursor + text.len();
+    let mut passages = Vec::new();
+    for passage in payload_passages(text, cursor) {
+        let SearchLocation::Payload { start, .. } = passage.location else {
+            unreachable!("payload passages have payload locations");
+        };
+        if start >= cutoff {
+            next = start;
+            break;
+        }
+        passages.push(passage);
     }
+    ensure!(next > cursor, "text index did not advance");
+    Ok((passages, next, has_oversized_word(text)))
 }
 
 impl VerifiedTextChunk {
@@ -121,10 +118,9 @@ impl VerifiedTextChunk {
     /// materialize. Resolve overlapping chunks on first use at this revision.
     pub(super) fn read_span(
         &mut self,
-        archive: &Archive,
-        snapshot: &Snapshot,
         document: &Document,
         range: Range<usize>,
+        mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
     ) -> Result<Vec<u8>> {
         ensure!(
             range.start < range.end && range.end as u64 <= document.field::<u64>("length")?,
@@ -144,7 +140,7 @@ impl VerifiedTextChunk {
             }
             if self.id != Some(link.target) {
                 *self = Self::default();
-                self.bytes = archive.resolve(snapshot, link.target, "read")?;
+                self.bytes = resolve(link.target)?;
                 self.id = Some(link.target);
             }
             let start = range.start.saturating_sub(offset);

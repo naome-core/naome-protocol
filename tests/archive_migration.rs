@@ -153,20 +153,35 @@ fn a_full_parent_seals_only_new_catalog_rows_and_withdrawal_starts_a_new_cut() -
         a.blob(&n.to_le_bytes(), public)?;
     }
     let base = a.snapshot_id("lab", Default::default())?;
-    let added = a.blob(b"after", public)?;
-    let child = a.snapshot_id("lab", [base].into())?;
-    let descriptor = a.custody_head(child)?;
+    let outside = a.blob(b"withdrawn before sealing", public)?;
+    a.withdraw(outside)?;
+    let continued = a.continue_snapshot("lab")?;
+    let descriptor = a.custody_head(continued)?;
     assert_eq!(descriptor.parent, Some(base));
+    assert!(descriptor.delta.is_empty());
+    assert!(!a.head(continued)?.objects.contains(&outside));
+    assert_eq!(a.continue_snapshot("lab")?, continued);
+
+    let added = a.blob(b"after", public)?;
+    let child = a.snapshot_id("lab", [continued].into())?;
+    let descriptor = a.custody_head(child)?;
+    assert_eq!(descriptor.parent, Some(continued));
     assert_eq!(descriptor.delta.len(), 1);
     assert_eq!(descriptor.delta[0].id, added);
-    assert_eq!(a.snapshot_id("lab", [base].into())?, child);
+    assert_eq!(a.snapshot_id("lab", [continued].into())?, child);
     assert!(a.resolve_head(base, added, "read").is_err());
     assert_eq!(a.resolve_head(child, retained, "read")?, b"before");
     a.withdraw(added)?;
     let next = a.snapshot_id("lab", [child].into())?;
+    assert_ne!(a.custody_head(next)?.parent, Some(child));
     assert!(!a.head(next)?.objects.contains(&added));
     assert!(a.head(child)?.objects.contains(&added));
     assert!(a.resolve_head(child, added, "read").is_err());
+
+    a.withdraw(a.blob(b"second withdrawal before sealing", public)?)?;
+    let settled = a.continue_snapshot("lab")?;
+    // Both the earlier withdrawal and the newer unsealed blob are outside this cut.
+    assert_eq!(a.custody_head(settled)?.parent, Some(next));
     Ok(())
 }
 
@@ -520,6 +535,42 @@ fn flat_head(
         params![id.to_string(), &bytes],
     )?;
     Ok((id, bytes))
+}
+
+#[test]
+fn read_commands_preserve_legacy_and_missing_archives() -> Result<()> {
+    use std::process::Command;
+
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join("old.sqlite");
+    let missing = dir.path().join("missing.sqlite");
+    let destination = dir.path().join("upgraded.sqlite");
+    let output = dir.path().join("export.json");
+    let old = flat_archive(&source)?;
+    let (head, _) = flat_head(&old, "legacy", &BTreeSet::new(), &[Id::blob(PUBLIC)].into())?;
+    drop(old);
+    let original = fs::read(&source)?;
+
+    let export = |archive: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_nao"))
+            .arg("--db")
+            .arg(archive)
+            .arg("export")
+            .arg(head.to_string())
+            .arg(&output)
+            .output()
+    };
+    let result = export(&source)?;
+    assert!(!result.status.success());
+    assert!(String::from_utf8(result.stderr)?.contains("nao migrate-archive"));
+    assert_eq!(fs::read(&source)?, original);
+    assert!(!export(&missing)?.status.success());
+    assert!(!missing.exists() && !output.exists());
+
+    Archive::migrate_archive_file(&source, &destination)?;
+    assert!(export(&destination)?.status.success());
+    assert_eq!(fs::read(&source)?, original);
+    Ok(())
 }
 
 #[test]

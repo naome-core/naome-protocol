@@ -41,6 +41,21 @@ impl Archive {
         Ok(usize::try_from(n)?)
     }
     pub(super) fn upgrade_catalog(&self) -> Result<()> {
+        self.upgrade_exchange_staging()?;
+        self.upgrade_full_seals()?;
+        self.upgrade_release_access()?;
+        let old_exchange: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='archive_exchange_progress')",
+            [],
+            |row| row.get(0),
+        )?;
+        if old_exchange {
+            self.db.execute_batch(
+                "INSERT OR IGNORE INTO archive_exchange_sessions(head,verified,cursor,seen,complete)
+                 SELECT head,0,cursor,seen,complete FROM archive_exchange_progress;
+                 DROP TABLE archive_exchange_progress;",
+            )?;
+        }
         if self.db.execute(
             "INSERT OR IGNORE INTO custody_withdrawal_state VALUES(1)",
             [],
@@ -79,7 +94,8 @@ impl Archive {
         }
         let tx = &self.db;
         tx.execute(
-            "INSERT OR IGNORE INTO archive_deposits(id) SELECT id FROM objects ORDER BY rowid",
+            "INSERT OR IGNORE INTO archive_deposits(id) SELECT id FROM objects
+             WHERE NOT EXISTS(SELECT 1 FROM archive_point_only p WHERE p.id=objects.id) ORDER BY rowid",
             [],
         )?;
         // A payload may never have belonged to a stored cut.

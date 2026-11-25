@@ -115,9 +115,11 @@ impl Archive {
                         return Ok(());
                     }
                     let resolved = if let Some(view) = view {
-                        self.resolve_with(view, id, |acl| crate::profile::allows(acl, purpose))
+                        self.resolve_with(view, id, false, |acl| {
+                            crate::profile::allows(acl, purpose)
+                        })
                     } else {
-                        self.resolve_inventory_member(manifest, id, purpose, &mut access)
+                        self.resolve_inventory_member(manifest, id, purpose, false, &mut access)
                     };
                     let Ok((bytes, access)) = resolved else {
                         return Ok(());

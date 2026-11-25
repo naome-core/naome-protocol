@@ -1,5 +1,7 @@
 CREATE TABLE IF NOT EXISTS custody_pages(id TEXT PRIMARY KEY NOT NULL, data BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS custody_heads(id TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS custody_restricted_heads ON custody_heads(id)
+WHERE json_extract(CAST(data AS TEXT),'$.restricted')=1;
 CREATE TABLE IF NOT EXISTS custody_jumps(head TEXT,level INTEGER,ancestor TEXT NOT NULL,PRIMARY KEY(head,level)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS custody_packs(id INTEGER PRIMARY KEY,data BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS custody_records(id TEXT PRIMARY KEY,pack INTEGER NOT NULL,start INTEGER NOT NULL,length INTEGER NOT NULL,access TEXT NOT NULL) WITHOUT ROWID;
@@ -7,7 +9,9 @@ CREATE INDEX IF NOT EXISTS custody_withdrawals ON objects(id) WHERE data IS NULL
 CREATE TABLE IF NOT EXISTS custody_shared(head TEXT PRIMARY KEY REFERENCES custody_heads(id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS custody_receipts(id TEXT PRIMARY KEY,data BLOB NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS custody_tips(source TEXT,head TEXT,PRIMARY KEY(source,head)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS archive_extents(id TEXT PRIMARY KEY,length INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_extents(
+    id TEXT PRIMARY KEY,length INTEGER NOT NULL,inline_data BLOB
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS archive_extent_blocks(id TEXT,ordinal INTEGER,data BLOB NOT NULL,PRIMARY KEY(id,ordinal)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS archive_historical(id TEXT PRIMARY KEY,manifest BLOB NOT NULL,current TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS archive_layout(singleton INTEGER PRIMARY KEY CHECK(singleton=1));
@@ -16,13 +20,17 @@ INSERT OR IGNORE INTO archive_epoch VALUES(1,0);
 CREATE TRIGGER IF NOT EXISTS archive_withdrawal_epoch AFTER UPDATE OF data ON objects
 WHEN OLD.data IS NOT NULL AND NEW.data IS NULL
 BEGIN UPDATE archive_epoch SET withdrawn=withdrawn+1 WHERE singleton=1; END;
-CREATE TABLE IF NOT EXISTS archive_seals(id TEXT PRIMARY KEY,source TEXT NOT NULL,parents TEXT NOT NULL, high_water INTEGER NOT NULL,epoch INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS archive_seals(
+    id TEXT PRIMARY KEY,source TEXT NOT NULL,parents TEXT NOT NULL,
+    high_water INTEGER NOT NULL,epoch INTEGER NOT NULL,withdrawal_serial INTEGER
+);
 CREATE INDEX IF NOT EXISTS archive_seals_lookup ON archive_seals(source,parents,high_water,epoch);
 CREATE TABLE IF NOT EXISTS archive_deposits(serial INTEGER PRIMARY KEY,id TEXT NOT NULL UNIQUE);
 CREATE TRIGGER IF NOT EXISTS archive_catalog_append AFTER INSERT ON objects
 BEGIN INSERT OR IGNORE INTO archive_deposits(id) VALUES(NEW.id); END;
 CREATE TABLE IF NOT EXISTS archive_prior_heads(id TEXT PRIMARY KEY,descriptor BLOB NOT NULL,current TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS archive_release_members(member TEXT NOT NULL,head TEXT NOT NULL REFERENCES releases(head),PRIMARY KEY(member,head)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_release_access_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1));
 
 CREATE TABLE IF NOT EXISTS custody_pull_cursors(target TEXT PRIMARY KEY,cursor TEXT NOT NULL,sequence INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS custody_withdrawal_log(serial INTEGER PRIMARY KEY,object TEXT UNIQUE NOT NULL);
@@ -34,3 +42,19 @@ BEGIN INSERT OR IGNORE INTO custody_withdrawal_log(object) VALUES(NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS custody_log_absence AFTER INSERT ON objects WHEN NEW.data IS NULL
 BEGIN INSERT OR IGNORE INTO custody_withdrawal_log(object) VALUES(NEW.id); END;
 CREATE TABLE IF NOT EXISTS archive_member_access(head TEXT NOT NULL,member TEXT NOT NULL,access TEXT NOT NULL,PRIMARY KEY(head,member)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_point_access(head TEXT NOT NULL,member TEXT NOT NULL,access TEXT NOT NULL,PRIMARY KEY(head,member)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_exchange_sessions(
+    head TEXT NOT NULL, verified INTEGER NOT NULL, cursor TEXT, seen INTEGER NOT NULL,
+    complete INTEGER NOT NULL, descriptor BLOB,
+    supplied INTEGER CHECK(supplied BETWEEN 0 AND seen), PRIMARY KEY(head,verified)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_exchange_staged(
+    head TEXT NOT NULL, verified INTEGER NOT NULL, id TEXT NOT NULL, access TEXT NOT NULL,
+    PRIMARY KEY(head,verified,id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_exchange_backlinks(
+    head TEXT NOT NULL,target TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(head,target,record)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS archive_exchange_backlink_state(
+    head TEXT PRIMARY KEY,seen INTEGER NOT NULL,covered INTEGER NOT NULL
+) WITHOUT ROWID;

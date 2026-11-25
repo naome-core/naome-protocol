@@ -5,13 +5,14 @@ use crate::{
     store::{
         ObjectAvailability,
         custody::{Head, MEMBERS, tree::Tree},
-        insert,
+        insert_bytes,
         inventory::{Page, Pages},
+        point,
     },
     wire::{Id, MAX_BYTES},
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -70,6 +71,14 @@ pub(super) fn path(
         root = *value;
     }
     anyhow::bail!("membership proof depth limit")
+}
+
+pub(super) fn committed_access(
+    head: &Head,
+    member: Id,
+    load: impl FnMut(Id) -> Result<Page>,
+) -> Result<Id> {
+    path(head.tree, &format!("o/{member}"), load)
 }
 
 impl MemberProof {
@@ -140,7 +149,7 @@ impl Archive {
                     path(h.inventory, &key.to_string(), &mut load)? == key,
                     "invalid inventory membership"
                 );
-                let access = path(h.tree, &format!("o/{key}"), &mut load)?;
+                let access = committed_access(&h, key, &mut load)?;
                 let bytes = self.custody_resolve(head, key, "read")?;
                 if let Some(record) = validate(key, &bytes, access)? {
                     pending.push(record.profile);
@@ -202,15 +211,15 @@ impl Archive {
             };
             ensure!(
                 path(h.inventory, &p.id.to_string(), &mut load)? == p.id
-                    && path(h.tree, &format!("o/{}", p.id), &mut load)? == p.access,
+                    && committed_access(h, p.id, &mut load)? == p.access,
                 "unbound packet"
             );
             ensure!(p.hex.len() <= 2 * MAX_BYTES, "oversized member");
             remaining = remaining
                 .checked_sub(p.hex.len())
                 .context("member proof byte limit")?;
-            let bytes = hex::decode(&p.hex)?;
-            if let Some(r) = validate(p.id, &bytes, p.access)? {
+            let mut bytes = Vec::new();
+            if let Some(r) = p.decode(&mut bytes)? {
                 ensure!(
                     requested.binary_search(&p.id).is_ok(),
                     "unexpected additional record"
@@ -249,52 +258,46 @@ impl Archive {
             &self.db,
             rusqlite::TransactionBehavior::Immediate,
         )?;
+        let head_key = head.to_string();
+        let mut added_grant = false;
         for (key, (access, bytes)) in contents {
+            point::mark_new(&tx, key)?;
             ensure!(
-                insert(&tx, key, &bytes, access)? == ObjectAvailability::Available,
+                insert_bytes(&tx, key, &bytes, access)? == ObjectAvailability::Available,
                 "locally withdrawn point disclosure"
             );
-            tx.execute(
-                "INSERT OR IGNORE INTO archive_member_access VALUES(?,?,?)",
-                params![head.to_string(), key.to_string(), access.to_string()],
-            )?;
+            added_grant |= tx.execute(
+                "INSERT OR IGNORE INTO archive_point_access VALUES(?,?,?)",
+                params![head_key, key.to_string(), access.to_string()],
+            )? != 0;
+        }
+        if added_grant {
+            crate::store::search_index::invalidate_access_scope(&tx, &head_key)?;
         }
         tx.commit()?;
         Ok(requested.to_vec())
     }
 
     pub(in crate::store) fn point_bytes(&self, head: Id, id: Id, purpose: &str) -> Result<Vec<u8>> {
-        if !self
-            .db
-            .prepare_cached(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='archive_member_access')",
-            )?
-            .query_row([], |r| r.get::<_, bool>(0))?
+        if let Some(proved) = self.point_access(head, id)?
+            && !self
+                .db
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM heads WHERE id=?)")?
+                .query_row([head.to_string()], |row| row.get::<_, bool>(0))?
         {
-            return Ok(self
-                .resolve_member(&self.active_manifest(head)?, id, purpose)?
-                .0);
-        }
-        let present: Option<String> = self
-            .db
-            .prepare_cached(
-                "SELECT access FROM archive_member_access WHERE head=?1 AND member=?2
-             AND NOT EXISTS(SELECT 1 FROM heads WHERE id=?1)",
-            )?
-            .query_row(params![head.to_string(), id.to_string()], |r| r.get(0))
-            .optional()?;
-        if let Some(proved) = present {
             ensure!(
                 purpose == "read",
                 "point disclosure authorizes reading only"
             );
-            let (bytes, access) = self.raw(id)?.context("unavailable point member")?;
-            ensure!(access == proved.parse()?, "point access changed");
+            let (bytes, access) = self
+                .raw_catalog_bytes(id)?
+                .context("unavailable point member")?;
+            ensure!(access == proved, "point access changed");
             self.check_access(access, |p| allows(p, purpose))?;
             return Ok(bytes);
         }
         Ok(self
-            .resolve_member(&self.active_manifest(head)?, id, purpose)?
+            .resolve_member(&self.active_manifest(head)?, id, purpose, purpose == "read")?
             .0)
     }
 }

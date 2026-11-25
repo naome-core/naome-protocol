@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     profile::allows,
-    wire::{Id, MAX_BYTES},
+    wire::{Id, MAX_BYTES, Record},
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::Connection;
@@ -19,7 +19,7 @@ use std::{
 
 mod member;
 mod page;
-pub use page::{ExchangePage, ExchangeProgress};
+pub use page::{ExchangeImportStatus, ExchangePage, ExchangeProgress};
 mod stream;
 pub use member::MemberProof;
 
@@ -32,6 +32,14 @@ pub struct Packet {
     pub id: Id,
     pub access: Id,
     pub hex: String,
+}
+
+impl Packet {
+    fn decode(&self, bytes: &mut Vec<u8>) -> Result<Option<Record>> {
+        ensure!(self.hex.len() <= 2 * MAX_BYTES, "oversized packet");
+        decode_packet_hex(&self.hex, bytes)?;
+        validate(self.id, bytes, self.access)
+    }
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(try_from = "WireBundle")]
@@ -163,7 +171,7 @@ fn decode_packet_hex(encoded: &str, decoded: &mut Vec<u8>) -> Result<(), hex::Fr
 
 impl Archive {
     fn packet(&self, s: &Snapshot, id: Id, purpose: &str) -> Result<Packet> {
-        let (bytes, access) = self.resolve_with(s, id, |policy| allows(policy, purpose))?;
+        let (bytes, access) = self.resolve_with(s, id, false, |policy| allows(policy, purpose))?;
         Ok(Packet {
             id,
             access,
@@ -331,9 +339,7 @@ impl Archive {
 }
 
 fn add_packet(db: &Connection, packet: &Packet, bytes: &mut Vec<u8>) -> Result<()> {
-    ensure!(packet.hex.len() <= 2 * MAX_BYTES, "oversized packet");
-    decode_packet_hex(&packet.hex, bytes)?;
-    validate(packet.id, bytes, packet.access)?;
+    packet.decode(bytes)?;
     insert(db, packet.id, bytes, packet.access)?;
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Immutable B+ tree pages keyed by ASCII protocol keys. Admission batches are sorted once.
 use crate::wire::Id;
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -11,6 +11,17 @@ use std::{
 const FANOUT: usize = 32;
 const MAX_PAGE: usize = 16 * 1024;
 type Entry = (String, Id);
+
+#[derive(Debug)]
+pub(in crate::store) struct MissingPage(pub Id);
+
+impl std::fmt::Display for MissingPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "missing inventory page {}", self.0)
+    }
+}
+
+impl std::error::Error for MissingPage {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Page {
@@ -69,7 +80,8 @@ impl<'a> Tree<'a> {
             .db
             .prepare_cached("SELECT data FROM custody_pages WHERE id=?")?
             .query_row([id.to_string()], |row| row.get(0))
-            .context("missing inventory page")?;
+            .optional()?
+            .with_context(|| MissingPage(id))?;
         ensure!(stored.len() <= MAX_PAGE, "oversized backing page");
         self.io.backing_reads += 1;
         self.io.backing_read_bytes += stored.len() as u64;
@@ -198,7 +210,7 @@ impl<'a> Tree<'a> {
             }
         }
     }
-    fn cached(&mut self, id: Id) -> Result<Rc<Page>> {
+    pub(in crate::store) fn cached(&mut self, id: Id) -> Result<Rc<Page>> {
         if let Some(page) = self.cache.get(&id) {
             return Ok(Rc::clone(page));
         }
