@@ -661,3 +661,185 @@ fn compact_explanation_pages_can_match_notices_to_other_pages_dependencies() -> 
     assert_eq!(json!(matches), full["candidate_notices"]);
     Ok(())
 }
+
+#[test]
+fn partial_exchange_separates_notice_coverage_from_a_missing_reading() -> Result<()> {
+    let (author, mut query, source, _, evidence, coverage) = unrelated_raw_reading_setup()?;
+    let format = Format::B;
+    let study = Study {
+        archive: &author,
+        format,
+    };
+    let issuer = fixture_key(ISSUER);
+    let key = hex::encode(issuer.verifying_key().to_bytes());
+    let policy = author.read(
+        &author.snapshot("initial policy", Default::default())?,
+        query.policy,
+        "read",
+    )?;
+    let original_policy = query.policy;
+    let mut opted_in = policy;
+    opted_in.fields.get_mut("keys").unwrap()["non-notice-occurrence"] = json!([key]);
+    query.policy = author.document(&opted_in, format, Id::blob(PUBLIC))?;
+
+    let outside = json!({"profile":"table-rows-1","selector":{"ranges":[[4,5]]}});
+    let outside_query = study.query(
+        query.target,
+        query.policy,
+        study.use_source(source, &outside),
+        220,
+        vec![],
+    )?;
+    let affected_query = study.query(
+        query.target,
+        query.policy,
+        study.use_source(source, &coverage),
+        220,
+        vec![],
+    )?;
+    let (notice, correction_signature) = study.notice(source, &coverage, evidence, ISSUER)?;
+    let new_source = author.blob(b"revised source version", Id::blob(PUBLIC))?;
+    let replacement = study.query(
+        query.target,
+        query.policy,
+        study.use_source(new_source, &coverage),
+        170,
+        vec![link("correction", notice)],
+    )?;
+    let initial = author.snapshot("inputs with replacement", Default::default())?;
+    let omitted = author
+        .read(&initial, replacement.arguments[0], "read")?
+        .one("reading")?;
+    let coverage_signature =
+        author.certify_non_notice_occurrence(&initial, omitted, &issuer, format)?;
+    assert!(
+        author
+            .certify_non_notice_occurrence(&initial, notice, &issuer, format)
+            .is_err()
+    );
+
+    let forged_notice_class = sign(
+        &author,
+        format,
+        notice,
+        "notice-coverage-1",
+        "non-notice-occurrence",
+        ISSUER,
+    )?;
+    let contradiction = author.snapshot("correction and classification", [initial.id()?].into())?;
+    assert!(
+        author
+            .verify_non_notice_occurrence(
+                &contradiction,
+                notice,
+                forged_notice_class,
+                &[key.clone()].into()
+            )
+            .is_err()
+    );
+    let mut roots = initial.objects.clone();
+    roots.insert(coverage_signature);
+    let revised = author.selected_snapshot(
+        "verified correction and classification",
+        [initial.id()?].into(),
+        roots,
+    )?;
+    let bundle = serde_json::to_value(author.export(&revised, "read")?)?;
+    let receive = |omissions: &[Id]| -> Result<Archive> {
+        let mut content = bundle.clone();
+        content["packets"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|packet| !omissions.iter().any(|id| packet["id"] == json!(id)));
+        let mut receiver = Archive::memory()?;
+        receiver.import(&serde_json::from_value(content)?)?;
+        Ok(receiver)
+    };
+    let receiver = receive(&[omitted])?;
+    let pinned = receiver.head(revised.id()?)?;
+    receiver.verify_non_notice_occurrence(&pinned, omitted, coverage_signature, &[key].into())?;
+
+    let mut affected = affected_query;
+    affected.arguments.extend(replacement.arguments);
+    let receipt = assess(&receiver, &pinned, &affected)?;
+    assert_eq!(receipt.result, Some(Standing::Unresolved));
+    assert!(receipt.horizon_complete);
+    assert_eq!(receipt.frontier, [omitted].into());
+    assert!(
+        receipt
+            .checks
+            .iter()
+            .any(|check| check.test == "argument evidence")
+    );
+    assert!(
+        receipt
+            .checks
+            .iter()
+            .any(|check| check.test == "input correction authority"
+                && check.status == Status::Pass
+                && check.inputs.contains(&correction_signature))
+    );
+
+    let receipt = assess(&receiver, &pinned, &outside_query)?;
+    assert_eq!(receipt.result, Some(Standing::Supported));
+    assert!(receipt.horizon_complete && receipt.frontier.is_empty());
+    let search = receipt.notice_search.as_ref().unwrap();
+    assert!(search.complete);
+    assert_eq!(
+        search.classified_occurrences,
+        [(omitted, coverage_signature)].into()
+    );
+    assert!(search.unresolved_records.is_empty());
+    assert!(receipt.dependencies.contains(&coverage_signature));
+    assert!(
+        receipt
+            .checks
+            .iter()
+            .any(|check| check.test == "input correction applicability"
+                && check.status == Status::NotApplicable
+                && check.inputs.contains(&notice))
+    );
+    let receipt_id = deposit_receipt(&receiver, &pinned, &outside_query, &receipt, format)?;
+    assert!(receiver.replay_local_assessment(receipt_id)?.matches);
+
+    let mut untrusted = outside_query.clone();
+    untrusted.policy = original_policy;
+    for value in [
+        assess(&receiver, &pinned, &untrusted)?,
+        assess(
+            &receive(&[omitted, coverage_signature])?,
+            &pinned,
+            &outside_query,
+        )?,
+    ] {
+        assert_eq!(value.result, Some(Standing::Unresolved));
+        assert!(!value.horizon_complete);
+        assert!(value.frontier.contains(&omitted));
+    }
+
+    let mut bounded = outside_query.clone();
+    bounded.budget = 1;
+    let over_budget = assess(&receiver, &pinned, &bounded)?;
+    assert_eq!(over_budget.result, Some(Standing::Unresolved));
+    assert!(!over_budget.notice_search.unwrap().complete);
+
+    let missing_notice = assess(&receive(&[omitted, notice])?, &pinned, &outside_query)?;
+    assert_eq!(missing_notice.result, Some(Standing::Unresolved));
+    let search = missing_notice.notice_search.unwrap();
+    assert!(!search.complete && search.unresolved_records.contains(&notice));
+    assert_eq!(
+        search.classified_occurrences.get(&omitted),
+        Some(&coverage_signature)
+    );
+
+    let impact = receiver.impact_with_policy(
+        &pinned,
+        notice,
+        &[],
+        outside_query.budget,
+        Some(outside_query.policy),
+    )?;
+    assert_eq!(impact.correction_authority, Some(correction_signature));
+    assert!(impact.frontier.contains(&omitted));
+    Ok(())
+}

@@ -109,9 +109,10 @@ fn capabilities_advertise_the_receipt_writer_and_replay_ids() -> Result<()> {
         let after = archive.snapshot("correction receipt", [head.id()?].into())?;
         let stored = archive.read(&after, id, "read")?;
         assert_eq!(capabilities[capability], stored.fields["evaluator"]);
-        assert_eq!(capabilities[capability], "rep-rust-rules-7");
+        assert_eq!(capabilities[capability], "rep-rust-rules-8");
     }
     let expected = [
+        "rep-rust-rules-8",
         "rep-rust-rules-7",
         "rep-rust-rules-6",
         "rep-rust-rules-5",

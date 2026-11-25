@@ -227,7 +227,7 @@ impl Archive {
         let mut correction_authority = None;
         if let Some(policy_id) = policy
             && unscanned.is_none()
-            && frontier.is_empty()
+            && (frontier.is_empty() || input_correction.is_some())
         {
             let policy = self.read(s, policy_id, "read")?;
             ensure!(

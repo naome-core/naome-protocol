@@ -290,6 +290,9 @@ pub enum ArchiveCommand {
     /// Create an Ed25519 signing seed in a new private file.
     Keygen { output: PathBuf },
     /// Attest to the exact original record under a role and scope.
+    #[command(
+        long_about = "Attest to the exact original record under a role and scope. Use role non-notice-occurrence and scope notice-coverage-1 to classify a readable ordinary occurrence for notice searches in partial archives."
+    )]
     Sign {
         head: Id,
         id: Id,
@@ -298,6 +301,9 @@ pub enum ArchiveCommand {
         scope: String,
     },
     /// Verify detached attestation bytes under an explicit trusted public key.
+    #[command(
+        long_about = "Verify detached attestation bytes under an explicit trusted public key. For role non-notice-occurrence, the occurrence must be in the selected inventory and its bytes may be unavailable."
+    )]
     Verify {
         head: Id,
         attestation: Id,
@@ -398,6 +404,10 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             "receipt_evaluator": evaluation::EVALUATOR_ID,
             "calibration_identity_evaluator": evaluation::EVALUATOR_ID,
             "input_correction_evaluator": evaluation::EVALUATOR_ID,
+            "notice_coverage": {
+                "role": evaluation::notice_coverage::ROLE,
+                "scope": evaluation::notice_coverage::SCOPE,
+            },
             "replay_evaluators": evaluation::replay_evaluator_ids().collect::<Vec<_>>(),
             "evaluators": ["simultaneous-bounds","certified-hull","signed-tests","typed-outcome","delegated","recorded-difference","least-zero","domain-inclusion","source-independence","sample-description","survey-identification","unit-grid-map"],
         })),
@@ -825,7 +835,20 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             scope,
         } => {
             let db = open()?;
-            db.resolve(&db.active_head(head)?, id, "read")?;
+            let snapshot = db.active_head(head)?;
+            if role == evaluation::notice_coverage::ROLE {
+                ensure!(
+                    scope == evaluation::notice_coverage::SCOPE,
+                    "invalid notice coverage scope"
+                );
+                return print(db.certify_non_notice_occurrence(
+                    &snapshot,
+                    id,
+                    &signing_key(&key)?,
+                    f,
+                )?);
+            }
+            db.resolve(&snapshot, id, "read")?;
             print(db.document(
                 &profile::attest(id, &scope, &role, "research-policy-1", &signing_key(&key)?)?,
                 f,
@@ -841,6 +864,19 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             public_key,
         } => {
             let db = reader()?;
+            if role == evaluation::notice_coverage::ROLE {
+                ensure!(
+                    scope == evaluation::notice_coverage::SCOPE,
+                    "invalid notice coverage scope"
+                );
+                db.verify_non_notice_occurrence(
+                    &db.active_head(head)?,
+                    target,
+                    attestation,
+                    &[public_key].into(),
+                )?;
+                return print("pass");
+            }
             db.resolve_head(head, target, "read")?;
             profile::verify_attestation(
                 &db.read_head(head, attestation, "read")?,

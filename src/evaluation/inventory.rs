@@ -1,4 +1,4 @@
-use super::{Query, Receipt};
+use super::{NoticeSearch, Query, Receipt, notice_coverage, rules::NoticeBudget};
 use crate::{
     migration::Equivalence,
     profile::{CALIBRATION_EVENT_IDENTITY, Document, Kind, verify_attestation},
@@ -170,9 +170,10 @@ impl ReadInventory {
         snapshot: &Snapshot,
         query: &Query,
         out: &mut Receipt,
-        budget_rule: &super::NoticeBudget,
+        budget_rule: &NoticeBudget,
+        exclusion_keys: Option<&BTreeSet<String>>,
     ) -> Result<()> {
-        let records_only = !matches!(budget_rule, super::NoticeBudget::Objects);
+        let records_only = !matches!(budget_rule, NoticeBudget::Objects);
         if let Some((records, bytes)) = self.complete_scan
             && (if records_only {
                 records
@@ -182,10 +183,16 @@ impl ReadInventory {
             && bytes <= query.byte_limit
         {
             out.visible_notices.extend(&self.notices);
+            if exclusion_keys.is_some() {
+                out.notice_search = Some(NoticeSearch {
+                    complete: true,
+                    ..NoticeSearch::default()
+                });
+            }
             return Ok(());
         }
 
-        let mut hidden = false;
+        let mut hidden = BTreeSet::new();
         let mut bytes_left = query.byte_limit;
         let mut records = 0;
         let mut all_objects = snapshot.objects.iter().copied();
@@ -196,7 +203,7 @@ impl ReadInventory {
             &mut all_objects
         };
         for (index, id) in objects.enumerate() {
-            if matches!(budget_rule, super::NoticeBudget::CompactRecords)
+            if matches!(budget_rule, NoticeBudget::CompactRecords)
                 && (index >= query.budget || bytes_left == 0)
             {
                 out.unscanned_records_from = Some(id);
@@ -225,17 +232,48 @@ impl ReadInventory {
                 out.visible_notices.insert(id);
             }
             if self.inspected.get(&id) == Some(&true) {
-                out.frontier.insert(id);
-                hidden = true;
+                hidden.insert(id);
             }
         }
 
+        // A covered scan depends on the current recipient policy and cannot populate the
+        // policy-independent cache. A cut short by budget cannot borrow cached attestations.
+        let cacheable_scan = hidden.is_empty();
+        if let Some(keys) = exclusion_keys {
+            let mut report = NoticeSearch::default();
+            if out.frontier.is_empty() {
+                hidden.retain(|id| {
+                    // Available bytes with an opaque or invalid profile still need inspection.
+                    if store.readable(snapshot, *id).is_ok() {
+                        return true;
+                    }
+                    if let Some((signature, _)) = self.attestations(*id).find(|(_, attestation)| {
+                        notice_coverage::verify_exclusion(attestation, *id, keys).is_ok()
+                    }) {
+                        report.classified_occurrences.insert(*id, signature);
+                        out.dependencies.insert(signature);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            report.complete = out.frontier.is_empty() && hidden.is_empty();
+            report
+                .unresolved_records
+                .extend(out.frontier.iter().copied());
+            report.unresolved_records.extend(hidden.iter().copied());
+            out.notice_search = Some(report);
+        }
+        out.frontier.extend(hidden.iter().copied());
         ensure!(
-            !hidden,
+            hidden.is_empty(),
             "notice horizon contains inaccessible or opaque records"
         );
         ensure!(out.frontier.is_empty(), "notice search budget exhausted");
-        self.complete_scan = Some((records, query.byte_limit - bytes_left));
+        if cacheable_scan {
+            self.complete_scan = Some((records, query.byte_limit - bytes_left));
+        }
         Ok(())
     }
 }

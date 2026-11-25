@@ -6,6 +6,7 @@ mod inventory;
 #[cfg(all(test, feature = "cli"))]
 mod manifest_tests;
 mod measurement;
+pub(crate) mod notice_coverage;
 mod question;
 mod replay;
 mod rules;
@@ -23,10 +24,10 @@ use measurement::Predicate;
 pub use question::{QuestionRecord, QuestionView};
 pub(crate) use replay::rebuild_receipt;
 pub use replay::{Reassessment, ReceiptReplay};
+use rules::EvaluatorRules;
 #[cfg(feature = "cli")]
 pub(crate) use rules::replay_evaluator_ids;
 pub(crate) use rules::{EVALUATOR_ID, manifest_encoding};
-use rules::{EvaluatorRules, NoticeBudget};
 #[cfg(feature = "cli")]
 pub(crate) use rules::{FIXTURE_EVALUATOR_ID, V0_1_0_EVALUATOR_ID};
 
@@ -120,6 +121,15 @@ pub struct Receipt {
     /// First inclusive record in the unexamined suffix at the receipt's pinned horizon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unscanned_records_from: Option<Id>,
+    /// Coverage state when the policy delegates classification of absent occurrences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_search: Option<NoticeSearch>,
+}
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct NoticeSearch {
+    pub complete: bool,
+    pub classified_occurrences: BTreeMap<Id, Id>,
+    pub unresolved_records: BTreeSet<Id>,
 }
 impl Receipt {
     // The existing evaluator could also match a named signed test when a
@@ -612,7 +622,17 @@ pub(crate) fn assess_with_inventory(
             "unsupported query policy"
         );
         out.dependencies.extend([q.target, q.policy]);
-        inventory.search(store, s, q, out, &rules.notice_budget)?;
+        let coverage_keys = if rules.notice_coverage {
+            notice_coverage::trusted_keys(&policy)?
+        } else {
+            BTreeSet::new()
+        };
+        // Linked foreign calibration checks can depend on otherwise ordinary occurrences.
+        // Their discovery and adjudication still require the original full scan.
+        let exclusions = (!coverage_keys.is_empty()
+            && !policy.fields.contains_key("foreign_calibration_keys"))
+        .then_some(&coverage_keys);
+        inventory.search(store, s, q, out, &rules.notice_budget, exclusions)?;
         let mut aliases = Equivalence::default();
         for &mapping in &q.mappings {
             aliases.add(store.verify_mapping_with(s, mapping, rules.manifests)?);
@@ -661,6 +681,16 @@ pub(crate) fn assess_with_inventory(
         } else {
             Vec::new()
         };
+        if rules.notice_coverage {
+            for entry in &input_corrections {
+                out.check(
+                    "input correction authority",
+                    Status::Pass,
+                    "verified signature for the exact source version and correction scope",
+                    &[entry.id, entry.signature],
+                );
+            }
+        }
         let mut correction_exclusions: BTreeMap<Id, usize> = BTreeMap::new();
         let mut pro = false;
         let mut con = false;
@@ -680,6 +710,14 @@ pub(crate) fn assess_with_inventory(
                 .map(|reading| store.explain_recorded_reading(s, arg, reading, q.budget));
             let premises = recorded_premises.as_ref().unwrap_or(&evidence);
             out.frontier.extend(premises.frontier.keys());
+            if rules.notice_coverage && !premises.frontier.is_empty() {
+                out.unknown(
+                    "argument evidence",
+                    "argument has missing or restricted inputs",
+                    &[arg],
+                );
+                continue;
+            }
             let result = (|| -> Result<Vec<Standing>> {
                 ensure!(
                     premises.frontier.is_empty(),
@@ -764,6 +802,23 @@ pub(crate) fn assess_with_inventory(
                     }
                 }
                 Err(e) => out.unknown("argument warrant", &e.to_string(), &[arg]),
+            }
+        }
+        if rules.notice_coverage && !q.arguments.is_empty() {
+            for entry in &input_corrections {
+                if correction_exclusions.get(&entry.id) == Some(&q.arguments.len())
+                    && !q
+                        .required_notices
+                        .iter()
+                        .any(|id| view.aliases.equivalent(*id, entry.id))
+                {
+                    out.check(
+                        "input correction applicability",
+                        Status::NotApplicable,
+                        "all query arguments exclude the corrected scope",
+                        &[entry.id, entry.signature],
+                    );
+                }
             }
         }
         for &notice in &q.required_notices {
