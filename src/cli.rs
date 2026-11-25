@@ -618,11 +618,10 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             after,
         } => {
             let db = reader()?;
-            let snapshot = db.active_head(head)?;
             let report = if compact {
-                db.argument_graph_page(&snapshot, id, &purpose, budget, depth, after)?
+                db.argument_graph_at(head, id, &purpose, budget, depth, after)?
             } else {
-                db.argument_graph(&snapshot, id, &purpose, budget, depth)?
+                db.argument_graph(&db.active_head(head)?, id, &purpose, budget, depth)?
             };
             print(report)
         }

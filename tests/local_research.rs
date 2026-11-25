@@ -698,3 +698,101 @@ fn receipt_limits_and_strict_replay_share_the_same_cli_contract() -> Result<()> 
     assert_eq!(serde_json::from_slice::<Value>(&strict.stdout)?, ordinary);
     Ok(())
 }
+
+#[test]
+fn compact_explanation_reads_the_same_records_as_the_materialized_view() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let path = root.join("archive.sqlite");
+    let archive = Archive::open(&path)?;
+    let public = Id::blob(PUBLIC);
+    let claim = archive.document(
+        &Document::new(Kind::Claim, "claim", "scope", json!({}), vec![])?,
+        Format::A,
+        public,
+    )?;
+    let readonly = archive.document(
+        &Document::new(
+            Kind::Argument,
+            "argument",
+            "scope",
+            json!({}),
+            vec![link("claim", claim)],
+        )?,
+        Format::A,
+        Id::blob(READ_ONLY),
+    )?;
+    for n in 0..18 {
+        archive.document(
+            &Document::new(
+                Kind::Notice,
+                "notice",
+                "scope",
+                json!({"ordinal":n}),
+                vec![link("target", claim)],
+            )?,
+            if n % 2 == 0 { Format::A } else { Format::B },
+            public,
+        )?;
+    }
+    let snapshot = archive.snapshot("mixed record formats", Default::default())?;
+    let head = snapshot.id()?.to_string();
+    let target = claim.to_string();
+    let before = fs::read(&path)?;
+    for purpose in ["read", "train"] {
+        let mut after = None;
+        let mut seen = 0;
+        let mut finished = false;
+        for _ in 0..8 {
+            let args = [
+                "explain",
+                &head,
+                &target,
+                "--compact",
+                "--budget",
+                "3",
+                "--purpose",
+                purpose,
+            ];
+            let mut command = args.to_vec();
+            let cursor = after.map(|id: Id| id.to_string());
+            if let Some(cursor) = &cursor {
+                command.extend(["--after", cursor]);
+            }
+            let received = run(&path, root, &command)?;
+            let expected = archive.argument_graph_page(&snapshot, claim, purpose, 3, 32, after)?;
+            assert_eq!(received, expected);
+            if received["unsearched"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(readonly))
+            {
+                assert_eq!(purpose, "train");
+                seen += 1;
+            }
+            if received["unscanned"].is_null() {
+                finished = true;
+                break;
+            }
+            after = serde_json::from_value(received["unscanned"]["after"].clone())?;
+        }
+        assert!(finished);
+        assert_eq!(seen, usize::from(purpose == "train"));
+    }
+    let invalid = invoke(
+        &path,
+        root,
+        &[
+            "explain",
+            &head,
+            &target,
+            "--compact",
+            "--after",
+            &public.to_string(),
+        ],
+    )?;
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("cursor is outside"));
+    assert_eq!(fs::read(&path)?, before);
+    Ok(())
+}

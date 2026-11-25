@@ -237,6 +237,13 @@ impl<'a> InventoryReader<'a> {
         }
     }
 
+    pub(crate) fn source(&self) -> &str {
+        match &self.view {
+            InventoryView::Materialized(snapshot) => &snapshot.source,
+            InventoryView::Paged(manifest) => &manifest.source,
+        }
+    }
+
     pub(crate) fn contains(&mut self, id: Id) -> Result<bool> {
         match &self.view {
             InventoryView::Materialized(snapshot) => Ok(snapshot.objects.contains(&id)),
@@ -247,20 +254,42 @@ impl<'a> InventoryReader<'a> {
     }
 
     pub(crate) fn resolve(&mut self, id: Id) -> Result<(Vec<u8>, Id)> {
+        self.resolve_for(id, "read")
+    }
+
+    fn resolve_for(&mut self, id: Id, purpose: &str) -> Result<(Vec<u8>, Id)> {
         match &self.view {
             InventoryView::Materialized(snapshot) => {
                 self.archive
-                    .resolve_with(snapshot, id, |policy| allows(policy, "read"))
+                    .resolve_with(snapshot, id, |policy| allows(policy, purpose))
             }
             InventoryView::Paged(manifest) => {
                 self.archive
-                    .resolve_member_in(manifest, id, "read", &mut self.tree)
+                    .resolve_member_in(manifest, id, purpose, &mut self.tree)
             }
         }
     }
 
     pub(crate) fn read(&mut self, id: Id) -> Result<Document> {
-        self.archive.read_with(id, |key| Ok(self.resolve(key)?.0))
+        self.read_for(id, "read")
+    }
+
+    pub(crate) fn read_for(&mut self, id: Id, purpose: &str) -> Result<Document> {
+        self.archive
+            .read_with(id, |key| Ok(self.resolve_for(key, purpose)?.0))
+    }
+
+    pub(crate) fn explain(
+        &mut self,
+        roots: &[Id],
+        purpose: &str,
+        budget: usize,
+        depth: usize,
+    ) -> super::Closure {
+        self.archive
+            .dependency_closure(roots, budget, depth, None, |key| {
+                Ok(self.resolve_for(key, purpose)?.0)
+            })
     }
 
     pub(crate) fn readable(&mut self, id: Id) -> Result<()> {

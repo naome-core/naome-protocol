@@ -218,8 +218,7 @@ impl Archive {
         };
         let withdrawal =
             !calibration && n.fields.get("action").and_then(Value::as_str) == Some("withdraw");
-        let (inventory, mut frontier, unscanned) =
-            ReadInventory::bounded(self, s, "read", budget, None, |_| true);
+        let (inventory, mut frontier, unscanned) = ReadInventory::bounded(self, s, budget);
         if !compact && let Some(tail) = unscanned {
             tail.expand(s, &mut frontier);
         }

@@ -390,7 +390,7 @@ impl Archive {
         budget: usize,
         depth: usize,
         value_only: Option<Id>,
-        resolve: impl Fn(Id) -> Result<Vec<u8>>,
+        mut resolve: impl FnMut(Id) -> Result<Vec<u8>>,
     ) -> Closure {
         let mut result = Closure::default();
         let mut queue: VecDeque<_> = roots.iter().map(|id| (*id, 0)).collect();

@@ -2,7 +2,7 @@ use super::{Query, Receipt};
 use crate::{
     migration::Equivalence,
     profile::{CALIBRATION_EVENT_IDENTITY, Document, Kind, verify_attestation},
-    store::{Archive, Snapshot},
+    store::{Archive, InventoryReader, Snapshot},
     wire::Id,
 };
 use anyhow::{Result, ensure};
@@ -60,17 +60,15 @@ impl ReadInventory {
     pub(super) fn bounded(
         store: &Archive,
         snapshot: &Snapshot,
-        purpose: &str,
         budget: usize,
-        mut after: Option<Id>,
-        retain: impl Fn(&Document) -> bool,
     ) -> (Self, BTreeSet<Id>, Option<UnscannedRecords>) {
-        let mut records = snapshot.records_after(after);
+        let mut records = snapshot.records();
         let mut inventory = Self::default();
         let mut frontier = BTreeSet::new();
+        let mut after = None;
         for id in records.by_ref().take(budget) {
             after = Some(id);
-            if !inventory.read_for(store, snapshot, id, purpose, &retain) {
+            if !inventory.read(store, snapshot, id, true) {
                 frontier.insert(id);
             }
         }
@@ -125,20 +123,8 @@ impl ReadInventory {
         id: Id,
         retain: bool,
     ) -> bool {
-        self.read_for(store, snapshot, id, "read", |_| retain)
-    }
-
-    fn read_for(
-        &mut self,
-        store: &Archive,
-        snapshot: &Snapshot,
-        id: Id,
-        purpose: &str,
-        retain: impl FnOnce(&Document) -> bool,
-    ) -> bool {
-        let hidden = match store.read(snapshot, id, purpose) {
+        let hidden = match store.read(snapshot, id, "read") {
             Ok(document) => {
-                let retain = retain(&document);
                 match document.kind {
                     Kind::Notice => {
                         self.notices.insert(id);
@@ -172,7 +158,7 @@ impl ReadInventory {
                 self.inspected.insert(id, false);
                 return true;
             }
-            Err(_) => store.may_be_notice(snapshot, id, purpose),
+            Err(_) => store.may_be_notice(snapshot, id, "read"),
         };
         self.inspected.insert(id, hidden);
         false
@@ -275,7 +261,16 @@ impl Archive {
         budget: usize,
         depth: usize,
     ) -> Result<Value> {
-        self.argument_graph_report(snapshot, target, purpose, budget, depth, GraphScan::Legacy)
+        self.with_read_view(|| {
+            Self::argument_graph_report(
+                InventoryReader::materialized(self, snapshot),
+                target,
+                purpose,
+                budget,
+                depth,
+                GraphScan::Legacy,
+            )
+        })
     }
 
     /// Use a compact record frontier. The returned cursor can resume the scan at the same snapshot.
@@ -288,66 +283,115 @@ impl Archive {
         depth: usize,
         after: Option<Id>,
     ) -> Result<Value> {
-        ensure!(
-            after.is_none_or(|id| id.format().is_some() && snapshot.objects.contains(&id)),
-            "scan cursor is outside the snapshot record inventory"
-        );
-        self.argument_graph_report(
-            snapshot,
-            target,
-            purpose,
-            budget,
-            depth,
-            GraphScan::Compact { after },
-        )
+        self.with_read_view(|| {
+            Self::argument_graph_report(
+                InventoryReader::materialized(self, snapshot),
+                target,
+                purpose,
+                budget,
+                depth,
+                GraphScan::Compact { after },
+            )
+        })
+    }
+
+    #[cfg(feature = "cli")]
+    pub(crate) fn argument_graph_at(
+        &self,
+        head: Id,
+        target: Id,
+        purpose: &str,
+        budget: usize,
+        depth: usize,
+        after: Option<Id>,
+    ) -> Result<Value> {
+        self.with_read_view(|| {
+            Self::argument_graph_report(
+                self.inventory_reader(head)?,
+                target,
+                purpose,
+                budget,
+                depth,
+                GraphScan::Compact { after },
+            )
+        })
     }
 
     fn argument_graph_report(
-        &self,
-        snapshot: &Snapshot,
+        mut inventory: InventoryReader<'_>,
         target: Id,
         purpose: &str,
         budget: usize,
         depth: usize,
         scan: GraphScan,
     ) -> Result<Value> {
-        let after = match scan {
+        let mut after = match scan {
             GraphScan::Legacy => None,
             GraphScan::Compact { after } => after,
         };
-        let keep_argument = |doc: &Document| {
-            doc.kind == Kind::Argument && doc.roles("claim").any(|id| id == target)
-        };
-        let (inventory, mut unsearched, unscanned) =
-            ReadInventory::bounded(self, snapshot, purpose, budget, after, keep_argument);
-        if matches!(scan, GraphScan::Legacy)
-            && let Some(tail) = unscanned
-        {
-            tail.expand(snapshot, &mut unsearched);
+        if let Some(id) = after {
+            ensure!(
+                id.format().is_some() && inventory.contains(id)?,
+                "scan cursor is outside the snapshot record inventory"
+            );
         }
-        let arguments: Vec<_> = inventory
-            .documents
+        let compact = matches!(scan, GraphScan::Compact { .. });
+        let mut remaining = budget;
+        let mut unscanned = None;
+        let mut unsearched = BTreeSet::new();
+        let mut arguments = Vec::new();
+        let mut notices: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+        'pages: loop {
+            let limit = if compact {
+                remaining.saturating_add(1).min(64)
+            } else {
+                64
+            };
+            let page = inventory.records_after(after, limit)?;
+            if page.is_empty() {
+                break;
+            }
+            for id in page {
+                if remaining == 0 {
+                    if compact {
+                        unscanned = Some(UnscannedRecords { after, next: id });
+                        break 'pages;
+                    }
+                    unsearched.insert(id);
+                } else {
+                    remaining -= 1;
+                    match inventory.read_for(id, purpose) {
+                        Ok(doc)
+                            if doc.kind == Kind::Argument
+                                && doc.roles("claim").any(|claim| claim == target) =>
+                        {
+                            arguments.push(id);
+                        }
+                        Ok(doc) if doc.kind == Kind::Notice => {
+                            notices.insert(
+                                id,
+                                doc.inputs.into_iter().map(|edge| edge.target).collect(),
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(_) => {
+                            unsearched.insert(id);
+                        }
+                    }
+                }
+                after = Some(id);
+            }
+        }
+        let roots: Vec<_> = arguments.iter().copied().chain([target]).collect();
+        let graph = inventory.explain(&roots, purpose, budget, depth);
+        let contrary: Vec<_> = notices
             .iter()
-            .filter(|(_, doc)| doc.kind == Kind::Argument)
+            .filter(|(_, targets)| !targets.is_disjoint(&graph.visited))
             .map(|(&id, _)| id)
             .collect();
-        let mut roots = arguments.clone();
-        roots.push(target);
-        let graph = self.explain(snapshot, &roots, purpose, budget, depth);
-        let notice_targets = |id: &Id| {
-            inventory.documents[id]
-                .inputs
-                .iter()
-                .map(|edge| edge.target)
-        };
-        let contrary: Vec<_> = inventory
-            .notices
-            .iter()
-            .filter(|id| notice_targets(id).any(|target| graph.visited.contains(&target)))
-            .collect();
         let mut report = json!({
-            "snapshot": snapshot.id()?,
-            "source": snapshot.source,
+            "snapshot": inventory.id()?,
+            "source": inventory.source(),
             "target": target,
             "arguments": arguments,
             "dependencies": graph,
@@ -355,15 +399,10 @@ impl Archive {
             "unsearched": unsearched,
             "budget_per_phase": budget,
         });
-        if matches!(scan, GraphScan::Compact { .. }) {
+        if compact {
             // A notice and the argument exposing its premise may fall on different pages.
             // Keep the endpoints of every readable notice for the cross-page join.
-            let targets: BTreeMap<_, BTreeSet<_>> = inventory
-                .notices
-                .iter()
-                .map(|id| (id, notice_targets(id).collect()))
-                .collect();
-            report["notice_targets"] = json!(targets);
+            report["notice_targets"] = json!(notices);
             report["unscanned"] = json!(unscanned);
         }
         Ok(report)
