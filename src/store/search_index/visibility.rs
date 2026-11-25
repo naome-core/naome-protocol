@@ -1,11 +1,12 @@
 //! A fully prepared append parent can share its visible entries with a child.
 //! Each sealed set is immutable except for global source withdrawals.
-use super::{Archive, Snapshot, cache::coverage};
+use super::{Archive, cache::coverage};
+use crate::wire::Id;
 use anyhow::Result;
 use rusqlite::{TransactionBehavior, params};
 
 impl Archive {
-    pub(super) fn initialize_visibility(&self, snapshot: &Snapshot, head: &str) -> Result<()> {
+    pub(super) fn initialize_visibility(&self, snapshot: Id, head: &str) -> Result<()> {
         if self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM rep_search_heads WHERE head=?)",
             [head],
@@ -18,7 +19,7 @@ impl Archive {
             "INSERT OR IGNORE INTO rep_search_heads(head) VALUES(?)",
             [head],
         )? != 0
-            && let Ok(child) = self.custody_head(snapshot.id()?)
+            && let Ok(child) = self.custody_head(snapshot)
             && let Some(parent) = child.parent
         {
             // A verified append preserves old members. A partial or limited search view

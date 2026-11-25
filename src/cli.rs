@@ -579,12 +579,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             )?)
         }
         ArchiveCommand::Find(DeferredArgs(arguments)) => {
-            let db = if arguments.exact_lookup() {
-                reader()?
-            } else {
-                open()?
-            };
-            print(LocalSearch::default().find(&db, arguments)?)
+            print(LocalSearch::default().find_path(&db_path, arguments)?)
         }
         ArchiveCommand::SearchHead { head, clear } => {
             let db = if head.is_some() || clear {
@@ -600,8 +595,8 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         ArchiveCommand::PrepareSearch(DeferredArgs(arguments)) => {
             print(LocalSearch::default().prepare(&open()?, arguments)?)
         }
-        ArchiveCommand::SearchSession => LocalSearch::default().serve(
-            &open()?,
+        ArchiveCommand::SearchSession => LocalSearch::default().serve_path(
+            &db_path,
             std::io::stdin().lock(),
             std::io::stdout().lock(),
         ),

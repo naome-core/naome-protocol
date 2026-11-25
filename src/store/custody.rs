@@ -86,35 +86,25 @@ impl Head {
     }
 }
 
-/// A verified inventory and its complete reverse index for declared record links.
-pub(crate) struct BacklinkIndex<'a> {
-    archive: &'a Archive,
-    manifest: super::Manifest,
+/// Reverse links committed by a verified custody head. Positive candidates can
+/// be checked even when the head cannot attest exhaustive coverage.
+pub(crate) struct BacklinkIndex {
     root: Id,
-    tree: Tree<'a>,
+    pub(crate) complete: bool,
 }
 
-impl BacklinkIndex<'_> {
-    pub(crate) fn candidates(&mut self, target: Id, limit: usize) -> Result<Vec<Id>> {
+impl BacklinkIndex {
+    pub(crate) fn candidates(
+        &self,
+        inventory: &mut super::InventoryReader<'_>,
+        target: Id,
+        limit: usize,
+    ) -> Result<Vec<Id>> {
         let mut found = Vec::new();
-        self.tree
+        inventory
+            .tree
             .prefix(self.root, &format!("r/{target}/"), limit, &mut found)?;
         Ok(found)
-    }
-
-    pub(crate) fn read(&mut self, id: Id) -> Result<Document> {
-        self.archive.read_with(id, |id| {
-            Ok(self
-                .archive
-                .resolve_member_in(&self.manifest, id, "read", &mut self.tree)?
-                .0)
-        })
-    }
-
-    pub(crate) fn readable(&mut self, id: Id) -> Result<()> {
-        self.archive.readable_with(id, |key| {
-            Ok(self.tree.get(self.manifest.inventory, &key.to_string())? == Some(key))
-        })
     }
 }
 #[derive(Serialize)]
@@ -154,19 +144,13 @@ impl Archive {
             .context("unadmitted paged head")
     }
 
-    pub(crate) fn backlink_index(&self, head: Id) -> Result<Option<BacklinkIndex<'_>>> {
-        let Some(proof) = self
+    pub(crate) fn backlink_index(&self, head: Id) -> Result<Option<BacklinkIndex>> {
+        Ok(self
             .custody_head_if_present(head)?
-            .filter(|proof| proof.opaque == 0)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(BacklinkIndex {
-            archive: self,
-            manifest: proof.manifest()?,
-            root: proof.tree,
-            tree: Tree::new(&self.db),
-        }))
+            .map(|proof| BacklinkIndex {
+                root: proof.tree,
+                complete: proof.opaque == 0,
+            }))
     }
     pub(super) fn custody_head_if_present(&self, id: Id) -> Result<Option<Head>> {
         self.custody_head_data(id)?

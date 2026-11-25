@@ -10,8 +10,8 @@ mod snapshot;
 pub use exchange::{Bundle, ExchangePage, ExchangeProgress, MemberProof, Packet};
 #[cfg(feature = "cli")]
 pub(crate) use search_index::IndexPreparation;
-pub(crate) use snapshot::ManifestEncoding;
 pub use snapshot::Snapshot;
+pub(crate) use snapshot::{InventoryReader, ManifestEncoding};
 
 use crate::profile::TrainingAccess;
 use crate::{

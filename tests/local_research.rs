@@ -105,6 +105,23 @@ fn one_archive_reports_pending_work_and_continues_the_full_snapshot() -> Result<
     );
     assert_eq!(explicit_path.file_name().unwrap(), "other.sqlite");
     assert_eq!(explicit["archive"], Value::Null);
+
+    fs::write(root.join("field.txt"), "independent field observation")?;
+    run(
+        &archive,
+        root,
+        &["custody", "append", "field-lab", "--file", "field.txt"],
+    )?;
+    assert_eq!(
+        run(&archive, root, &["status"])?["archive"]["full_snapshot"]["id"],
+        next
+    );
+    let continued = run(&archive, root, &["snapshot", "--continue"])?;
+    assert_eq!(
+        store.custody_head(identifier(&continued).parse()?)?.parent,
+        Some(identifier(&next).parse()?)
+    );
+
     run(&archive, root, &["snapshot", "other research"])?;
     let before = fs::read(&archive)?;
     let ambiguous = invoke(&archive, root, &["snapshot", "--continue"])?;
@@ -113,8 +130,16 @@ fn one_archive_reports_pending_work_and_continues_the_full_snapshot() -> Result<
     assert_eq!(fs::read(&archive)?, before);
     assert_eq!(
         run(&archive, root, &["snapshot", "research", "--continue"])?,
-        next
+        continued
     );
+    run(
+        &archive,
+        root,
+        &["custody", "append", "research", "--file", "field.txt"],
+    )?;
+    let competing = invoke(&archive, root, &["snapshot", "research", "--continue"])?;
+    assert!(!competing.status.success());
+    assert!(String::from_utf8_lossy(&competing.stderr).contains("exactly one full local tip"));
     assert!(!invoke(&archive, root, &["snapshot"])?.status.success());
     Ok(())
 }
@@ -267,23 +292,23 @@ fn linked_capture_recovers_a_question_and_its_declared_evidence() -> Result<()> 
     assert_eq!(expanded_overview["records"], overview["records"]);
     assert_eq!(expanded_overview["limited_coverage"], false);
 
-    let store = Archive::open(&archive)?;
-    store.document(
-        &Document::new(
-            Kind::Mapping,
-            "unrelated mapping",
-            "separate study",
-            json!({}),
-            vec![],
-        )?,
-        Format::A,
-        Id::blob(PUBLIC),
+    let migration = run(
+        &archive,
+        root,
+        &[
+            "--format",
+            "b",
+            "migrate",
+            identifier(&expanded),
+            "test lab",
+        ],
     )?;
-    drop(store);
+    assert!(migration["mapping"].is_string());
     run(&archive, root, &["snapshot", "--continue"])?;
     let limited = run(&archive, root, &question_args)?;
     assert_eq!(limited["limited_coverage"], true);
     assert!(limited["unscanned_records_from"].is_string());
+    assert_eq!(limited["records"], overview["records"]);
     let fallback = run(&archive, root, &["question", identifier(&question)])?;
     assert_eq!(fallback["records"], overview["records"]);
     assert_eq!(fallback["limited_coverage"], false);

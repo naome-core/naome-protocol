@@ -14,9 +14,10 @@ use std::{
 
 use super::{
     Manifest,
-    custody::{BATCH_BYTES, Item, MEMBERS, Member},
+    custody::{BATCH_BYTES, Item, MEMBERS, Member, tree::Tree},
     inventory::{self, Pages},
 };
+use crate::profile::{Document, allows};
 use serde::{Deserializer, Serializer};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -200,6 +201,82 @@ impl Snapshot {
     }
 }
 
+enum InventoryView<'a> {
+    Materialized(&'a Snapshot),
+    Paged(Manifest),
+}
+
+/// Read an authorized snapshot through either its supplied witnesses or its local pages.
+pub(crate) struct InventoryReader<'a> {
+    archive: &'a Archive,
+    view: InventoryView<'a>,
+    pub(super) tree: Tree<'a>,
+}
+
+impl<'a> InventoryReader<'a> {
+    pub(crate) fn materialized(archive: &'a Archive, snapshot: &'a Snapshot) -> Self {
+        Self {
+            archive,
+            view: InventoryView::Materialized(snapshot),
+            tree: Tree::new(&archive.db),
+        }
+    }
+
+    pub(super) fn paged(archive: &'a Archive, manifest: Manifest) -> Self {
+        Self {
+            archive,
+            view: InventoryView::Paged(manifest),
+            tree: Tree::new(&archive.db),
+        }
+    }
+
+    pub(crate) fn id(&self) -> Result<Id> {
+        match &self.view {
+            InventoryView::Materialized(snapshot) => snapshot.id(),
+            InventoryView::Paged(manifest) => manifest.id(),
+        }
+    }
+
+    pub(crate) fn contains(&mut self, id: Id) -> Result<bool> {
+        match &self.view {
+            InventoryView::Materialized(snapshot) => Ok(snapshot.objects.contains(&id)),
+            InventoryView::Paged(manifest) => {
+                Ok(self.tree.get(manifest.inventory, &id.to_string())? == Some(id))
+            }
+        }
+    }
+
+    pub(crate) fn resolve(&mut self, id: Id) -> Result<(Vec<u8>, Id)> {
+        match &self.view {
+            InventoryView::Materialized(snapshot) => {
+                self.archive
+                    .resolve_with(snapshot, id, |policy| allows(policy, "read"))
+            }
+            InventoryView::Paged(manifest) => {
+                self.archive
+                    .resolve_member_in(manifest, id, "read", &mut self.tree)
+            }
+        }
+    }
+
+    pub(crate) fn read(&mut self, id: Id) -> Result<Document> {
+        self.archive.read_with(id, |key| Ok(self.resolve(key)?.0))
+    }
+
+    pub(crate) fn readable(&mut self, id: Id) -> Result<()> {
+        self.archive.readable_with(id, |key| self.contains(key))
+    }
+
+    pub(crate) fn records_after(&mut self, after: Option<Id>, limit: usize) -> Result<Vec<Id>> {
+        match &self.view {
+            InventoryView::Materialized(snapshot) => {
+                Ok(snapshot.records_after(after).take(limit).collect())
+            }
+            InventoryView::Paged(manifest) => manifest.record_page(&mut self.tree, after, limit),
+        }
+    }
+}
+
 /// Earlier evaluators accepted the contents of certain hash-verified linked JSON manifests.
 #[derive(Clone, Copy)]
 pub(crate) enum ManifestEncoding {
@@ -233,6 +310,10 @@ pub(super) fn save_imported_head(db: &Connection, head: Id, snapshot: &Snapshot)
 }
 
 impl Archive {
+    pub(crate) fn inventory_reader(&self, head: Id) -> Result<InventoryReader<'_>> {
+        Ok(InventoryReader::paged(self, self.active_manifest(head)?))
+    }
+
     pub(crate) fn linked_snapshot(
         &self,
         view: &Snapshot,
@@ -356,11 +437,17 @@ impl Archive {
         // A withdrawal may rebuild the custody tree. Full seal parents still identify
         // the tips it continued even when the physical ancestry had to be rebuilt.
         let mut query = self.db.prepare(
-            "SELECT t.head,s.high_water,s.epoch,t.source FROM custody_tips t
-             LEFT JOIN archive_seals s ON s.id=t.head
-             WHERE (?1 IS NULL OR t.source=?1) AND t.head NOT IN (
-                 SELECT p.value FROM archive_seals parent, json_each(parent.parents) p
-                 WHERE parent.source=t.source
+            "WITH live_tips AS (
+                 SELECT t.head,s.high_water,s.epoch,t.source FROM custody_tips t
+                 LEFT JOIN archive_seals s ON s.id=t.head
+                 WHERE (?1 IS NULL OR t.source=?1) AND NOT EXISTS (
+                     SELECT 1 FROM archive_seals child, json_each(child.parents) p
+                     WHERE child.source=t.source AND p.value=t.head
+                 )
+             )
+             SELECT head,high_water,epoch,source FROM live_tips
+             WHERE ?1 IS NOT NULL OR source IN (
+                 SELECT source FROM live_tips WHERE high_water IS NOT NULL
              )",
         )?;
         let mut rows = query.query([source])?;

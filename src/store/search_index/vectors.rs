@@ -3,7 +3,7 @@ use crate::{
         EmbeddedMedia, Embedder, EmbeddingInput, MAX_MEDIA_BYTES, MediaInput, MediaSpan,
         SearchLocation,
     },
-    store::{Archive, Snapshot},
+    store::{Archive, InventoryReader},
     wire::Id,
 };
 use anyhow::{Context, Result, ensure};
@@ -53,7 +53,7 @@ pub(super) fn embed_query(
 impl Archive {
     pub(super) fn refresh_search_vectors(
         &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         head: &str,
         model: &mut dyn Embedder,
         mut budget: usize,
@@ -68,7 +68,7 @@ impl Archive {
             if pending.is_empty() {
                 break;
             }
-            let indexed = self.embed_passages(snapshot, &pending, model);
+            let indexed = Self::embed_passages(inventory, &pending, model);
             let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
             {
                 let mut state = tx.prepare_cached(
@@ -146,8 +146,7 @@ impl Archive {
     }
 
     fn embed_passages(
-        &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         pending: &[Pending],
         model: &mut dyn Embedder,
     ) -> Vec<CachedVectors> {
@@ -175,14 +174,13 @@ impl Archive {
                     });
                 };
                 let mut bytes = Vec::new();
-                if self
-                    .materialize(
-                        snapshot,
-                        pending.object,
-                        "read",
-                        MAX_MEDIA_BYTES,
-                        &mut bytes,
-                    )
+                if inventory
+                    .read(pending.object)
+                    .and_then(|document| {
+                        document.materialize(MAX_MEDIA_BYTES, &mut bytes, |id| {
+                            Ok(inventory.resolve(id)?.0)
+                        })
+                    })
                     .is_err()
                 {
                     return CachedVectors {

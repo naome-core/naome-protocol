@@ -198,7 +198,7 @@ impl<'a> Tree<'a> {
             }
         }
     }
-    fn cached(&mut self, id: Id) -> Result<Rc<Page>> {
+    pub(in crate::store) fn cached(&mut self, id: Id) -> Result<Rc<Page>> {
         if let Some(page) = self.cache.get(&id) {
             return Ok(Rc::clone(page));
         }

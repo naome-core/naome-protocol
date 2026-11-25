@@ -2,7 +2,7 @@ use super::{Receipt, Standing, default_byte_limit};
 use crate::{
     payload::CAPTURED_EVIDENCE_SCOPE,
     profile::{DependencyRole, Document, Kind, Link},
-    store::{Archive, Snapshot, custody::BacklinkIndex},
+    store::{Archive, InventoryReader, Snapshot, custody::BacklinkIndex},
     wire::Id,
 };
 use anyhow::{Result, ensure};
@@ -64,17 +64,12 @@ fn is_support(document: &Document, link: &Link) -> bool {
     )
 }
 
-enum QuestionInventory<'a> {
+enum QuestionBacklinks {
     Indexed {
-        index: Box<BacklinkIndex<'a>>,
+        index: BacklinkIndex,
         candidates_left: usize,
-        records_left: usize,
-        bytes_left: usize,
     },
-    Scanned {
-        snapshot: &'a Snapshot,
-        backlinks: BTreeMap<Id, Vec<Id>>,
-    },
+    Scanned(BTreeMap<Id, Vec<Id>>),
 }
 
 #[derive(PartialEq, Eq)]
@@ -86,46 +81,30 @@ enum RecordState {
 
 struct QuestionWalk<'a> {
     archive: &'a Archive,
-    inventory: QuestionInventory<'a>,
+    inventory: InventoryReader<'a>,
+    backlinks: QuestionBacklinks,
     documents: BTreeMap<Id, Document>,
     unavailable: BTreeSet<Id>,
+    records_left: usize,
+    bytes_left: usize,
     limited: bool,
     unscanned_from: Option<Id>,
 }
 
 impl QuestionWalk<'_> {
-    fn load(&mut self, id: Id) -> Result<RecordState> {
-        if self.documents.contains_key(&id) {
-            return Ok(RecordState::Readable);
-        }
-        if self.unavailable.contains(&id) {
-            return Ok(RecordState::Unavailable);
-        }
-        let (index, records_left, bytes_left) = match &mut self.inventory {
-            QuestionInventory::Indexed {
-                index,
-                records_left,
-                bytes_left,
-                ..
-            } => (index, records_left, bytes_left),
-            QuestionInventory::Scanned { snapshot, .. } => {
-                let unexamined = snapshot.objects.contains(&id)
-                    && self.unscanned_from.is_some_and(|start| id >= start);
-                return Ok(if unexamined {
-                    RecordState::Unexamined
-                } else {
-                    RecordState::Unavailable
-                });
-            }
-        };
-        let size = self.archive.size(id)?;
-        if *records_left == 0 || size > *bytes_left {
+    fn examine(&mut self, id: Id) -> Result<RecordState> {
+        if self.records_left == 0 {
             self.limited = true;
             return Ok(RecordState::Unexamined);
         }
-        *records_left -= 1;
-        *bytes_left -= size;
-        match index.read(id) {
+        let size = self.archive.size(id)?;
+        if size > self.bytes_left {
+            self.limited = true;
+            return Ok(RecordState::Unexamined);
+        }
+        self.records_left -= 1;
+        self.bytes_left -= size;
+        match self.inventory.read(id) {
             Ok(document) => {
                 self.documents.insert(id, document);
                 Ok(RecordState::Readable)
@@ -138,14 +117,69 @@ impl QuestionWalk<'_> {
         }
     }
 
+    fn load(&mut self, id: Id) -> Result<RecordState> {
+        if self.documents.contains_key(&id) {
+            return Ok(RecordState::Readable);
+        }
+        if self.unavailable.contains(&id) {
+            return Ok(RecordState::Unavailable);
+        }
+        match self.backlinks {
+            QuestionBacklinks::Indexed { .. } => self.examine(id),
+            QuestionBacklinks::Scanned(_) => {
+                if self.unscanned_from.is_some_and(|start| id >= start)
+                    && self.inventory.contains(id)?
+                {
+                    Ok(RecordState::Unexamined)
+                } else {
+                    Ok(RecordState::Unavailable)
+                }
+            }
+        }
+    }
+
+    fn scan_remaining(&mut self) -> Result<()> {
+        // Keep all verified candidates already visited and use only the remaining budget.
+        let mut after = None;
+        'scan: loop {
+            let page = self.inventory.records_after(after, 32)?;
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().copied();
+            for id in page {
+                if self.documents.contains_key(&id) || self.unavailable.contains(&id) {
+                    continue;
+                }
+                if self.examine(id)? == RecordState::Unexamined {
+                    self.unscanned_from = Some(id);
+                    break 'scan;
+                }
+            }
+        }
+        let mut backlinks: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+        for (&id, document) in &self.documents {
+            for edge in document
+                .inputs
+                .iter()
+                .filter(|edge| anchors(document, &edge.role))
+            {
+                backlinks.entry(edge.target).or_default().push(id);
+            }
+        }
+        self.backlinks = QuestionBacklinks::Scanned(backlinks);
+        self.limited = !self.unavailable.is_empty();
+        Ok(())
+    }
+
     fn inbound(&mut self, target: Id, filter: impl Fn(&Document) -> bool) -> Result<Vec<Id>> {
-        let candidates = match &mut self.inventory {
-            QuestionInventory::Indexed {
+        let candidates = match &mut self.backlinks {
+            QuestionBacklinks::Indexed {
                 index,
                 candidates_left,
-                ..
             } => {
-                let mut candidates = index.candidates(target, *candidates_left + 1)?;
+                let mut candidates =
+                    index.candidates(&mut self.inventory, target, *candidates_left + 1)?;
                 if candidates.len() > *candidates_left {
                     self.limited = true;
                     candidates.pop();
@@ -153,9 +187,7 @@ impl QuestionWalk<'_> {
                 *candidates_left -= candidates.len();
                 candidates
             }
-            QuestionInventory::Scanned { backlinks, .. } => {
-                backlinks.remove(&target).unwrap_or_default()
-            }
+            QuestionBacklinks::Scanned(backlinks) => backlinks.remove(&target).unwrap_or_default(),
         };
         let mut related = Vec::new();
         for id in candidates.into_iter().filter(|id| id.format().is_some()) {
@@ -174,16 +206,7 @@ impl QuestionWalk<'_> {
         Ok(related)
     }
 
-    fn readable_blob(&mut self, id: Id) -> bool {
-        match &mut self.inventory {
-            QuestionInventory::Indexed { index, .. } => index.readable(id).is_ok(),
-            QuestionInventory::Scanned { snapshot, .. } => {
-                self.archive.readable(snapshot, id).is_ok()
-            }
-        }
-    }
-
-    fn walk(mut self, head: Id, question: Id) -> Result<QuestionView> {
+    fn related(&mut self, question: Id) -> Result<(BTreeSet<Id>, BTreeSet<Id>)> {
         let mut related = BTreeSet::new();
         let mut queue = VecDeque::from([question]);
         queue.extend(
@@ -208,7 +231,7 @@ impl QuestionWalk<'_> {
                 .collect();
             for target in inputs {
                 if target.format().is_none() {
-                    if !self.readable_blob(target) {
+                    if self.inventory.readable(target).is_err() {
                         unavailable_inputs.insert(target);
                     }
                     continue;
@@ -229,6 +252,19 @@ impl QuestionWalk<'_> {
                 }
             }
         }
+        Ok((related, unavailable_inputs))
+    }
+
+    fn report(mut self, head: Id, question: Id) -> Result<QuestionView> {
+        match &self.backlinks {
+            QuestionBacklinks::Indexed { index, .. } if index.complete => {}
+            QuestionBacklinks::Indexed { .. } => {
+                self.related(question)?;
+                self.scan_remaining()?;
+            }
+            QuestionBacklinks::Scanned(_) => self.scan_remaining()?,
+        }
+        let (related, unavailable_inputs) = self.related(question)?;
         Ok(question_report(
             head,
             question,
@@ -302,10 +338,8 @@ impl Archive {
         budget: usize,
     ) -> Result<QuestionView> {
         self.with_read_view(|| {
-            let head = self.selected_search_id(head)?;
-            self.inspect_question(head, question, budget, || {
-                self.head(head).map(std::borrow::Cow::Owned)
-            })
+            let inventory = self.inventory_reader(self.selected_search_id(head)?)?;
+            self.inspect_question(inventory, question, budget)
         })
     }
 
@@ -317,99 +351,46 @@ impl Archive {
         budget: usize,
     ) -> Result<QuestionView> {
         self.with_read_view(|| {
-            self.inspect_question(snapshot.id()?, question, budget, || {
-                Ok(std::borrow::Cow::Borrowed(snapshot))
-            })
+            snapshot.ensure_hydrated()?;
+            self.inspect_question(
+                InventoryReader::materialized(self, snapshot),
+                question,
+                budget,
+            )
         })
     }
 
-    fn inspect_question<'a>(
+    fn inspect_question(
         &self,
-        head: Id,
+        mut inventory: InventoryReader<'_>,
         question: Id,
         budget: usize,
-        fallback: impl FnOnce() -> Result<std::borrow::Cow<'a, Snapshot>>,
     ) -> Result<QuestionView> {
         ensure!(
             (1..=100_000).contains(&budget),
             "question scan budget must be between 1 and 100000"
         );
-        if let Some(mut index) = self.backlink_index(head)? {
-            let root = index.read(question)?;
-            ensure!(root.kind == Kind::Question, "expected a question record");
-            return QuestionWalk {
-                archive: self,
-                inventory: QuestionInventory::Indexed {
-                    index: Box::new(index),
-                    candidates_left: budget,
-                    records_left: budget,
-                    bytes_left: default_byte_limit(),
-                },
-                documents: BTreeMap::from([(question, root)]),
-                unavailable: BTreeSet::new(),
-                limited: false,
-                unscanned_from: None,
-            }
-            .walk(head, question);
-        }
-        let snapshot = fallback()?;
-        self.scan_question(&snapshot, head, question, budget)
-    }
-
-    fn scan_question(
-        &self,
-        snapshot: &Snapshot,
-        head: Id,
-        question: Id,
-        budget: usize,
-    ) -> Result<QuestionView> {
-        snapshot.ensure_hydrated()?;
-        let root = self.read(snapshot, question, "read")?;
+        let head = inventory.id()?;
+        let root = inventory.read(question)?;
         ensure!(root.kind == Kind::Question, "expected a question record");
-        let mut documents = BTreeMap::from([(question, root)]);
-        let mut remaining = default_byte_limit();
-        let mut limited_coverage = false;
-        let mut unscanned_records_from = None;
-        for (index, id) in snapshot.records().filter(|id| *id != question).enumerate() {
-            if index == budget {
-                unscanned_records_from = Some(id);
-                break;
-            }
-            let size = self.size(id)?;
-            if size > remaining {
-                unscanned_records_from = Some(id);
-                break;
-            }
-            remaining -= size;
-            match self.read(snapshot, id, "read") {
-                Ok(document) => {
-                    documents.insert(id, document);
-                }
-                Err(_) => limited_coverage = true,
-            }
-        }
-
-        let mut backlinks: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
-        for (&id, document) in &documents {
-            for edge in document
-                .inputs
-                .iter()
-                .filter(|edge| anchors(document, &edge.role))
-            {
-                backlinks.entry(edge.target).or_default().push(id);
-            }
-        }
+        let backlinks = match self.backlink_index(head)? {
+            Some(index) => QuestionBacklinks::Indexed {
+                index,
+                candidates_left: budget,
+            },
+            None => QuestionBacklinks::Scanned(BTreeMap::new()),
+        };
         QuestionWalk {
             archive: self,
-            inventory: QuestionInventory::Scanned {
-                snapshot,
-                backlinks,
-            },
-            documents,
+            inventory,
+            backlinks,
+            documents: BTreeMap::from([(question, root)]),
             unavailable: BTreeSet::new(),
-            limited: limited_coverage,
-            unscanned_from: unscanned_records_from,
+            records_left: budget,
+            bytes_left: default_byte_limit(),
+            limited: false,
+            unscanned_from: None,
         }
-        .walk(head, question)
+        .report(head, question)
     }
 }

@@ -1,7 +1,7 @@
 use super::{
-    Archive, IndexedRecord, Passage, Snapshot,
+    Archive, IndexedRecord, InventoryReader, Passage,
     lexical::{normalize, terms},
-    text::VerifiedTextChunk,
+    text::{VerifiedTextChunk, index_text_window},
 };
 use crate::{profile::Document, wire::Id};
 use anyhow::{Context, Result, ensure};
@@ -26,14 +26,7 @@ enum Record {
 
 impl Archive {
     pub(super) fn init_search(&self) -> Result<()> {
-        if installed_version(&self.db)? == Some(INDEX_VERSION)
-            && self.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema
-                    WHERE type='index' AND name='rep_search_media_passages')",
-                [],
-                |row| row.get::<_, bool>(0),
-            )?
-        {
+        if current_schema(&self.db)? {
             return Ok(());
         }
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
@@ -86,11 +79,11 @@ impl Archive {
 
     pub(super) fn refresh_search(
         &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         head: &str,
         mut budget: usize,
     ) -> Result<()> {
-        self.initialize_visibility(snapshot, head)?;
+        self.initialize_visibility(inventory.id()?, head)?;
         let mut state = state(&self.db, head)?.context("search snapshot missing")?;
         while budget > 0 {
             let revision = revision(&self.db)?;
@@ -101,10 +94,7 @@ impl Archive {
                 if state.finished {
                     break;
                 }
-                snapshot
-                    .records_after(state.cursor)
-                    .take(count + 1)
-                    .collect()
+                inventory.records_after(state.cursor, count + 1)?
             } else {
                 ready
             };
@@ -113,8 +103,8 @@ impl Archive {
                 .into_iter()
                 .take(count)
                 .map(|id| {
-                    let record = cached_record(&self.db, snapshot, id)?
-                        .unwrap_or_else(|| Record::Extracted(self.search_sections(snapshot, id)));
+                    let record = cached_record(&self.db, inventory, id)?
+                        .unwrap_or_else(|| Record::Extracted(self.search_sections(inventory, id)));
                     Ok((id, record))
                 })
                 .collect::<Result<_>>()?;
@@ -136,10 +126,15 @@ impl Archive {
             tx.commit()?;
             budget -= indexed.len();
         }
-        self.refresh_text(snapshot, head, budget.min(TEXT_BATCH))
+        self.refresh_text(inventory, head, budget.min(TEXT_BATCH))
     }
 
-    fn refresh_text(&self, snapshot: &Snapshot, head: &str, budget: usize) -> Result<()> {
+    fn refresh_text(
+        &self,
+        inventory: &mut InventoryReader<'_>,
+        head: &str,
+        budget: usize,
+    ) -> Result<()> {
         let mut chunk = VerifiedTextChunk::default();
         let mut chunk_revision = None;
         for _ in 0..budget {
@@ -170,8 +165,8 @@ impl Archive {
             else {
                 break;
             };
-            let indexed = self.index_text_window(
-                snapshot,
+            let indexed = index_text_window(
+                inventory,
                 object.parse()?,
                 usize::try_from(cursor)?,
                 usize::try_from(length)?,
@@ -206,6 +201,18 @@ impl Archive {
         }
         Ok(())
     }
+}
+
+pub(super) fn current_schema(db: &Connection) -> Result<bool> {
+    if installed_version(db)? != Some(INDEX_VERSION) {
+        return Ok(false);
+    }
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+            WHERE type='index' AND name='rep_search_media_passages')",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 pub(super) fn prepared_cache_version(db: &Connection) -> Result<Option<u32>> {
@@ -279,7 +286,11 @@ fn ready_objects(db: &Connection, head: &str, limit: usize) -> Result<Vec<Id>> {
     .collect()
 }
 
-fn cached_record(db: &Connection, snapshot: &Snapshot, id: Id) -> Result<Option<Record>> {
+fn cached_record(
+    db: &Connection,
+    inventory: &mut InventoryReader<'_>,
+    id: Id,
+) -> Result<Option<Record>> {
     let key = id.to_string();
     let limited: Option<bool> = db.query_row(
         "SELECT coverage FROM rep_search_entries WHERE object=? AND section=0 AND coverage IS NOT NULL",
@@ -296,7 +307,7 @@ fn cached_record(db: &Connection, snapshot: &Snapshot, id: Id) -> Result<Option<
     let mut entries = Vec::new();
     while let Some(row) = rows.next()? {
         let id = row.get::<_, String>(1)?.parse()?;
-        if !snapshot.objects.contains(&id) {
+        if !inventory.contains(id)? {
             return Ok(None);
         }
         let entry: i64 = row.get(0)?;
@@ -434,4 +445,48 @@ fn write_passages(db: &Connection, entry: i64, passages: &[Passage]) -> Result<(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        profile::{Kind, PUBLIC},
+        wire::Format,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn lexical_preparation_seeks_across_blob_pages_between_record_formats() -> Result<()> {
+        let archive = Archive::memory()?;
+        let public = Id::blob(PUBLIC);
+        let record = Document::new(
+            Kind::Question,
+            "samples",
+            "notebook",
+            json!({"statement":"Which leaf belongs in the sample?"}),
+            vec![],
+        )?;
+        let first = archive.document(&record, Format::A, public)?;
+        let last = archive.document(&record, Format::B, public)?;
+        for sample in 0..2048u16 {
+            archive.blob(&sample.to_be_bytes(), public)?;
+        }
+        let head = archive.snapshot_id("notebook", Default::default())?;
+        let full_page_count = archive.head(head)?.pages.len() as u64;
+        let key = head.to_string();
+
+        for (record, complete) in [(first, false), (last, true)] {
+            let mut inventory = archive.inventory_reader(head)?;
+            archive.prepare_lexical_index(&mut inventory, &key, 1, false)?;
+            let state = state(&archive.db, &key)?.expect("search was prepared");
+            assert_eq!(state.cursor, Some(record));
+            assert_eq!(coverage(&archive.db, &key)?, (complete, false));
+            assert!(
+                inventory.tree.io.backing_reads < full_page_count / 2,
+                "a one-record step must not load the blob range"
+            );
+        }
+        Ok(())
+    }
 }

@@ -6,7 +6,7 @@ use super::{
 use crate::{
     profile::{Document, Kind, allows},
     search::{MAX_MEDIA_BYTES, MediaSpan, SearchLocation, media_type, native_media, text_media},
-    store::{Archive, Snapshot},
+    store::{Archive, InventoryReader},
     wire::Id,
 };
 use anyhow::Result;
@@ -117,11 +117,15 @@ fn collect_fields(
 }
 
 impl Archive {
-    pub(super) fn search_sections(&self, snapshot: &Snapshot, id: Id) -> IndexedRecord {
+    pub(super) fn search_sections(
+        &self,
+        inventory: &mut InventoryReader<'_>,
+        id: Id,
+    ) -> IndexedRecord {
         let mut dependencies = Dependencies::default();
-        let Ok(document) =
-            self.read_with(id, |id| self.search_source(snapshot, id, &mut dependencies))
-        else {
+        let Ok(document) = self.read_with(id, |id| {
+            self.search_source(inventory, id, &mut dependencies)
+        }) else {
             return IndexedRecord {
                 document: None,
                 sections: Vec::new(),
@@ -166,7 +170,7 @@ impl Archive {
         if descriptor {
             let media = &document.subject;
             if text_media(media) {
-                match self.search_text(snapshot, &document, &mut dependencies) {
+                match self.search_text(inventory, &document, &mut dependencies) {
                     Ok((section, incomplete)) => {
                         sections.push(section);
                         limited |= incomplete;
@@ -177,7 +181,7 @@ impl Archive {
                     }
                 }
             } else if native_media(media) {
-                let verified = self.media_dependencies(snapshot, &document, &mut dependencies);
+                let verified = self.media_dependencies(inventory, &document, &mut dependencies);
                 match verified {
                     Ok(length) if length > 0 => sections.push(IndexedSection {
                         sources: dependencies.available,
@@ -212,12 +216,12 @@ impl Archive {
 
     fn search_text(
         &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         document: &Document,
         dependencies: &mut Dependencies,
     ) -> Result<(IndexedSection, bool)> {
         let length: u64 = document.field("length")?;
-        let mut resolve = |id| self.search_source(snapshot, id, dependencies);
+        let mut resolve = |id| self.search_source(inventory, id, dependencies);
         let (passages, pending_text, limited) = if length <= MAX_PAYLOAD {
             let mut bytes = Vec::new();
             document.materialize(MAX_PAYLOAD, &mut bytes, &mut resolve)?;
@@ -245,7 +249,7 @@ impl Archive {
 
     fn media_dependencies(
         &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         document: &Document,
         dependencies: &mut Dependencies,
     ) -> Result<u64> {
@@ -261,12 +265,12 @@ impl Archive {
                 link.role == "chunk" && id.format().is_none(),
                 "invalid media source"
             );
-            if let Some(missing) = self.search_missing(snapshot, id)? {
+            if let Some(missing) = self.search_missing(inventory, id)? {
                 dependencies.missing.insert(missing);
                 anyhow::bail!("media source is unavailable");
             }
             anyhow::ensure!(
-                snapshot.objects.contains(&id),
+                inventory.contains(id)?,
                 "media source is outside the snapshot"
             );
             let access: String = self.db.query_row(
@@ -276,7 +280,7 @@ impl Archive {
             )?;
             let access = access.parse()?;
             anyhow::ensure!(
-                snapshot.objects.contains(&access),
+                inventory.contains(access)?,
                 "missing media access descriptor"
             );
             if checked_policies.insert(access) {
@@ -289,17 +293,17 @@ impl Archive {
 
     fn search_source(
         &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         id: Id,
         dependencies: &mut Dependencies,
     ) -> Result<Vec<u8>> {
-        match self.resolve_with(snapshot, id, |policy| allows(policy, "read")) {
+        match inventory.resolve(id) {
             Ok((bytes, access)) => {
                 dependencies.available.extend([id, access]);
                 Ok(bytes)
             }
             Err(error) => {
-                if let Some(missing) = self.search_missing(snapshot, id)? {
+                if let Some(missing) = self.search_missing(inventory, id)? {
                     dependencies.missing.insert(missing);
                 }
                 Err(error)
@@ -307,8 +311,8 @@ impl Archive {
         }
     }
 
-    fn search_missing(&self, snapshot: &Snapshot, id: Id) -> Result<Option<Id>> {
-        if !snapshot.objects.contains(&id) {
+    fn search_missing(&self, inventory: &mut InventoryReader<'_>, id: Id) -> Result<Option<Id>> {
+        if !inventory.contains(id)? {
             return Ok(None);
         }
         let object: Option<(String, bool)> = self
@@ -323,7 +327,7 @@ impl Archive {
             return Ok(Some(id));
         };
         let access = access.parse()?;
-        if !available || !snapshot.objects.contains(&access) {
+        if !available || !inventory.contains(access)? {
             return Ok(None);
         }
         let known: bool = self.db.query_row(

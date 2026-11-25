@@ -8,7 +8,7 @@ mod vectors;
 mod visibility;
 
 use self::rank::{SemanticQuery, VectorWork, rank};
-use super::{Archive, Snapshot, custody::tree::Tree};
+use super::{Archive, InventoryReader, Snapshot};
 use crate::{
     profile::Document,
     search::{
@@ -20,49 +20,16 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use cache::{INDEX_VERSION, coverage, prepared_cache_version};
 use rusqlite::{OptionalExtension, params};
-use std::{borrow::Cow, collections::BTreeSet};
+use std::collections::BTreeSet;
 use vectors::{embed_query, missing_vectors};
 
 const MAX_QUERY_PASSAGES: usize = 24;
 
+#[derive(Clone, Copy)]
 pub(crate) enum IndexPreparation {
     Existing,
     Lexical,
     Full { rebuild: bool },
-}
-
-enum SearchInventory<'a> {
-    Snapshot(&'a Snapshot),
-    #[cfg(feature = "cli")]
-    Selected(super::Manifest),
-}
-
-impl SearchInventory<'_> {
-    fn id(&self) -> Result<Id> {
-        match self {
-            Self::Snapshot(snapshot) => snapshot.id(),
-            #[cfg(feature = "cli")]
-            Self::Selected(manifest) => manifest.id(),
-        }
-    }
-
-    fn load(&self, _archive: &Archive) -> Result<Cow<'_, Snapshot>> {
-        match self {
-            Self::Snapshot(snapshot) => Ok(Cow::Borrowed(snapshot)),
-            #[cfg(feature = "cli")]
-            Self::Selected(manifest) => Ok(Cow::Owned(_archive.head(manifest.id()?)?)),
-        }
-    }
-
-    fn resolve(&self, archive: &Archive, id: Id, _tree: &mut Tree<'_>) -> Result<Vec<u8>> {
-        match self {
-            Self::Snapshot(snapshot) => archive.resolve(snapshot, id, "read"),
-            #[cfg(feature = "cli")]
-            Self::Selected(manifest) => {
-                Ok(archive.resolve_member_in(manifest, id, "read", _tree)?.0)
-            }
-        }
-    }
 }
 
 struct Passage {
@@ -157,12 +124,9 @@ impl Archive {
         options: SearchOptions,
     ) -> Result<SearchReport> {
         self.with_read_view(|| {
-            let m = self.active_manifest(self.selected_search_id(head)?)?;
-            let report = SearchReport::start(m.id()?, options, false)?;
-            let mut tree = super::custody::tree::Tree::new(&self.db);
-            Self::exact_report(report, id, options, |key| {
-                Ok(self.resolve_member_in(&m, key, "read", &mut tree)?.0)
-            })
+            let mut inventory = self.inventory_reader(self.selected_search_id(head)?)?;
+            let report = SearchReport::start(inventory.id()?, options, false)?;
+            Self::exact_report(report, id, options, |key| Ok(inventory.resolve(key)?.0))
         })
     }
 
@@ -194,7 +158,7 @@ impl Archive {
 
     fn prepare_lexical_index(
         &self,
-        snapshot: &Snapshot,
+        inventory: &mut InventoryReader<'_>,
         head: &str,
         budget: usize,
         rebuild: bool,
@@ -203,7 +167,7 @@ impl Archive {
         if rebuild {
             self.clear_index_view(head)?;
         }
-        self.refresh_search(snapshot, head, budget)
+        self.refresh_search(inventory, head, budget)
     }
 
     pub fn find(
@@ -229,7 +193,7 @@ impl Archive {
             IndexPreparation::Full { rebuild: false }
         };
         self.lookup_search(
-            SearchInventory::Snapshot(snapshot),
+            InventoryReader::materialized(self, snapshot),
             input,
             options,
             model,
@@ -246,7 +210,7 @@ impl Archive {
         model: Option<&mut dyn Embedder>,
     ) -> Result<SearchReport> {
         self.lookup_search(
-            SearchInventory::Snapshot(snapshot),
+            InventoryReader::materialized(self, snapshot),
             input,
             options,
             model,
@@ -261,23 +225,40 @@ impl Archive {
         budget: usize,
         model: Option<&mut dyn Embedder>,
     ) -> Result<SearchPreparation> {
-        self.prepare_search_index(snapshot, budget, model, false)
+        self.prepare_search_index(
+            InventoryReader::materialized(self, snapshot),
+            budget,
+            model,
+            false,
+        )
     }
 
-    pub(crate) fn prepare_search_index(
+    #[cfg(feature = "cli")]
+    pub(crate) fn prepare_selected_search(
         &self,
-        snapshot: &Snapshot,
+        head: Option<Id>,
+        budget: usize,
+        model: Option<&mut dyn Embedder>,
+        rebuild: bool,
+    ) -> Result<SearchPreparation> {
+        let inventory = self.inventory_reader(self.selected_search_id(head)?)?;
+        self.prepare_search_index(inventory, budget, model, rebuild)
+    }
+
+    fn prepare_search_index(
+        &self,
+        mut inventory: InventoryReader<'_>,
         budget: usize,
         model: Option<&mut dyn Embedder>,
         rebuild: bool,
     ) -> Result<SearchPreparation> {
         ensure!(budget > 0, "positive index budget required");
-        let head = snapshot.id()?;
+        let head = inventory.id()?;
         let key = head.to_string();
-        self.prepare_lexical_index(snapshot, &key, budget, rebuild)?;
+        self.prepare_lexical_index(&mut inventory, &key, budget, rebuild)?;
         let model_key = if let Some(model) = model {
             let id = model.id().to_string();
-            self.refresh_search_vectors(snapshot, &key, model, budget)?;
+            self.refresh_search_vectors(&mut inventory, &key, model, budget)?;
             Some(id)
         } else {
             None
@@ -306,6 +287,18 @@ impl Archive {
     }
 
     #[cfg(feature = "cli")]
+    pub(crate) fn prepared_search_head(&self, head: Option<Id>) -> Result<Option<Id>> {
+        self.with_read_view(|| {
+            let head = self.search_head_id(head)?;
+            if cache::current_schema(&self.db)? && coverage(&self.db, &head.to_string())?.0 {
+                Ok(Some(head))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    #[cfg(feature = "cli")]
     pub(crate) fn find_selected(
         &self,
         head: Option<Id>,
@@ -314,19 +307,13 @@ impl Archive {
         model: Option<&mut dyn Embedder>,
         preparation: IndexPreparation,
     ) -> Result<SearchReport> {
-        let manifest = self.active_manifest(self.selected_search_id(head)?)?;
-        self.lookup_search(
-            SearchInventory::Selected(manifest),
-            input,
-            options,
-            model,
-            preparation,
-        )
+        let inventory = self.inventory_reader(self.selected_search_id(head)?)?;
+        self.lookup_search(inventory, input, options, model, preparation)
     }
 
     fn lookup_search(
         &self,
-        inventory: SearchInventory<'_>,
+        mut inventory: InventoryReader<'_>,
         input: SearchInput<'_>,
         options: SearchOptions<'_>,
         model: Option<&mut dyn Embedder>,
@@ -369,10 +356,10 @@ impl Archive {
         };
         let mut report = SearchReport::start(inventory.id()?, options, limited)?;
         let head = report.head;
-        let mut tree = Tree::new(&self.db);
-        let mut resolve = |id| inventory.resolve(self, id, &mut tree);
         if let Some(id) = input.exact_id() {
-            return self.with_read_view(|| Self::exact_report(report, id, options, resolve));
+            return self.with_read_view(|| {
+                Self::exact_report(report, id, options, |key| Ok(inventory.resolve(key)?.0))
+            });
         }
 
         let mode = options.mode;
@@ -408,15 +395,18 @@ impl Archive {
             IndexPreparation::Lexical => {
                 self.init_search()?;
                 if !coverage(&self.db, &head)?.0 {
-                    let snapshot = inventory.load(self)?;
-                    self.refresh_search(&snapshot, &head, options.index_budget)?;
+                    self.refresh_search(&mut inventory, &head, options.index_budget)?;
                 }
             }
             IndexPreparation::Full { rebuild } => {
-                let snapshot = inventory.load(self)?;
-                self.prepare_lexical_index(&snapshot, &head, options.index_budget, rebuild)?;
+                self.prepare_lexical_index(&mut inventory, &head, options.index_budget, rebuild)?;
                 if let Some(model) = model {
-                    self.refresh_search_vectors(&snapshot, &head, model, options.index_budget)?;
+                    self.refresh_search_vectors(
+                        &mut inventory,
+                        &head,
+                        model,
+                        options.index_budget,
+                    )?;
                 }
             }
         }
@@ -461,7 +451,7 @@ impl Archive {
         report.vector_rows_examined = work.rows_examined;
         report.vector_rows_loaded = work.vectors_loaded;
         for candidate in candidates {
-            let Ok(document) = self.read_with(candidate.id, &mut resolve) else {
+            let Ok(document) = inventory.read(candidate.id) else {
                 report.limited_coverage = true;
                 continue;
             };
@@ -486,9 +476,10 @@ impl Archive {
                 *span = serde_json::from_str(&encoded)?;
                 None
             } else {
-                let Some(snippet) = Self::search_snippet(&document, &location, &mut resolve)
-                    .ok()
-                    .flatten()
+                let Some(snippet) =
+                    Self::search_snippet(&document, &location, |id| Ok(inventory.resolve(id)?.0))
+                        .ok()
+                        .flatten()
                 else {
                     report.limited_coverage = true;
                     continue;
@@ -496,7 +487,7 @@ impl Archive {
                 Some(snippet)
             };
             let mut hit = Self::search_hit(
-                |key| resolve(key).is_ok(),
+                |key| inventory.resolve(key).is_ok(),
                 candidate.id,
                 Some(&document),
                 location,
