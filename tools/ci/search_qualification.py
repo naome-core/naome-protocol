@@ -50,8 +50,12 @@ def create_fixtures(directory):
 
 
 def verify_packaged_search(nao, root, environment):
+    archive = root / "packaged search.sqlite"
+
     def run(*args):
-        return json.loads(subprocess.check_output([nao, *args], cwd=root, env=environment, timeout=420))
+        return json.loads(subprocess.check_output(
+            [nao, "--db", archive, *args], cwd=root, env=environment, timeout=420
+        ))
 
     media = Path(environment["NAOME_MEDIA_FIXTURES"]) / "bridge.png"
     object_id = run("capture", media, "image/png")
@@ -69,6 +73,7 @@ def qualify(nao=None):
     with tempfile.TemporaryDirectory(prefix="nao-search-qualification-") as temporary:
         root = Path(temporary)
         environment = os.environ.copy()
+        environment.pop("NAO_ARCHIVE", None)
         if "NAOME_SEARCH_MODEL" not in environment:
             environment["NAOME_SEARCH_MODEL"] = snapshot_download(
                 MODEL, revision=REVISION, local_dir=root / "model weights"

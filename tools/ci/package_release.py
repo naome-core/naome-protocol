@@ -69,6 +69,15 @@ def verify_research_handoff(run):
 
 
 def verify(nao, directory, version):
+    environment = os.environ.copy()
+    environment.pop("NAO_ARCHIVE", None)
+
+    def invoke(*args, **options):
+        return subprocess.run([nao, *args], cwd=directory, env=environment, timeout=60, **options)
+
+    def run(*args):
+        return json.loads(invoke(*args, stdout=subprocess.PIPE, check=True).stdout)
+
     readme = (directory / "README.md").read_text(encoding="utf-8")
     for link in re.findall(r"\]\((spec/[^)]+)\)", readme):
         expected = ROOT / link
@@ -76,14 +85,11 @@ def verify(nao, directory, version):
         if not packaged.is_file() or packaged.read_bytes() != expected.read_bytes():
             raise ValueError(f"missing or altered README target in release download: {link}")
 
-    version_line = subprocess.check_output([nao, "--version"], cwd=directory, text=True, timeout=60)
-    help_text = subprocess.check_output([nao, "--help"], cwd=directory, text=True, timeout=60)
+    version_line = invoke("--version", stdout=subprocess.PIPE, text=True, check=True).stdout
+    help_text = invoke("--help", stdout=subprocess.PIPE, text=True, check=True).stdout
     usage = next((line for line in help_text.splitlines() if line.startswith("Usage: ")), "")
     if version_line.strip() != f"nao {version}" or not usage.startswith("Usage: nao "):
         raise ValueError(f"unexpected packaged version or help: {version_line.strip()!r}, {usage!r}")
-
-    def run(*args):
-        return json.loads(subprocess.check_output([nao, *args], cwd=directory, timeout=60))
 
     capabilities = run("capabilities")
     if capabilities["version"] != version:
@@ -103,21 +109,20 @@ def verify(nao, directory, version):
         run("export", head, exchange, *options)
         pin = ["--expected-head", head] if mode == "paged" else []
         run("--db", receiver, "import", exchange, *options, *pin)
-        subprocess.run([nao, "--db", receiver, "resolve", head, object_id, resolved],
-                       cwd=directory, timeout=60, check=True)
+        invoke("--db", receiver, "resolve", head, object_id, resolved, check=True)
         if (directory / resolved).read_bytes() != reading:
             raise ValueError(f"{mode} exchange changed the payload")
 
     retired = run("blob", "README.md")
     transfer_head = run("snapshot", "paged release qualification", "--root", object_id, "--root", retired)
-    subprocess.run([nao, "withdraw", retired], cwd=directory, check=True, timeout=60)
+    invoke("withdraw", retired, check=True)
     transfer_paged(run, transfer_head, "transfer", "continued receiver.sqlite", limit=1)
-    subprocess.run([nao, "--db", "continued receiver.sqlite", "resolve", transfer_head, object_id,
-                    "continued-reading.txt"], cwd=directory, check=True, timeout=60)
+    invoke("--db", "continued receiver.sqlite", "resolve", transfer_head, object_id,
+           "continued-reading.txt", check=True)
     if (directory / "continued-reading.txt").read_bytes() != reading:
         raise ValueError("continued transfer changed the available payload")
-    unavailable = subprocess.run([nao, "--db", "continued receiver.sqlite", "resolve", transfer_head,
-                                  retired, "withdrawn.txt"], cwd=directory, capture_output=True, timeout=60)
+    unavailable = invoke("--db", "continued receiver.sqlite", "resolve", transfer_head,
+                         retired, "withdrawn.txt", capture_output=True)
     if unavailable.returncode == 0 or b"unavailable" not in unavailable.stderr:
         raise ValueError("finished inventory incorrectly supplied withdrawn evidence")
 
@@ -132,13 +137,12 @@ def verify(nao, directory, version):
     first = run(*origin, "append", "lab", "members.json")["head"]
     captured = run(*origin, "capture", "lab", stream, "Messung µ.txt", "--parent", first)
     tip = captured["head"]
-    subprocess.run([nao, *origin, "share", tip], cwd=directory, check=True, timeout=60)
+    invoke(*origin, "share", tip, check=True)
     run(*origin, "export-step", tip, "first.frame")
     assert run(*receiver, "import-step", tip, "first.frame")["head"] == first
     transfer = run(*receiver, "pull", "origin.sqlite", tip)
     assert transfer["complete"] and transfer["batches"] == 1
-    subprocess.run([nao, *receiver, "range", tip, stream, "0", str(len(reading)), "range.bin"],
-                   cwd=directory, check=True, timeout=60)
+    invoke(*receiver, "range", tip, stream, "0", str(len(reading)), "range.bin", check=True)
     assert (directory / "range.bin").read_bytes() == reading
     (directory / "sources.json").write_text(json.dumps([{"head": tip, "db": "receiver.sqlite"}]))
     result = run(*receiver, "review", "sources.json", object_id, "--corrections", "--receipt")
