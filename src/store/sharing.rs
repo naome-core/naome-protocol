@@ -511,10 +511,37 @@ pub struct ReplicaReview {
 impl Archive {
     fn seal_review_union(&self, parents: BTreeSet<Id>) -> Result<Id> {
         let mut objects = BTreeSet::new();
+        let mut withheld = BTreeSet::new();
+        let mut access = self
+            .db
+            .prepare_cached("SELECT access FROM objects WHERE id=? AND data IS NOT NULL")?;
         for &head in &parents {
-            objects.extend(&self.head(head)?.objects);
+            let snapshot = self.head(head)?;
+            for &id in &snapshot.objects {
+                if !objects.insert(id) && !withheld.contains(&id) {
+                    continue;
+                }
+                let local_acl: Option<String> = access
+                    .query_row([id.to_string()], |row| row.get(0))
+                    .optional()?;
+                let admitted = match local_acl {
+                    Some(acl) => {
+                        let acl = acl.parse()?;
+                        snapshot.objects.contains(&acl)
+                            && !self.point_only(id)?
+                            && self.require_exchange_access(head, id, acl, false).is_ok()
+                            && self.check_access(acl, |_| true).is_ok()
+                    }
+                    None => false,
+                };
+                if admitted {
+                    withheld.remove(&id);
+                } else {
+                    withheld.insert(id);
+                }
+            }
         }
-        self.seal_members("local replica review", parents, objects)?
+        self.seal_members_withheld("local replica review", parents, objects, &withheld)?
             .id()
     }
 

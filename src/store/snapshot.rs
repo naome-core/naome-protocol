@@ -606,7 +606,7 @@ impl Archive {
         )?;
         let rows = q.query_map(params![after, water], |r| r.get::<_, String>(0))?;
         let ids = rows.map(|r| r?.parse());
-        let head = self.seal_ids(source, &parents, base, ids)?;
+        let head = self.seal_ids(source, &parents, base, ids, &BTreeSet::new())?;
         self.db.execute(
             "INSERT INTO archive_seals(id,source,parents,high_water,epoch,withdrawal_serial)
              VALUES(?,?,?,?,?,(SELECT coalesce(max(serial),0) FROM custody_withdrawal_log))
@@ -804,6 +804,20 @@ impl Archive {
         parents: BTreeSet<Id>,
         objects: BTreeSet<Id>,
     ) -> Result<Snapshot> {
+        self.seal_members_withheld(source, parents, objects, &BTreeSet::new())
+    }
+
+    pub(super) fn seal_members_withheld(
+        &self,
+        source: &str,
+        parents: BTreeSet<Id>,
+        objects: BTreeSet<Id>,
+        withheld: &BTreeSet<Id>,
+    ) -> Result<Snapshot> {
+        ensure!(
+            withheld.is_subset(&objects),
+            "withheld member outside inventory"
+        );
         let tx = if self.db.is_autocommit() {
             Some(rusqlite::Transaction::new_unchecked(
                 &self.db,
@@ -812,9 +826,24 @@ impl Archive {
         } else {
             None
         };
-        let head = self.seal_ids(source, &parents, None, objects.iter().copied().map(Ok))?;
+        let head = self.seal_ids(
+            source,
+            &parents,
+            None,
+            objects.iter().copied().map(Ok),
+            withheld,
+        )?;
         let snapshot = self.head(head)?;
         ensure!(snapshot.objects == objects, "sealed inventory differs");
+        if !withheld.is_empty() {
+            let key = head.to_string();
+            let mut record = self
+                .db
+                .prepare_cached("INSERT OR IGNORE INTO archive_review_withheld VALUES(?,?)")?;
+            for id in withheld {
+                record.execute(params![key, id.to_string()])?;
+            }
+        }
         if let Some(tx) = tx {
             tx.commit()?
         }
@@ -826,12 +855,17 @@ impl Archive {
         parents: &BTreeSet<Id>,
         mut cursor: Option<Id>,
         ids: impl Iterator<Item = Result<Id>>,
+        withheld: &BTreeSet<Id>,
     ) -> Result<Id> {
         let mut items = Vec::new();
         let mut total = 0;
         for id in ids {
             let id = id?;
-            let raw = self.raw(id)?;
+            let raw = if withheld.contains(&id) {
+                None
+            } else {
+                self.raw(id)?
+            };
             let absent = raw.is_none();
             let (bytes, access) = match raw {
                 Some(pair) => pair,
