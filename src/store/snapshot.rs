@@ -310,6 +310,34 @@ pub(super) fn save_imported_head(db: &Connection, head: Id, snapshot: &Snapshot)
 }
 
 impl Archive {
+    pub(super) fn upgrade_full_seals(&self) -> Result<()> {
+        let (withdrawal_cursor, indexed_parents): (bool, bool) = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('archive_seals') WHERE name='withdrawal_serial'),
+                    EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='archive_seal_parents')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if !withdrawal_cursor {
+            self.db
+                .execute_batch("ALTER TABLE archive_seals ADD COLUMN withdrawal_serial INTEGER;")?;
+        }
+        if !indexed_parents {
+            self.db.execute_batch(
+                "CREATE TABLE archive_seal_parents(
+                    source TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(source,parent)
+                 ) WITHOUT ROWID;
+                 INSERT OR IGNORE INTO archive_seal_parents
+                    SELECT s.source,p.value FROM archive_seals s,json_each(s.parents) p;
+                 CREATE TRIGGER archive_seal_index_parents AFTER INSERT ON archive_seals
+                 BEGIN
+                    INSERT OR IGNORE INTO archive_seal_parents
+                        SELECT NEW.source,value FROM json_each(NEW.parents);
+                 END;",
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn inventory_reader(&self, head: Id) -> Result<InventoryReader<'_>> {
         Ok(InventoryReader::paged(self, self.active_manifest(head)?))
     }
@@ -393,16 +421,24 @@ impl Archive {
         let mut base = None;
         let mut after = 0_i64;
         for parent in &parents {
-            if let Some((previous, parent_epoch)) = self
+            if let Some((previous, parent_epoch, withdrawal_serial)) = self
                 .db
                 .query_row(
-                    "SELECT high_water,epoch FROM archive_seals WHERE id=? AND source=?",
+                    "SELECT high_water,epoch,coalesce(withdrawal_serial,0)
+                     FROM archive_seals WHERE id=? AND source=?",
                     params![parent.to_string(), source],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ))
+                    },
                 )
                 .optional()?
                 && (base.is_none() || previous > after)
-                && (parent_epoch == epoch || self.full_parent_available(*parent, previous)?)
+                && (parent_epoch == epoch
+                    || self.full_parent_available(*parent, previous, withdrawal_serial)?)
             {
                 base = Some(*parent);
                 after = previous;
@@ -416,7 +452,10 @@ impl Archive {
         let ids = rows.map(|r| r?.parse());
         let head = self.seal_ids(source, &parents, base, ids)?;
         self.db.execute(
-            "INSERT INTO archive_seals VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET high_water=excluded.high_water,epoch=excluded.epoch",
+            "INSERT INTO archive_seals(id,source,parents,high_water,epoch,withdrawal_serial)
+             VALUES(?,?,?,?,?,(SELECT coalesce(max(serial),0) FROM custody_withdrawal_log))
+             ON CONFLICT(id) DO UPDATE SET high_water=excluded.high_water,epoch=excluded.epoch,
+                 withdrawal_serial=excluded.withdrawal_serial",
             params![head.to_string(), source, encoded, water, epoch],
         )?;
         if let Some(tx) = tx {
@@ -425,15 +464,20 @@ impl Archive {
         Ok(head)
     }
 
-    fn full_parent_available(&self, parent: Id, high_water: i64) -> Result<bool> {
-        // Full seals only include deposits at or below their high-water mark.
-        // An older withdrawal already excluded from this parent is harmless.
+    fn full_parent_available(
+        &self,
+        parent: Id,
+        high_water: i64,
+        withdrawal_serial: i64,
+    ) -> Result<bool> {
+        // The parent already excludes withdrawals recorded at its seal. Historical seals
+        // without a journal position inspect the complete withdrawal log.
         let mut query = self.db.prepare_cached(
-            "SELECT o.id FROM objects o WHERE o.data IS NULL AND EXISTS (
-                 SELECT 1 FROM archive_deposits d WHERE d.id=o.id AND d.serial<=?
+            "SELECT w.object FROM custody_withdrawal_log w WHERE w.serial>?1 AND EXISTS (
+                 SELECT 1 FROM archive_deposits d WHERE d.id=w.object AND d.serial<=?2
              )",
         )?;
-        let mut rows = query.query([high_water])?;
+        let mut rows = query.query(params![withdrawal_serial, high_water])?;
         let Some(first) = rows.next()? else {
             return Ok(true);
         };
@@ -467,8 +511,8 @@ impl Archive {
                  SELECT t.head,s.high_water,s.epoch,t.source FROM custody_tips t
                  LEFT JOIN archive_seals s ON s.id=t.head
                  WHERE (?1 IS NULL OR t.source=?1) AND NOT EXISTS (
-                     SELECT 1 FROM archive_seals child, json_each(child.parents) p
-                     WHERE child.source=t.source AND p.value=t.head
+                     SELECT 1 FROM archive_seal_parents p
+                     WHERE p.source=t.source AND p.parent=t.head
                  )
              )
              SELECT head,high_water,epoch,source FROM live_tips
@@ -831,5 +875,54 @@ impl Archive {
 
     pub(crate) fn local_receipt_horizon(&self, id: Id) -> Result<Snapshot> {
         self.load_snapshot_packet(id, &self.resolve_local(id)?, ManifestEncoding::Canonical)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continuation_preserves_logical_parents_and_withdrawals_after_upgrade() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("archive.sqlite");
+        let archive = Archive::open(&path)?;
+        let public = Id::blob(PUBLIC);
+        let withdrawn = archive.blob(b"superseded observation", public)?;
+        let retained = archive.blob(b"retained observation", public)?;
+        let first = archive.snapshot_id("research", Default::default())?;
+        archive.withdraw(withdrawn)?;
+
+        let rebuilt = archive.continue_snapshot("research")?;
+        assert!(archive.custody_head(rebuilt)?.parent.is_none());
+        assert_eq!(archive.head(rebuilt)?.parents, [first].into());
+        assert_eq!(archive.custody_tips("research", None, 10)?.len(), 2);
+        archive.db.execute_batch(
+            "DROP TRIGGER archive_seal_index_parents;
+             DROP TABLE archive_seal_parents;
+             ALTER TABLE archive_seals DROP COLUMN withdrawal_serial;",
+        )?;
+        drop(archive);
+
+        let archive = Archive::open(&path)?;
+        assert_eq!(archive.continue_snapshot("research")?, rebuilt);
+        let outside = archive.blob(b"temporary observation outside the parent", public)?;
+        archive.withdraw(outside)?;
+        let continued = archive.continue_snapshot("research")?;
+        assert_eq!(archive.custody_head(continued)?.parent, Some(rebuilt));
+        assert_eq!(
+            archive.resolve_head(continued, retained, "read")?,
+            b"retained observation"
+        );
+        drop(archive);
+
+        let archive = Archive::open(&path)?;
+        archive.withdraw(retained)?;
+        let next = archive.continue_snapshot("research")?;
+        assert!(archive.custody_head(next)?.parent.is_none());
+        assert_eq!(archive.head(next)?.parents, [continued].into());
+        assert!(!archive.head(next)?.objects.contains(&retained));
+        assert_eq!(archive.continue_snapshot("research")?, next);
+        Ok(())
     }
 }

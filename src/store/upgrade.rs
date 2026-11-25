@@ -42,6 +42,7 @@ impl Archive {
     }
     pub(super) fn upgrade_catalog(&self) -> Result<()> {
         self.upgrade_exchange_staging()?;
+        self.upgrade_full_seals()?;
         let old_exchange: bool = self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='archive_exchange_progress')",
             [],

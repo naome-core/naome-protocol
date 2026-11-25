@@ -18,7 +18,10 @@ INSERT OR IGNORE INTO archive_epoch VALUES(1,0);
 CREATE TRIGGER IF NOT EXISTS archive_withdrawal_epoch AFTER UPDATE OF data ON objects
 WHEN OLD.data IS NOT NULL AND NEW.data IS NULL
 BEGIN UPDATE archive_epoch SET withdrawn=withdrawn+1 WHERE singleton=1; END;
-CREATE TABLE IF NOT EXISTS archive_seals(id TEXT PRIMARY KEY,source TEXT NOT NULL,parents TEXT NOT NULL, high_water INTEGER NOT NULL,epoch INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS archive_seals(
+    id TEXT PRIMARY KEY,source TEXT NOT NULL,parents TEXT NOT NULL,
+    high_water INTEGER NOT NULL,epoch INTEGER NOT NULL,withdrawal_serial INTEGER
+);
 CREATE INDEX IF NOT EXISTS archive_seals_lookup ON archive_seals(source,parents,high_water,epoch);
 CREATE TABLE IF NOT EXISTS archive_deposits(serial INTEGER PRIMARY KEY,id TEXT NOT NULL UNIQUE);
 CREATE TRIGGER IF NOT EXISTS archive_catalog_append AFTER INSERT ON objects
