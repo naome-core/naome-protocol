@@ -94,7 +94,7 @@ pub struct Admission {
     pub io: PageIo,
 }
 
-fn object(id: Id) -> String {
+pub(super) fn object(id: Id) -> String {
     format!("o/{id}")
 }
 fn required(id: Id) -> String {

@@ -13,6 +13,12 @@ const BATCH: usize = 16;
 const TEXT_BATCH: usize = 4;
 const ADD_MEDIA_PASSAGE_INDEX: &str = "CREATE INDEX IF NOT EXISTS rep_search_media_passages
     ON rep_search_passages(entry) WHERE semantic AND text=''";
+const ADD_VECTOR_PROGRESS: &str = "CREATE TABLE IF NOT EXISTS rep_search_vector_progress(
+    head TEXT NOT NULL REFERENCES rep_search_heads(head) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    cursor INTEGER NOT NULL,
+    PRIMARY KEY(head,model)
+) WITHOUT ROWID;";
 const ADD_WITNESS_ARRIVAL: &str = "CREATE TRIGGER rep_search_witness_arrival
     AFTER INSERT ON custody_pages
     WHEN EXISTS(SELECT 1 FROM rep_search_waiting WHERE source='page/' || NEW.id AND NOT ready)
@@ -34,7 +40,10 @@ enum Record {
 
 impl Archive {
     pub(super) fn init_search(&self) -> Result<()> {
-        if current_schema(&self.db)? && witness_arrival_installed(&self.db)? {
+        if current_schema(&self.db)?
+            && vector_progress_installed(&self.db)?
+            && witness_arrival_installed(&self.db)?
+        {
             return Ok(());
         }
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
@@ -81,6 +90,7 @@ impl Archive {
             tx.execute_batch(include_str!("vector_visibility.sql"))?;
         }
         tx.execute_batch(ADD_MEDIA_PASSAGE_INDEX)?;
+        tx.execute_batch(ADD_VECTOR_PROGRESS)?;
         if !witness_arrival_installed(&tx)? {
             tx.execute_batch(ADD_WITNESS_ARRIVAL)?;
             // Earlier prepared gaps may have been recorded without a missing page ID.
@@ -242,6 +252,15 @@ fn witness_arrival_installed(db: &Connection) -> Result<bool> {
         [],
         |row| row.get(0),
     )?)
+}
+
+fn vector_progress_installed(db: &Connection) -> Result<bool> {
+    Ok(db
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE
+            type='table' AND name='rep_search_vector_progress')",
+        )?
+        .query_row([], |row| row.get(0))?)
 }
 
 pub(super) fn prepared_cache_version(db: &Connection) -> Result<Option<u32>> {

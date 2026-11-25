@@ -474,6 +474,61 @@ fn prepared_sparse_refill_does_not_walk_the_whole_vector_index() -> Result<()> {
 }
 
 #[test]
+fn vector_preparation_resumes_past_a_denied_prefix_after_reopen() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("vector progress.sqlite");
+    let archive = Archive::open(&path)?;
+    let public = Id::blob(PUBLIC);
+    let mut records = Vec::new();
+    for subject in ["north observation", "south observation"] {
+        let document = Document::new(Kind::Claim, subject, "test", json!({}), vec![])?;
+        records.push(archive.document(&document, Format::A, public)?);
+    }
+    records.sort_unstable();
+    let snapshot = archive.snapshot("prepared scope", Default::default())?;
+    assert!(archive.prepare_search(&snapshot, 100, None)?.index_complete);
+    let db = rusqlite::Connection::open(&path)?;
+    db.execute(
+        "INSERT INTO archive_member_access VALUES(?,?,?)",
+        rusqlite::params![
+            snapshot.id()?.to_string(),
+            records[0].to_string(),
+            Id::blob(naome_protocol::profile::READ_ONLY).to_string()
+        ],
+    )?;
+    drop(db);
+    let mut model = TestEmbedder {
+        id: Id::blob(b"scoped preparation progress"),
+        embedded_passages: 0,
+    };
+    archive.prepare_search(&snapshot, 1, Some(&mut model))?;
+    assert_eq!(model.embedded_passages, 0);
+    drop(archive);
+
+    let archive = Archive::open(&path)?;
+    archive.prepare_search(&snapshot, 1, Some(&mut model))?;
+    assert_eq!(model.embedded_passages, 1);
+    let report = archive.search_prepared(
+        &snapshot,
+        SearchInput::Text("observation"),
+        SearchOptions {
+            mode: SearchMode::Semantic,
+            ..Default::default()
+        },
+        Some(&mut model),
+    )?;
+    assert_eq!(
+        report.hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        [records[1]]
+    );
+
+    let independent = archive.snapshot("independently authorized", Default::default())?;
+    archive.prepare_search(&independent, 100, Some(&mut model))?;
+    assert_eq!(model.embedded_passages, 2);
+    Ok(())
+}
+
+#[test]
 fn old_local_prepared_media_respects_point_restrictions_before_and_after_upgrade() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("older cached media.sqlite");

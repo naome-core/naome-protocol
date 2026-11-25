@@ -7,7 +7,7 @@ use crate::{
     wire::Id,
 };
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::{
     collections::BTreeMap,
     time::{SystemTime, UNIX_EPOCH},
@@ -65,7 +65,15 @@ impl Archive {
     ) -> Result<()> {
         let position_budget = budget;
         let key = model.id().to_string();
-        let mut cursor = 0;
+        let previous: Option<i64> = self
+            .db
+            .prepare_cached(
+                "SELECT cursor FROM rep_search_vector_progress WHERE head=? AND model=?",
+            )?
+            .query_row(params![head, key], |row| row.get(0))
+            .optional()?;
+        let mut cursor = previous.unwrap_or(0);
+        let mut resume = previous.is_some();
         let now = unix_seconds()?;
         while budget > 0 {
             // Reuse one ordered selection across model batches. Fetch passage text
@@ -73,6 +81,7 @@ impl Archive {
             let selected =
                 self.pending_vector_ids(head, &key, cursor, now, budget.min(VECTOR_PREFETCH))?;
             let Some(&last) = selected.last() else {
+                resume = false;
                 break;
             };
             for batch in selected.chunks(VECTOR_BATCH) {
@@ -93,10 +102,12 @@ impl Archive {
                     Ok((pending, examined))
                 })?;
                 budget -= examined;
+                resume |= pending.len() < examined;
                 if pending.is_empty() {
                     continue;
                 }
                 let indexed = self.embed_passages(inventory, &pending, model);
+                resume |= indexed.iter().any(Option::is_none);
                 let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
                 {
                     let mut state = tx.prepare_cached(
@@ -134,6 +145,22 @@ impl Archive {
             }
             // Passage IDs are monotone, including after a rebuild.
             cursor = last;
+        }
+        // Revisit deferred work after reaching the end. The cursor belongs to
+        // this head and model, while successful embeddings remain shared.
+        if resume {
+            self.db.execute(
+                "INSERT INTO rep_search_vector_progress(head,model,cursor)
+                 SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM rep_search_heads WHERE head=?1)
+                 ON CONFLICT(head,model) DO UPDATE SET cursor=excluded.cursor
+                 WHERE rep_search_vector_progress.cursor=?4",
+                params![head, key, cursor, previous],
+            )?;
+        } else if let Some(previous) = previous {
+            self.db.execute(
+                "DELETE FROM rep_search_vector_progress WHERE head=? AND model=? AND cursor=?",
+                params![head, key, previous],
+            )?;
         }
         if !super::positions::ready(&self.db, head, &key)?
             && super::coverage(&self.db, head)?.0
