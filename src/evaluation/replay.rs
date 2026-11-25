@@ -166,16 +166,13 @@ impl Archive {
             };
             let mut aliases = Equivalence::default();
             let mut local = InventoryReader::materialized(self, &historical);
-            let verification_mappings: BTreeSet<_> = recorded
-                .roles("mapping")
-                .chain(mappings.iter().copied())
-                .collect();
-            for mapping in verification_mappings {
-                let encoding = manifest_encoding(&evaluator)?;
-                aliases.add(match view.as_mut() {
-                    Some(view) => self.verify_mapping_in(view, mapping, encoding)?,
-                    None => self.verify_mapping_in(&mut local, mapping, encoding)?,
-                });
+            let encoding = manifest_encoding(&evaluator)?;
+            let mut verify_mapping = |mapping| match view.as_mut() {
+                Some(view) => self.verify_mapping_in(view, mapping, encoding),
+                None => self.verify_mapping_in(&mut local, mapping, encoding),
+            };
+            for mapping in mappings.iter().copied().collect::<BTreeSet<_>>() {
+                aliases.add(verify_mapping(mapping)?);
             }
             let replay = rebuild_receipt(
                 self,
@@ -186,6 +183,15 @@ impl Archive {
                 &recorded,
                 &mut ReadInventory::default(),
             )?;
+            if !replay.matches(id, &aliases) {
+                // The evaluator can record an unresolved mapping as part of a valid receipt.
+                // Only verified mappings can establish a different receipt's identity.
+                for mapping in recorded.roles("mapping") {
+                    if let Ok(pairs) = verify_mapping(mapping) {
+                        aliases.add(pairs);
+                    }
+                }
+            }
             Ok(ReceiptReplay {
                 id,
                 head,

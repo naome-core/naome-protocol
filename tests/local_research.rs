@@ -954,6 +954,69 @@ fn question_view_includes_the_measurement_trials_plan_linked_claims() -> Result<
 }
 
 #[test]
+fn replay_preserves_assessment_obligations_for_unresolved_mappings() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let path = root.join("archive.sqlite");
+    let archive = Archive::open(&path)?;
+    let case = fixture::seed(&archive, Format::A)?;
+    drop(archive);
+
+    let mut receipts = Vec::new();
+    for mapping in [
+        Id::record(Format::A, b"unavailable mapping"),
+        case.queries[2].target,
+    ] {
+        let mut query = case.queries[2].clone();
+        query.mappings.push(mapping);
+        fs::write(root.join("query.json"), serde_json::to_vec(&query)?)?;
+        let saved = run(&path, root, &["assess", &case.s0.to_string(), "query.json"])?;
+        assert_eq!(saved["receipt"]["horizon_complete"], false);
+        assert!(
+            saved["receipt"]["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|check| check["test"] == "query completeness")
+        );
+        receipts.push((saved, mapping));
+    }
+    let selected = run(&path, root, &["snapshot", "unresolved mapping replay"])?;
+    let head = identifier(&selected);
+    let before = fs::read(&path)?;
+    for (saved, mapping) in receipts {
+        let id = identifier(&saved["id"]);
+        let local = run(&path, root, &["replay", id, "--require-match"])?;
+        assert_eq!(local["matches"], true);
+        assert_eq!(local["replayed"], saved["receipt"]);
+        assert_eq!(
+            run(
+                &path,
+                root,
+                &["replay", id, "--head", head, "--require-match"]
+            )?,
+            local
+        );
+        let explicitly_invalid = invoke(
+            &path,
+            root,
+            &[
+                "replay",
+                id,
+                "--head",
+                head,
+                "--mapping",
+                &mapping.to_string(),
+                "--require-match",
+            ],
+        )?;
+        assert!(!explicitly_invalid.status.success());
+    }
+    assert_eq!(fs::read(&path)?, before);
+    Ok(())
+}
+
+#[test]
 fn replay_and_reassess_a_migrated_receipt_using_its_separate_mapping() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path();
