@@ -347,7 +347,7 @@ impl<'a> InventoryReader<'a> {
             })
     }
 
-    pub(crate) fn readable(&mut self, id: Id) -> Result<()> {
+    pub(crate) fn readable(&mut self, id: Id) -> Result<Id> {
         match &self.view {
             InventoryView::Materialized(snapshot) => self.archive.readable(snapshot, id),
             InventoryView::Paged(manifest) => self.archive.readable_with(

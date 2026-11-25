@@ -4,7 +4,7 @@ use super::{
     text::{MAX_TEXT_BYTES, Utf8Check, VerifiedTextChunk, payload_passages},
 };
 use crate::{
-    profile::{Document, Kind, allows},
+    profile::{Document, Kind},
     search::{MAX_MEDIA_BYTES, MediaSpan, SearchLocation, media_type, native_media, text_media},
     store::{Archive, InventoryReader},
     wire::Id,
@@ -12,7 +12,6 @@ use crate::{
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
-use std::collections::BTreeSet;
 
 const MAX_PAYLOAD: u64 = 256 * 1024;
 const MAX_FIELDS: usize = 64;
@@ -247,7 +246,7 @@ impl Archive {
         ))
     }
 
-    fn media_dependencies(
+    pub(super) fn media_dependencies(
         &self,
         inventory: &mut InventoryReader<'_>,
         document: &Document,
@@ -258,34 +257,21 @@ impl Archive {
             length <= MAX_MEDIA_BYTES && !document.inputs.is_empty(),
             "invalid media size"
         );
-        let mut checked_policies = BTreeSet::new();
         for link in &document.inputs {
             let id = link.target;
             anyhow::ensure!(
                 link.role == "chunk" && id.format().is_none(),
                 "invalid media source"
             );
-            if let Some(missing) = self.search_missing(inventory, id)? {
-                dependencies.missing.insert(missing);
-                anyhow::bail!("media source is unavailable");
-            }
-            anyhow::ensure!(
-                inventory.contains(id)?,
-                "media source is outside the snapshot"
-            );
-            let access: String = self.db.query_row(
-                "SELECT access FROM objects WHERE id=? AND data IS NOT NULL",
-                [id.to_string()],
-                |row| row.get(0),
-            )?;
-            let access = access.parse()?;
-            anyhow::ensure!(
-                inventory.contains(access)?,
-                "missing media access descriptor"
-            );
-            if checked_policies.insert(access) {
-                self.check_access(access, |policy| allows(policy, "read"))?;
-            }
+            let access = match inventory.readable(id) {
+                Ok(access) => access,
+                Err(error) => {
+                    if let Some(missing) = self.search_missing(inventory, id)? {
+                        dependencies.missing.insert(missing);
+                    }
+                    return Err(error);
+                }
+            };
             dependencies.available.extend([id, access]);
         }
         Ok(length)

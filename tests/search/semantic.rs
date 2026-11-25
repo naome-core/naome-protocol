@@ -1,4 +1,5 @@
 use super::*;
+use naome_protocol::search::{EmbeddedMedia, MediaInput, MediaPart, MediaSpan, SearchInput};
 
 #[test]
 fn hybrid_search_resumes_vector_index_and_reuses_only_matching_models() -> Result<()> {
@@ -73,56 +74,50 @@ fn hybrid_search_resumes_vector_index_and_reuses_only_matching_models() -> Resul
     Ok(())
 }
 
+struct SyntheticMedia(&'static [u8]);
+impl Embedder for SyntheticMedia {
+    fn id(&self) -> Id {
+        Id::blob(self.0)
+    }
+    fn dimensions(&self) -> usize {
+        2
+    }
+    fn embed(&mut self, _: EmbeddingInput, input: &[&str]) -> Result<Vec<Vec<f32>>> {
+        Ok(input
+            .iter()
+            .map(|text| {
+                if text.contains("bridge") {
+                    vec![1.0, 0.0]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            })
+            .collect())
+    }
+    fn embed_media(&mut self, _: EmbeddingInput, input: MediaInput<'_>) -> Result<EmbeddedMedia> {
+        assert!(input.media_type == "video/mp4" || input.media_type == "image/png");
+        let span = if input.media_type == "video/mp4" {
+            MediaSpan::Time {
+                start_ms: 18_000,
+                end_ms: 25_000,
+            }
+        } else {
+            MediaSpan::Whole
+        };
+        let vector = if input.bytes == b"bridge footage" {
+            vec![1.0, 0.0]
+        } else {
+            vec![0.0, 1.0]
+        };
+        Ok(EmbeddedMedia {
+            parts: vec![MediaPart { span, vector }],
+            limited: false,
+        })
+    }
+}
+
 #[test]
 fn unified_search_accepts_media_queries_and_returns_resolvable_media_parts() -> Result<()> {
-    use naome_protocol::search::{EmbeddedMedia, MediaInput, MediaPart, MediaSpan, SearchInput};
-
-    struct SyntheticMedia;
-    impl Embedder for SyntheticMedia {
-        fn id(&self) -> Id {
-            Id::blob(b"synthetic multimodal test")
-        }
-        fn dimensions(&self) -> usize {
-            2
-        }
-        fn embed(&mut self, _: EmbeddingInput, input: &[&str]) -> Result<Vec<Vec<f32>>> {
-            Ok(input
-                .iter()
-                .map(|text| {
-                    if text.contains("bridge") {
-                        vec![1.0, 0.0]
-                    } else {
-                        vec![0.0, 1.0]
-                    }
-                })
-                .collect())
-        }
-        fn embed_media(
-            &mut self,
-            _: EmbeddingInput,
-            input: MediaInput<'_>,
-        ) -> Result<EmbeddedMedia> {
-            assert!(input.media_type == "video/mp4" || input.media_type == "image/png");
-            let span = if input.media_type == "video/mp4" {
-                MediaSpan::Time {
-                    start_ms: 18_000,
-                    end_ms: 25_000,
-                }
-            } else {
-                MediaSpan::Whole
-            };
-            let vector = if input.bytes == b"bridge footage" {
-                vec![1.0, 0.0]
-            } else {
-                vec![0.0, 1.0]
-            };
-            Ok(EmbeddedMedia {
-                parts: vec![MediaPart { span, vector }],
-                limited: false,
-            })
-        }
-    }
-
     let archive = Archive::memory()?;
     let public = Id::blob(PUBLIC);
     let original = b"bridge footage";
@@ -139,7 +134,7 @@ fn unified_search_accepts_media_queries_and_returns_resolvable_media_parts() -> 
         mode: SearchMode::Hybrid,
         ..Default::default()
     };
-    let mut model = SyntheticMedia;
+    let mut model = SyntheticMedia(b"synthetic multimodal test");
     let report = archive.find(&snapshot, "bridge", options, Some(&mut model))?;
     assert_eq!(report.semantic_index_complete, Some(true));
     let hit = report.hits.iter().find(|hit| hit.id == video).unwrap();
@@ -178,8 +173,87 @@ fn unified_search_accepts_media_queries_and_returns_resolvable_media_parts() -> 
 }
 
 #[test]
+fn media_search_respects_imported_chunk_access_even_with_a_prepared_cache() -> Result<()> {
+    use naome_protocol::profile::READ_ONLY;
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("media.sqlite");
+    let mut receiver = Archive::open(&path)?;
+    let source = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let bytes = b"bridge footage";
+    let video = receiver.capture(
+        bytes.as_slice(),
+        "video/mp4",
+        bytes.len(),
+        public,
+        Format::A,
+    )?;
+    let local = receiver.snapshot("local media", BTreeSet::new())?;
+    let descriptor = receiver.read(&local, video, "read")?;
+    let chunk = descriptor.inputs[0].target;
+    assert_eq!(source.blob(bytes, Id::blob(READ_ONLY))?, chunk);
+    assert_eq!(source.document(&descriptor, Format::A, public)?, video);
+    let remote = source.snapshot_id("remote media", BTreeSet::new())?;
+    source.withdraw(chunk)?;
+    let page = source.export_exchange_page(remote, None, 64)?;
+    assert!(
+        receiver
+            .import_pinned_exchange_page(remote, &page)?
+            .complete
+    );
+    let scoped = receiver.head(remote)?;
+    assert!(receiver.resolve_head(remote, chunk, "read").is_err());
+    assert_eq!(receiver.read(&scoped, video, "read")?, descriptor);
+
+    let options = SearchOptions {
+        mode: SearchMode::Semantic,
+        kind: Some(Kind::Descriptor),
+        ..Default::default()
+    };
+    let mut model = SyntheticMedia(b"scoped multimodal test");
+    let warm = receiver.find(&local, "bridge", options, Some(&mut model))?;
+    assert_eq!(warm.hits.first().map(|hit| hit.id), Some(video));
+    let scoped_report = receiver.find(&scoped, "bridge", options, Some(&mut model))?;
+    assert!(scoped_report.limited_coverage && scoped_report.hits.is_empty());
+
+    // Recreate visibility left by an older prepared search, without preparing it again.
+    receiver.clear_search_index(remote)?;
+    let db = rusqlite::Connection::open(path)?;
+    let remote = remote.to_string();
+    db.execute(
+        "INSERT INTO rep_search_heads(head,finished) VALUES(?,1)",
+        [&remote],
+    )?;
+    let shared = db.execute(
+        "INSERT INTO rep_search_head_sets SELECT ?,set_id FROM rep_search_head_sets WHERE head=?",
+        rusqlite::params![remote, local.id()?.to_string()],
+    )?;
+    assert!(shared > 0);
+    let stale = receiver.search_prepared(
+        &scoped,
+        SearchInput::Text("bridge"),
+        options,
+        Some(&mut model),
+    )?;
+    assert!(stale.limited_coverage && stale.hits.is_empty());
+    let mut new_model = SyntheticMedia(b"scoped multimodal test second model");
+    let denied = receiver.find(&scoped, "bridge", options, Some(&mut new_model))?;
+    assert!(denied.hits.is_empty());
+    let allowed = receiver.find(&local, "bridge", options, Some(&mut new_model))?;
+    assert_eq!(allowed.hits.first().map(|hit| hit.id), Some(video));
+    let warm = receiver.search_prepared(
+        &local,
+        SearchInput::Text("bridge"),
+        options,
+        Some(&mut model),
+    )?;
+    assert_eq!(warm.hits.first().map(|hit| hit.id), Some(video));
+    Ok(())
+}
+
+#[test]
 fn a_failed_media_embedding_preserves_other_hits_and_is_not_retried_per_query() -> Result<()> {
-    use naome_protocol::search::{EmbeddedMedia, MediaInput, SearchInput};
     struct Failing {
         text: TestEmbedder,
         attempts: usize,

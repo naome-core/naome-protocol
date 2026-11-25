@@ -76,7 +76,7 @@ impl Archive {
                 if pending.is_empty() {
                     continue;
                 }
-                let indexed = Self::embed_passages(inventory, &pending, model);
+                let indexed = self.embed_passages(inventory, &pending, model);
                 let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
                 {
                     let mut state = tx.prepare_cached(
@@ -91,6 +91,9 @@ impl Archive {
                          VALUES(?1,?2,?3,?4,?5)",
                     )?;
                     for (passage, indexed) in pending.iter().zip(indexed) {
+                        let Some(indexed) = indexed else {
+                            continue;
+                        };
                         let retry = indexed.retry.then_some(now.saturating_add(RETRY_SECONDS));
                         if state.execute(params![passage.id, key, indexed.limited, retry])? == 0 {
                             continue;
@@ -184,10 +187,11 @@ impl Archive {
     }
 
     fn embed_passages(
+        &self,
         inventory: &mut InventoryReader<'_>,
         pending: &[Pending],
         model: &mut dyn Embedder,
-    ) -> Vec<CachedVectors> {
+    ) -> Vec<Option<CachedVectors>> {
         let text: Vec<_> = pending
             .iter()
             .filter(|passage| !matches!(passage.location, SearchLocation::Media { .. }))
@@ -203,48 +207,52 @@ impl Archive {
             .iter()
             .map(|pending| {
                 let SearchLocation::Media { media_type, .. } = &pending.location else {
-                    return texts.next().map_or_else(CachedVectors::retry, |embedding| {
+                    return Some(texts.next().map_or_else(CachedVectors::retry, |embedding| {
                         CachedVectors {
                             parts: vec![(None, embedding)],
                             limited: false,
                             retry: false,
                         }
-                    });
+                    }));
                 };
+                let document = inventory.read(pending.object).ok()?;
+                // The vector state is shared between heads. A denial here must
+                // not mark the same passage unembeddable in an authorized head.
+                self.media_dependencies(inventory, &document, &mut super::Dependencies::default())
+                    .ok()?;
                 let mut bytes = Vec::new();
-                if inventory
-                    .read(pending.object)
-                    .and_then(|document| {
-                        document.materialize(MAX_MEDIA_BYTES, &mut bytes, |id| {
-                            Ok(inventory.resolve(id)?.0)
-                        })
+                if document
+                    .materialize(MAX_MEDIA_BYTES, &mut bytes, |id| {
+                        Ok(inventory.resolve(id)?.0)
                     })
                     .is_err()
                 {
-                    return CachedVectors {
+                    return Some(CachedVectors {
                         limited: true,
                         ..Default::default()
-                    };
+                    });
                 }
-                match media_embeddings(
-                    model,
-                    EmbeddingInput::Passage,
-                    MediaInput {
-                        media_type,
-                        bytes: &bytes,
+                Some(
+                    match media_embeddings(
+                        model,
+                        EmbeddingInput::Passage,
+                        MediaInput {
+                            media_type,
+                            bytes: &bytes,
+                        },
+                    ) {
+                        Ok(embedded) => CachedVectors {
+                            parts: embedded
+                                .parts
+                                .into_iter()
+                                .map(|part| (Some(part.span), part.vector))
+                                .collect(),
+                            limited: embedded.limited,
+                            retry: false,
+                        },
+                        Err(_) => CachedVectors::retry(),
                     },
-                ) {
-                    Ok(embedded) => CachedVectors {
-                        parts: embedded
-                            .parts
-                            .into_iter()
-                            .map(|part| (Some(part.span), part.vector))
-                            .collect(),
-                        limited: embedded.limited,
-                        retry: false,
-                    },
-                    Err(_) => CachedVectors::retry(),
-                }
+                )
             })
             .collect()
     }

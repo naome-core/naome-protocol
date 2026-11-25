@@ -462,8 +462,14 @@ impl Archive {
             )?;
             let mut location = serde_json::from_str(&location)?;
             let snippet = if let SearchLocation::Media { span, .. } = &mut location {
-                // Candidate visibility and the withdrawal trigger cover every
-                // source dependency. Recovery verifies the original payload bytes.
+                // Stored visibility can predate the snapshot's scoped access checks.
+                if self
+                    .media_dependencies(&mut inventory, &document, &mut Dependencies::default())
+                    .is_err()
+                {
+                    report.limited_coverage = true;
+                    continue;
+                }
                 let part = candidate
                     .semantic
                     .and_then(|item| item.part)

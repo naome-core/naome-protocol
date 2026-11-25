@@ -6,6 +6,7 @@ use super::{
 use crate::{profile::Document, wire::Id};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use std::collections::BTreeSet;
 
 pub(super) const INDEX_VERSION: u32 = 7;
 const BATCH: usize = 16;
@@ -305,9 +306,10 @@ fn cached_record(
     )?;
     let mut rows = statement.query([key])?;
     let mut entries = Vec::new();
+    let mut checked = BTreeSet::new();
     while let Some(row) = rows.next()? {
         let id = row.get::<_, String>(1)?.parse()?;
-        if !inventory.contains(id)? {
+        if checked.insert(id) && inventory.readable(id).is_err() {
             return Ok(None);
         }
         let entry: i64 = row.get(0)?;
