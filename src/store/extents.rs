@@ -1,4 +1,4 @@
-//! Block storage for historical single-object payloads; their original content IDs remain resolvable.
+//! Block storage for immutable single-object payloads, including unpublished exchange data.
 use super::{ObjectAvailability, custody::BLOCK};
 use crate::wire::Id;
 use anyhow::{Result, ensure};
@@ -35,25 +35,40 @@ pub(super) fn put(db: &Connection, id: Id, data: &[u8], access: Id) -> Result<Ob
         "INSERT OR IGNORE INTO objects VALUES(?,x'',?)",
         params![key, access.to_string()],
     )?;
-    if db.execute(
-        "INSERT OR IGNORE INTO archive_extents VALUES(?,?)",
-        params![key, data.len() as i64],
-    )? != 0
-    {
-        for (i, block) in data.chunks(BLOCK).enumerate() {
-            db.prepare_cached("INSERT INTO archive_extent_blocks VALUES(?,?,?)")?
-                .execute(params![key, i as i64, block])?;
-        }
-        db.execute(
-            "UPDATE objects SET data=x'' WHERE id=? AND length(data)>0",
-            [&key],
-        )?;
-    }
+    store(db, &key, data)?;
+    db.prepare_cached("UPDATE objects SET data=x'' WHERE id=? AND length(data)>0")?
+        .execute([&key])?;
     if let Some(tx) = tx {
         tx.commit()?
     }
     Ok(ObjectAvailability::Available)
 }
+/// Write validated bytes by content ID inside the caller's write transaction.
+pub(super) fn store(db: &Connection, key: &str, data: &[u8]) -> Result<()> {
+    let added = db
+        .prepare_cached("INSERT OR IGNORE INTO archive_extents VALUES(?,?)")?
+        .execute(params![key, data.len() as i64])?;
+    if added != 0 && !data.is_empty() {
+        let mut insert = db.prepare_cached("INSERT INTO archive_extent_blocks VALUES(?,?,?)")?;
+        for (i, block) in data.chunks(BLOCK).enumerate() {
+            insert.execute(params![key, i as i64, block])?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn remove(db: &Connection, key: &str) -> Result<()> {
+    if db
+        .prepare_cached("DELETE FROM archive_extents WHERE id=?")?
+        .execute([key])?
+        != 0
+    {
+        db.prepare_cached("DELETE FROM archive_extent_blocks WHERE id=?")?
+            .execute([key])?;
+    }
+    Ok(())
+}
+
 pub(super) fn get(db: &Connection, id: Id, length: usize) -> Result<Vec<u8>> {
     ensure!(length <= crate::wire::MAX_BYTES, "oversized extent");
     let mut q = db.prepare_cached(

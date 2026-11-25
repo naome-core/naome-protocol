@@ -2,6 +2,7 @@
 
 use anyhow::{Result, ensure};
 use naome_protocol::{
+    evaluation::{assess, default_byte_limit, deposit_receipt},
     fixture,
     profile::{Document, Kind, PUBLIC, READ_ONLY, link},
     store::Archive,
@@ -198,6 +199,7 @@ fn verified_page_import_keeps_question_links_at_the_same_budget() -> Result<()> 
     );
 
     let mut cursor = None;
+    let mut supplied = 0;
     for index in 0..16 {
         let file = format!("part-{index}.json");
         let mut export = vec!["export", &head, &file, "--paged", "--limit", "8"];
@@ -219,11 +221,23 @@ fn verified_page_import_keeps_question_links_at_the_same_budget() -> Result<()> 
             )?;
             assert_eq!(resumed["continuation"], received["continuation"]);
         }
+        supplied += received["packets"].as_u64().unwrap();
+        let before = fs::read(&receiver)?;
+        let status = run(&receiver, root, &["import-status", &head])?;
+        assert_eq!(fs::read(&receiver)?, before);
+        assert_eq!(status["head"], head);
+        let checkpoint = &status["sessions"][0];
+        assert_eq!(checkpoint["verified"], true);
+        assert_eq!(checkpoint["examined"], supplied);
+        assert_eq!(checkpoint["supplied"], supplied);
+        assert_eq!(checkpoint["omitted"], 0);
+        assert_eq!(checkpoint["complete"], received["complete"]);
         if received["complete"] == true {
             assert_eq!(run(&receiver, root, &args)?, expected);
             return Ok(());
         }
         assert!(!invoke(&receiver, root, &args)?.status.success());
+        assert_eq!(checkpoint["cursor"], received["continuation"]);
         cursor = Some(received["continuation"].clone());
     }
     anyhow::bail!("verified transfer did not complete")
@@ -629,5 +643,58 @@ fn replay_uses_the_saved_evaluator_and_reassessment_records_changed_standing() -
             .one("reassessed-from")?,
         identifier(&last_predecessor).parse::<Id>()?
     );
+    Ok(())
+}
+
+#[test]
+fn receipt_limits_and_strict_replay_share_the_same_cli_contract() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let path = root.join("archive.sqlite");
+    let archive = Archive::open(&path)?;
+    let public = Id::blob(PUBLIC);
+    let case = fixture::seed(&archive, Format::A)?;
+    let mut query = case.queries[2].clone();
+    let evidence = archive.blob(b"Independent measurement evidence", public)?;
+    let mut argument = archive.read_head(case.s0, query.arguments[0], "read")?;
+    argument.inputs.push(link("evidence", evidence));
+    query.arguments = vec![archive.document(&argument, Format::A, public)?];
+    let snapshot = archive.snapshot("receipt budget", Default::default())?;
+    let head = snapshot.id()?.to_string();
+    let transcript = assess(&archive, &snapshot, &query)?;
+    assert!(transcript.dependencies.contains(&evidence));
+    let before = fs::read(&path)?;
+    for (steps, bytes) in [
+        (100_001, default_byte_limit()),
+        (100_000, default_byte_limit() + 1),
+    ] {
+        query.budget = steps;
+        query.byte_limit = bytes;
+        assert!(deposit_receipt(&archive, &snapshot, &query, &transcript, Format::A).is_err());
+        fs::write(root.join("query.json"), serde_json::to_vec(&query)?)?;
+        let rejected = invoke(&path, root, &["assess", &head, "query.json"])?;
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("receipt evaluation budget"));
+        assert_eq!(fs::read(&path)?, before);
+    }
+    drop(archive);
+
+    query.budget = 100_000;
+    query.byte_limit = default_byte_limit();
+    fs::write(root.join("query.json"), serde_json::to_vec(&query)?)?;
+    let saved = run(&path, root, &["assess", &head, "query.json"])?;
+    let receipt = identifier(&saved["id"]);
+    assert_eq!(
+        run(&path, root, &["replay", receipt, "--require-match"])?["matches"],
+        true
+    );
+
+    let withdrawn = invoke(&path, root, &["withdraw", &evidence.to_string()])?;
+    assert!(withdrawn.status.success());
+    let ordinary = run(&path, root, &["replay", receipt])?;
+    assert_eq!(ordinary["matches"], false);
+    let strict = invoke(&path, root, &["replay", receipt, "--require-match"])?;
+    assert!(!strict.status.success());
+    assert_eq!(serde_json::from_slice::<Value>(&strict.stdout)?, ordinary);
     Ok(())
 }

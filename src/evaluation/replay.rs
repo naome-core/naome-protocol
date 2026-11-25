@@ -1,6 +1,6 @@
 use super::{
     EVALUATOR_ID, Query, ReadInventory, Receipt, Standing, assess_with_inventory,
-    default_byte_limit, deposit_receipt_for_evaluator, manifest_encoding, receipt_document,
+    check_receipt_budget, deposit_receipt_for_evaluator, manifest_encoding, receipt_document,
 };
 use crate::{
     migration::Equivalence,
@@ -57,10 +57,7 @@ pub(crate) fn rebuild_receipt(
     recorded: &Document,
     inventory: &mut ReadInventory,
 ) -> Result<RebuiltReceipt> {
-    ensure!(
-        query.budget <= 100_000 && query.byte_limit <= default_byte_limit(),
-        "receipt replay exceeds local evaluation budget"
-    );
+    check_receipt_budget(query)?;
     ensure!(
         historical.id()? == pinned_head,
         "receipt horizon differs from the pinned head"
@@ -179,6 +176,7 @@ impl Archive {
                 query.arguments.push(argument);
             }
         }
+        check_receipt_budget(&query)?;
         query.current_at = current_at.or(query.current_at);
         let receipt = super::assess_for_evaluator(self, &view, &query, EVALUATOR_ID)?;
         let id = deposit_receipt_for_evaluator(

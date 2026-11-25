@@ -8,8 +8,9 @@ use crate::{
     profile::{PUBLIC, READ_ONLY},
     store::{
         custody::{Head, MAX_INDEXED_EDGES, tree::Tree},
-        insert,
+        extents, insert,
         snapshot::{StoredHeader, save_imported_head},
+        validate,
     },
     wire::{Id, MAX_BYTES},
 };
@@ -50,6 +51,22 @@ pub struct ExchangeProgress {
     pub packets: usize,
 }
 
+/// Durable checkpoint of a paged import for one verification mode.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct ExchangeImportStatus {
+    /// Whether the page format authenticated each supplied object's committed access.
+    pub verified: bool,
+    /// The last acknowledged inventory member, retained after completion.
+    pub cursor: Option<Id>,
+    pub examined: u64,
+    /// Distinct packets supplied through this checkpoint. Completion freezes the count.
+    pub supplied: Option<u64>,
+    /// Examined members with no packet supplied at this checkpoint, when recorded.
+    pub omitted: Option<u64>,
+    /// Whether the entire inventory range has been acknowledged.
+    pub complete: bool,
+}
+
 impl ExchangePage {
     pub fn read(input: impl Read) -> Result<Self> {
         let mut input = input.take(WIRE_BYTES as u64 + 1);
@@ -68,6 +85,84 @@ impl ExchangePage {
 }
 
 impl Archive {
+    /// Inspect paged imports at this exact head without changing the archive.
+    pub fn exchange_import_status(&self, head: Id) -> Result<Vec<ExchangeImportStatus>> {
+        self.with_read_view(|| {
+            let sql = if has_table(&self.db, "archive_exchange_sessions")? {
+                if has_supplied_column(&self.db)? {
+                    "SELECT verified,cursor,seen,supplied,complete
+                     FROM archive_exchange_sessions WHERE head=? ORDER BY verified DESC"
+                } else if has_table(&self.db, "archive_exchange_packets")? {
+                    "SELECT verified,cursor,seen,CASE WHEN verified AND NOT complete THEN (
+                        SELECT count(*) FROM archive_exchange_packets p
+                        WHERE p.head=s.head AND p.verified=s.verified
+                     ) END,complete FROM archive_exchange_sessions s WHERE head=? ORDER BY verified DESC"
+                } else {
+                    "SELECT verified,cursor,seen,NULL,complete
+                     FROM archive_exchange_sessions WHERE head=? ORDER BY verified DESC"
+                }
+            } else if has_table(&self.db, "archive_exchange_progress")? {
+                "SELECT 0,cursor,seen,NULL,complete FROM archive_exchange_progress WHERE head=?"
+            } else {
+                return Ok(Vec::new());
+            };
+            let mut query = self.db.prepare_cached(sql)?;
+            let mut rows = query.query([head.to_string()])?;
+            let mut sessions = Vec::new();
+            while let Some(row) = rows.next()? {
+                let examined = u64::try_from(row.get::<_, i64>(2)?)?;
+                let supplied = row.get::<_, Option<i64>>(3)?.map(u64::try_from).transpose()?;
+                let omitted = supplied
+                    .map(|n| examined.checked_sub(n).context("invalid exchange packet count"))
+                    .transpose()?;
+                sessions.push(ExchangeImportStatus {
+                    verified: row.get(0)?,
+                    cursor: row.get::<_, Option<String>>(1)?.map(|id| id.parse()).transpose()?,
+                    examined,
+                    supplied,
+                    omitted,
+                    complete: row.get(4)?,
+                });
+            }
+            Ok(sessions)
+        })
+    }
+
+    /// Upgrade staging inside archive initialization, preserving pending and completed cursors.
+    pub(in crate::store) fn upgrade_exchange_staging(&self) -> Result<()> {
+        let db = &self.db;
+        if !has_supplied_column(db)? {
+            db.execute_batch(
+                "ALTER TABLE archive_exchange_sessions ADD COLUMN
+                 supplied INTEGER CHECK(supplied BETWEEN 0 AND seen);",
+            )?;
+        }
+        if has_table(db, "archive_exchange_packets")? {
+            let mut query =
+                db.prepare("SELECT head,verified,id,access,data FROM archive_exchange_packets")?;
+            let mut rows = query.query([])?;
+            while let Some(row) = rows.next()? {
+                let head: String = row.get(0)?;
+                let verified: bool = row.get(1)?;
+                let id: Id = row.get::<_, String>(2)?.parse()?;
+                let access: Id = row.get::<_, String>(3)?.parse()?;
+                let bytes: Vec<u8> = row.get(4)?;
+                validate(id, &bytes, access)?;
+                stage_packet(db, &head, verified, id, access, &bytes)?;
+            }
+            drop(rows);
+            drop(query);
+            db.execute_batch(
+                "UPDATE archive_exchange_sessions AS s SET supplied=(
+                    SELECT count(*) FROM archive_exchange_staged p
+                    WHERE p.head=s.head AND p.verified=s.verified
+                 ) WHERE s.verified AND NOT s.complete;
+                 DROP TABLE archive_exchange_packets;",
+            )?;
+        }
+        Ok(())
+    }
+
     /// Export a consecutive range with membership and custody access witnesses.
     pub fn export_exchange_page(
         &self,
@@ -92,12 +187,7 @@ impl Archive {
         if let Some(descriptor) = self.custody_head_if_present(head)? {
             return Ok(descriptor);
         }
-        let has_sessions: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='archive_exchange_sessions')",
-            [],
-            |row| row.get(0),
-        )?;
-        let bytes: Option<Vec<u8>> = if has_sessions {
+        let bytes: Option<Vec<u8>> = if has_table(&self.db, "archive_exchange_sessions")? {
             self.db
                 .query_row(
                     "SELECT descriptor FROM archive_exchange_sessions
@@ -319,6 +409,7 @@ impl Archive {
         let mut previous = None;
         let mut link_budget = MAX_INDEXED_EDGES;
         let mut indexed_records = 0;
+        let mut supplied = 0;
         let mut backlinks = verified
             .then(|| {
                 tx.prepare_cached("INSERT OR IGNORE INTO archive_exchange_backlinks VALUES(?,?,?)")
@@ -339,7 +430,7 @@ impl Archive {
             if complete {
                 insert(&tx, p.id, &bytes, p.access)?;
             } else {
-                stage_packet(&tx, &key, verified, p, &bytes)?;
+                supplied += i64::from(stage_packet(&tx, &key, verified, p.id, p.access, &bytes)?);
             }
             if let Some(record) = record
                 && let Some(backlinks) = backlinks.as_mut()
@@ -361,6 +452,13 @@ impl Archive {
         if duplicate {
             progress.complete = complete;
             progress.continuation = if complete { None } else { cursor };
+            if supplied != 0 {
+                tx.execute(
+                    "UPDATE archive_exchange_sessions SET supplied=supplied+?
+                     WHERE head=? AND verified=?",
+                    params![supplied, key, verified],
+                )?;
+            }
         } else {
             let total = u64::try_from(seen)?
                 .checked_add(ids.len() as u64)
@@ -390,9 +488,10 @@ impl Archive {
                 save_imported_head(&tx, head, &snapshot)?;
             }
             tx.execute(
-                "INSERT INTO archive_exchange_sessions VALUES(?,?,?,?,?,?)
-                 ON CONFLICT(head,verified) DO UPDATE SET
-                     cursor=excluded.cursor,seen=excluded.seen,complete=excluded.complete",
+                "INSERT INTO archive_exchange_sessions(head,verified,cursor,seen,complete,descriptor,supplied)
+                 VALUES(?,?,?,?,?,?,?) ON CONFLICT(head,verified) DO UPDATE SET
+                     cursor=excluded.cursor,seen=excluded.seen,complete=excluded.complete,
+                     supplied=archive_exchange_sessions.supplied+excluded.supplied",
                 params![
                     key,
                     verified,
@@ -400,6 +499,7 @@ impl Archive {
                     i64::try_from(total)?,
                     finished,
                     descriptor.map(serde_json::to_vec).transpose()?,
+                    supplied,
                 ],
             )?;
         }
@@ -424,45 +524,75 @@ pub(super) fn verify_access(
     Ok(())
 }
 
+fn has_table(db: &Connection, table: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?)",
+        [table],
+        |row| row.get(0),
+    )?)
+}
+
+fn has_supplied_column(db: &Connection) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('archive_exchange_sessions')
+         WHERE name='supplied')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
 fn stage_packet(
     db: &Connection,
     head: &str,
     verified: bool,
-    packet: &Packet,
+    id: Id,
+    access: Id,
     bytes: &[u8],
-) -> Result<()> {
-    ensure!(
-        db.prepare_cached(
-            "INSERT INTO archive_exchange_packets VALUES(?,?,?,?,?)
-         ON CONFLICT(head,verified,id) DO UPDATE SET access=excluded.access
-         WHERE access=excluded.access AND data=excluded.data",
-        )?
-        .execute(params![
-            head,
-            verified,
-            packet.id.to_string(),
-            packet.access.to_string(),
-            bytes
-        ])? == 1,
-        "conflicting packet in pending exchange"
-    );
-    Ok(())
+) -> Result<bool> {
+    let id = id.to_string();
+    let access = access.to_string();
+    let added = db
+        .prepare_cached("INSERT OR IGNORE INTO archive_exchange_staged VALUES(?,?,?,?)")?
+        .execute(params![head, verified, id, access])?
+        != 0;
+    if !added {
+        let same: bool = db
+            .prepare_cached(
+                "SELECT access=? FROM archive_exchange_staged WHERE head=? AND verified=? AND id=?",
+            )?
+            .query_row(params![access, head, verified, id], |row| row.get(0))?;
+        ensure!(same, "conflicting packet in pending exchange");
+    } else {
+        let admitted: bool = db
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM objects WHERE id=?)")?
+            .query_row([&id], |row| row.get(0))?;
+        if !admitted {
+            extents::store(db, &id, bytes)?;
+        }
+    }
+    Ok(added)
 }
 
 fn publish_packets(db: &Connection, head: &str, verified: bool) -> Result<()> {
-    let mut pending = db.prepare_cached(
-        "SELECT id,access,data FROM archive_exchange_packets WHERE head=? AND verified=? ORDER BY id",
-    )?;
-    let mut rows = pending.query(params![head, verified])?;
-    while let Some(row) = rows.next()? {
-        let id: String = row.get(0)?;
-        let access: String = row.get(1)?;
-        let data: Vec<u8> = row.get(2)?;
-        insert(db, id.parse()?, &data, access.parse()?)?;
+    let conflict: Option<String> = db
+        .query_row(
+            "SELECT p.id FROM archive_exchange_staged p JOIN objects o ON o.id=p.id
+             WHERE p.head=? AND p.verified=? AND o.access<>p.access LIMIT 1",
+            params![head, verified],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = conflict {
+        anyhow::bail!("conflicting access for immutable object {id}");
     }
-    drop(rows);
+    // The content is already in its final storage. Catalog membership controls visibility.
     db.execute(
-        "DELETE FROM archive_exchange_packets WHERE head=? AND verified=?",
+        "INSERT OR IGNORE INTO objects(id,data,access)
+         SELECT id,x'',access FROM archive_exchange_staged WHERE head=? AND verified=? ORDER BY id",
+        params![head, verified],
+    )?;
+    db.execute(
+        "DELETE FROM archive_exchange_staged WHERE head=? AND verified=?",
         params![head, verified],
     )?;
     Ok(())

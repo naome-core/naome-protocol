@@ -73,6 +73,13 @@ impl Standing {
 pub fn default_byte_limit() -> usize {
     64 * 1024 * 1024
 }
+pub(crate) fn check_receipt_budget(query: &Query) -> Result<()> {
+    ensure!(
+        query.budget <= 100_000 && query.byte_limit <= default_byte_limit(),
+        "receipt evaluation budget exceeds 100000 steps or 64 MiB"
+    );
+    Ok(())
+}
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
@@ -851,6 +858,7 @@ pub(crate) fn deposit_receipt_for_evaluator(
     evaluator: &str,
     predecessor: Option<Id>,
 ) -> Result<Id> {
+    check_receipt_budget(q)?;
     let snapshot_id = store.deposit_manifest(s)?;
     store.document(
         &receipt_document(store, s, snapshot_id, q, r, evaluator, predecessor)?,

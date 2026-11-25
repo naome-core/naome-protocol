@@ -35,6 +35,9 @@ pub struct ReplayArguments {
     /// Restrict replay to this snapshot. By default, read the receipt directly from the archive.
     #[arg(long)]
     pub(super) head: Option<Id>,
+    /// Print the replay report and exit unsuccessfully if the receipt differs.
+    #[arg(long)]
+    pub(super) require_match: bool,
 }
 
 #[derive(Args)]

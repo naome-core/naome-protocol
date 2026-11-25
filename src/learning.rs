@@ -4,6 +4,7 @@ pub use crate::evaluation::Impact;
 use crate::{
     evaluation::{
         Assessment, EVALUATOR_ID, EvidenceView, ReadInventory, assess_with_inventory,
+        check_receipt_budget,
         correction::Notice,
         dependency_correction::{
             CorrectionImpact, CorrectionKeys, DependencyCorrection, admitted_corrections,
@@ -306,11 +307,7 @@ impl TrainingReview<'_> {
             "receipt policy differs from admitted training policy"
         );
         let receipt_head = receipt.one("snapshot")?;
-        ensure!(
-            original.budget <= 100_000
-                && original.byte_limit <= crate::evaluation::default_byte_limit(),
-            "label replay exceeds local extraction budget"
-        );
+        check_receipt_budget(&original)?;
         let evaluator: String = receipt.field("evaluator")?;
         if self.requires_legacy_mapping {
             ensure!(

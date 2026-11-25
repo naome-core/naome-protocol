@@ -19,7 +19,7 @@ use std::{
 
 mod member;
 mod page;
-pub use page::{ExchangePage, ExchangeProgress};
+pub use page::{ExchangeImportStatus, ExchangePage, ExchangeProgress};
 mod stream;
 pub use member::MemberProof;
 

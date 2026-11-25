@@ -183,7 +183,7 @@ pub enum ArchiveCommand {
         #[arg(long, default_value = "read")]
         purpose: String,
     },
-    /// Evaluate a query and persist its immutable receipt.
+    /// Save an assessment receipt using at most 100,000 evaluation steps and 64 MiB.
     Assess { head: Id, query: PathBuf },
     /// Re-run the recorded evaluator and compare the result with the saved receipt.
     Replay(DeferredArgs<research::ReplayArguments>),
@@ -237,6 +237,11 @@ pub enum ArchiveCommand {
         #[arg(long)]
         stream: bool,
     },
+    /// Inspect verified and trusted paged import checkpoints for a snapshot.
+    #[command(
+        long_about = "Inspect paged import checkpoints for this snapshot without changing the archive. Supplies and omissions describe the last checkpoint through completion. Older imports may have unknown counts. Completion means the inventory was examined; omitted objects may be unavailable."
+    )]
+    ImportStatus { head: Id },
     /// Sign a minimal scoring-hull disclosure and write its packet to a new file.
     Project {
         head: Id,
@@ -622,19 +627,31 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             print(report)
         }
         ArchiveCommand::Assess { head, query } => {
+            let q = input(&query)?;
+            evaluation::check_receipt_budget(&q)?;
             let db = open()?;
             let s = db.active_head(head)?;
-            let q = input(&query)?;
             let r = evaluation::assess(&db, &s, &q)?;
             let id = evaluation::deposit_receipt(&db, &s, &q, &r, f)?;
             print(json!({"id":id,"receipt":r}))
         }
-        ArchiveCommand::Replay(DeferredArgs(research::ReplayArguments { receipt, head })) => {
+        ArchiveCommand::Replay(DeferredArgs(research::ReplayArguments {
+            receipt,
+            head,
+            require_match,
+        })) => {
             let db = reader()?;
-            print(match head {
+            let report = match head {
                 Some(head) => db.replay_assessment(&db.search_head(Some(head))?, receipt)?,
                 None => db.replay_local_assessment(receipt)?,
-            })
+            };
+            let matches = report.matches;
+            print(report)?;
+            ensure!(
+                !require_match || matches,
+                "saved receipt differs from replay"
+            );
+            Ok(())
         }
         ArchiveCommand::Reassess(DeferredArgs(research::ReassessArguments {
             receipt,
@@ -697,6 +714,9 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             print(
                 json!({"head":packet.head,"continuation":packet.continuation,"packets":packet.packets.len()}),
             )
+        }
+        ArchiveCommand::ImportStatus { head } => {
+            print(json!({"head": head, "sessions": reader()?.exchange_import_status(head)?}))
         }
         ArchiveCommand::Import {
             file,

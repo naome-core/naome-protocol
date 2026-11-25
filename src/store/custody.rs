@@ -373,19 +373,21 @@ impl Archive {
                 .execute("INSERT INTO custody_packs(data) VALUES(?)", [pack])?;
             let segment = self.db.last_insert_rowid();
             for (id, access, start, len) in slots {
-                let catalog=self.db.prepare_cached("INSERT INTO objects(id,data,access) VALUES(?,x'',?) ON CONFLICT(id) DO UPDATE SET data=x''
+                let key = id.to_string();
+                let catalog = self.db.prepare_cached("INSERT INTO objects(id,data,access) VALUES(?,x'',?) ON CONFLICT(id) DO UPDATE SET data=x''
                  WHERE objects.data IS NOT NULL AND objects.access=excluded.access")?
-                    .execute(params![id.to_string(),access.to_string()])?;
+                    .execute(params![key, access.to_string()])?;
                 ensure!(catalog == 1, "conflicting custody for packed record");
                 self.db
                     .prepare_cached("INSERT INTO custody_records VALUES(?,?,?,?,?)")?
                     .execute(params![
-                        id.to_string(),
+                        key,
                         segment,
                         start as i64,
                         len as i64,
                         access.to_string()
                     ])?;
+                super::extents::remove(&self.db, &key)?;
             }
         }
         let members = added.iter().map(|id| (id.to_string(), *id)).collect();

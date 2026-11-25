@@ -157,6 +157,17 @@ fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -
     assert!(receiver.head(head).is_err());
     let initial = receiver.import_pinned_exchange_page(head, &first)?;
     assert_eq!(initial.continuation, first.progress().continuation);
+    let status = &Archive::open_for_read(&path)?.exchange_import_status(head)?[0];
+    assert!(status.verified);
+    assert_eq!(status.cursor, initial.continuation);
+    assert_eq!(status.examined, 6);
+    assert_eq!(status.supplied, Some(initial.packets as u64));
+    assert!(!status.complete);
+    assert!(
+        readings
+            .iter()
+            .all(|id| receiver.raw(*id).unwrap().is_none())
+    );
     assert!(receiver.head(head).is_err());
     assert!(receiver.backlink_index(head)?.is_none());
     drop(receiver);
@@ -174,6 +185,11 @@ fn acknowledged_ranges_resume_after_reopen_and_retry_without_advancing_twice() -
     }
     assert!(receiver.import_exchange_page(&next)?.complete);
     assert!(progress.continuation.is_none());
+    let status = &receiver.exchange_import_status(head)?[0];
+    assert!(status.complete);
+    assert_eq!(status.examined, snapshot.objects.len() as u64);
+    assert_eq!(status.supplied, Some(status.examined - 1));
+    assert_eq!(status.omitted, Some(1));
     assert!(receiver.backlink_index(head)?.unwrap().complete);
     assert_eq!(receiver.head(head)?.objects, snapshot.objects);
     assert!(receiver.resolve_head(head, readings[1], "train").is_err());
@@ -260,6 +276,17 @@ fn historical_ranges_require_trusted_compatibility_mode() -> Result<()> {
     assert!(!progress.complete);
     let next = source.export_legacy_exchange_page(head, progress.continuation, 1)?;
     assert!(receiver.import_legacy_exchange_page(head, &next)?.complete);
+    let verified = source.export_exchange_page(head, None, 1)?;
+    assert!(
+        !receiver
+            .import_pinned_exchange_page(head, &verified)?
+            .complete
+    );
+    let sessions = receiver.exchange_import_status(head)?;
+    assert_eq!(sessions.len(), 2);
+    assert!(sessions[0].verified && !sessions[0].complete);
+    assert!(!sessions[1].verified && sessions[1].complete);
+    assert_eq!(sessions[1].supplied, Some(snapshot.objects.len() as u64));
     assert_eq!(
         receiver.resolve_head(head, reading, "read")?,
         b"historical reading"
@@ -355,5 +382,157 @@ fn a_witness_needs_a_verified_inventory_before_commit() -> Result<()> {
         assert!(pending.finish().is_err());
     }
     assert_eq!(count(&receiver)?, before);
+    Ok(())
+}
+
+#[test]
+fn pending_imports_share_bytes_and_respect_intervening_admission_and_withdrawal() -> Result<()> {
+    use crate::{
+        profile::{PUBLIC, READ_ONLY},
+        store::Archive,
+        wire::Id,
+    };
+    let source = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let mut payloads = std::collections::BTreeMap::new();
+    for n in 0..10u8 {
+        let bytes = vec![n; 24];
+        payloads.insert(source.blob(&bytes, public)?, bytes);
+    }
+    let (&payload, bytes) = payloads.first_key_value().unwrap();
+    let first = source.snapshot("first transfer", Default::default())?;
+    let second = source.snapshot("second transfer", Default::default())?;
+    let heads = [first.id()?, second.id()?];
+    let limit = first.objects.len() - 1;
+    let mut receiver = Archive::memory()?;
+    let mut final_pages = Vec::new();
+    for head in heads {
+        let start = source.export_exchange_page(head, None, limit)?;
+        let progress = receiver.import_pinned_exchange_page(head, &start)?;
+        assert!(!progress.complete);
+        assert!(receiver.raw(payload)?.is_none());
+        final_pages.push(source.export_exchange_page(head, progress.continuation, limit)?);
+    }
+    let copies: i64 = receiver.db.query_row(
+        "SELECT count(*) FROM archive_extent_blocks WHERE id=?",
+        [payload.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(copies, 1);
+
+    assert_eq!(receiver.blob(bytes, public)?, payload);
+    assert_eq!(&receiver.resolve_local(payload)?, bytes);
+    receiver.withdraw(payload)?;
+    for (head, page) in heads.into_iter().zip(&final_pages) {
+        assert!(receiver.import_pinned_exchange_page(head, page)?.complete);
+        assert!(receiver.resolve_head(head, payload, "read").is_err());
+        let status = &receiver.exchange_import_status(head)?[0];
+        assert_eq!(status.supplied, Some(status.examined));
+    }
+
+    let mut conflicted = Archive::memory()?;
+    let head = heads[0];
+    let initial = source.export_exchange_page(head, None, limit)?;
+    conflicted.import_pinned_exchange_page(head, &initial)?;
+    conflicted.blob(bytes, Id::blob(READ_ONLY))?;
+    let checkpoint = conflicted.exchange_import_status(head)?;
+    assert!(
+        conflicted
+            .import_pinned_exchange_page(head, &final_pages[0])
+            .is_err()
+    );
+    assert_eq!(conflicted.exchange_import_status(head)?, checkpoint);
+    assert!(conflicted.head(head).is_err());
+    for &other in payloads.keys().filter(|&&id| id != payload) {
+        assert!(conflicted.raw(other)?.is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn a_pending_import_resumes_from_the_previous_blob_staging_layout() -> Result<()> {
+    use crate::{
+        profile::{Document, Kind, PUBLIC},
+        store::Archive,
+        wire::{Format, Id},
+    };
+    let source = Archive::memory()?;
+    for n in 0..12 {
+        source.document(
+            &Document::new(
+                Kind::Question,
+                "historical staging",
+                "migration",
+                serde_json::json!({"statement":format!("Question {n}")}),
+                vec![],
+            )?,
+            Format::A,
+            Id::blob(PUBLIC),
+        )?;
+    }
+    let snapshot = source.snapshot("archive migration", Default::default())?;
+    let head = snapshot.id()?;
+    let completed = Id::blob(b"old completed head");
+    let page = source.export_exchange_page(head, None, 8)?;
+    let json = serde_json::to_value(&page)?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("previous.sqlite");
+    let mut receiver = Archive::open(&path)?;
+    let initial = receiver.import_pinned_exchange_page(head, &page)?;
+    assert!(!initial.complete);
+
+    // Recreate the exact prior checkpoint layout from the accepted page.
+    receiver.db.execute_batch(
+        "ALTER TABLE archive_exchange_sessions DROP COLUMN supplied;
+         CREATE TABLE archive_exchange_packets(
+            head TEXT NOT NULL, verified INTEGER NOT NULL, id TEXT NOT NULL, access TEXT NOT NULL,
+            data BLOB NOT NULL, PRIMARY KEY(head,verified,id)
+         ) WITHOUT ROWID;
+         DROP TABLE archive_exchange_staged;
+         DELETE FROM archive_extent_blocks;
+         DELETE FROM archive_extents;",
+    )?;
+    receiver.db.execute(
+        "INSERT INTO archive_exchange_sessions(head,verified,cursor,seen,complete)
+         VALUES(?,1,NULL,1,1)",
+        [completed.to_string()],
+    )?;
+    for packet in json["packets"].as_array().unwrap() {
+        receiver.db.execute(
+            "INSERT INTO archive_exchange_packets VALUES(?,1,?,?,?)",
+            rusqlite::params![
+                head.to_string(),
+                packet["id"].as_str().unwrap(),
+                packet["access"].as_str().unwrap(),
+                hex::decode(packet["hex"].as_str().unwrap())?,
+            ],
+        )?;
+    }
+    drop(receiver);
+
+    let reader = Archive::open_for_read(&path)?;
+    let before = reader.exchange_import_status(head)?;
+    assert_eq!(before[0].supplied, Some(initial.packets as u64));
+    assert_eq!(reader.exchange_import_status(completed)?[0].supplied, None);
+    drop(reader);
+
+    let mut receiver = Archive::open(&path)?;
+    assert_eq!(receiver.exchange_import_status(head)?, before);
+    assert_eq!(receiver.exchange_import_status(completed)?[0].omitted, None);
+    assert!(receiver.head(head).is_err());
+    let last = source.export_exchange_page(head, initial.continuation, 64)?;
+    assert!(receiver.import_pinned_exchange_page(head, &last)?.complete);
+    assert_eq!(receiver.head(head)?.objects, snapshot.objects);
+    for id in snapshot
+        .objects
+        .iter()
+        .copied()
+        .filter(|id| id.format().is_some())
+    {
+        assert_eq!(
+            receiver.resolve_head(head, id, "read")?,
+            source.resolve_head(head, id, "read")?
+        );
+    }
     Ok(())
 }

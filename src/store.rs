@@ -9,7 +9,9 @@ mod search_index;
 pub mod sharing;
 mod snapshot;
 pub(crate) use backlinks::BacklinkIndex;
-pub use exchange::{Bundle, ExchangePage, ExchangeProgress, MemberProof, Packet};
+pub use exchange::{
+    Bundle, ExchangeImportStatus, ExchangePage, ExchangeProgress, MemberProof, Packet,
+};
 #[cfg(feature = "cli")]
 pub(crate) use search_index::IndexPreparation;
 pub use snapshot::Snapshot;
@@ -184,10 +186,7 @@ impl Archive {
             tx.execute("UPDATE objects SET data=NULL WHERE id=?", [id.to_string()])? == 1,
             "unknown payload"
         );
-        tx.execute(
-            "DELETE FROM archive_extent_blocks WHERE id=?",
-            [id.to_string()],
-        )?;
+        extents::remove(&tx, &id.to_string())?;
         tx.execute("INSERT OR IGNORE INTO suspended_releases SELECT head FROM archive_release_members WHERE member=?",[id.to_string()])?;
         tx.commit()?;
         Ok(())
@@ -567,19 +566,26 @@ fn insert(db: &Connection, id: Id, b: &[u8], access: Id) -> Result<ObjectAvailab
     if id.format().is_none() && b.len() > custody::BLOCK {
         return extents::put(db, id, b, access);
     }
-    let added = db.execute(
-        "INSERT OR IGNORE INTO objects VALUES(?,?,?)",
-        params![id.to_string(), b, access.to_string()],
-    )?;
+    let key = id.to_string();
+    let access = access.to_string();
+    let added = db
+        .prepare_cached(
+            "INSERT OR IGNORE INTO objects
+             SELECT ?1,CASE WHEN EXISTS(SELECT 1 FROM archive_extents WHERE id=?1)
+                            THEN x'' ELSE ?2 END,?3",
+        )?
+        .execute(params![key, b, access])?;
     if added != 0 {
         return Ok(ObjectAvailability::Available);
     }
 
-    let (same, withdrawn): (bool, bool) = db.query_row(
-        "SELECT access=? AND (data IS NULL OR data=?), data IS NULL FROM objects WHERE id=?",
-        params![access.to_string(), b, id.to_string()],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
+    let (same, withdrawn): (bool, bool) = db
+        .prepare_cached(
+            "SELECT access=?2 AND (data IS NULL OR data=?3 OR
+                     EXISTS(SELECT 1 FROM archive_extents WHERE id=?1)),data IS NULL
+             FROM objects WHERE id=?1",
+        )?
+        .query_row(params![key, access, b], |r| Ok((r.get(0)?, r.get(1)?)))?;
     if !same {
         bail!("conflicting access or bytes for immutable object {id}");
     }
