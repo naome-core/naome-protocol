@@ -57,7 +57,6 @@ pub(crate) fn rebuild_receipt(
     recorded: &Document,
     inventory: &mut ReadInventory,
 ) -> Result<RebuiltReceipt> {
-    check_receipt_budget(query)?;
     ensure!(
         historical.id()? == pinned_head,
         "receipt horizon differs from the pinned head"
@@ -106,7 +105,7 @@ fn assessment_document(document: Document) -> Result<Document> {
 }
 
 impl Archive {
-    /// Re-run the recorded evaluator on the original evidence horizon without storing anything.
+    /// Re-run the recorded evaluator with its saved limits on the original evidence horizon.
     pub fn replay_assessment(&self, view: &Snapshot, id: Id) -> Result<ReceiptReplay> {
         self.replay_assessment_with_mappings(view, id, &[])
     }
@@ -160,7 +159,6 @@ impl Archive {
             };
             let evaluator: String = recorded.field("evaluator")?;
             let query = recorded.field("original_query")?;
-            check_receipt_budget(&query)?;
             let head = recorded.one("snapshot")?;
             let historical = match view.as_mut() {
                 Some(view) => self.receipt_horizon_in(view, head)?,
@@ -186,7 +184,7 @@ impl Archive {
                 &query,
                 &evaluator,
                 &recorded,
-                &mut ReadInventory::for_replay(),
+                &mut ReadInventory::default(),
             )?;
             Ok(ReceiptReplay {
                 id,

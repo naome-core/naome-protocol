@@ -405,13 +405,16 @@ fn pending_imports_share_bytes_and_respect_intervening_admission_and_withdrawal(
     let heads = [first.id()?, second.id()?];
     let limit = first.objects.len() - 1;
     let mut receiver = Archive::memory()?;
-    let mut final_pages = Vec::new();
+    let mut pages = Vec::new();
     for head in heads {
         let start = source.export_exchange_page(head, None, limit)?;
         let progress = receiver.import_pinned_exchange_page(head, &start)?;
         assert!(!progress.complete);
         assert!(receiver.raw(payload)?.is_none());
-        final_pages.push(source.export_exchange_page(head, progress.continuation, limit)?);
+        pages.push((
+            start,
+            source.export_exchange_page(head, progress.continuation, limit)?,
+        ));
     }
     let copies: i64 = receiver.db.query_row(
         "SELECT (SELECT count(*) FROM archive_extent_blocks WHERE id=?1)
@@ -424,12 +427,29 @@ fn pending_imports_share_bytes_and_respect_intervening_admission_and_withdrawal(
     assert_eq!(receiver.blob(bytes, public)?, payload);
     assert_eq!(&receiver.resolve_local(payload)?, bytes);
     receiver.withdraw(payload)?;
-    for (head, page) in heads.into_iter().zip(&final_pages) {
-        assert!(receiver.import_pinned_exchange_page(head, page)?.complete);
+    for (head, (initial, last)) in heads.into_iter().zip(&pages) {
+        assert!(
+            !receiver
+                .import_pinned_exchange_page(head, initial)?
+                .complete
+        );
+        assert!(receiver.import_pinned_exchange_page(head, last)?.complete);
+        assert!(
+            receiver
+                .import_pinned_exchange_page(head, initial)?
+                .complete
+        );
         assert!(receiver.resolve_head(head, payload, "read").is_err());
         let status = &receiver.exchange_import_status(head)?[0];
         assert_eq!(status.supplied, Some(status.examined));
     }
+    let retained: bool = receiver.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM archive_extents WHERE id=?1)
+             OR EXISTS(SELECT 1 FROM archive_extent_blocks WHERE id=?1)",
+        [payload.to_string()],
+        |row| row.get(0),
+    )?;
+    assert!(!retained);
 
     for verified in [true, false] {
         let mut conflicted = Archive::memory()?;

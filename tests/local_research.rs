@@ -844,25 +844,51 @@ fn recovery_publishes_only_complete_verified_payloads() -> Result<()> {
 }
 
 #[test]
-fn replay_rejects_a_historical_oversize_receipt_before_loading_its_horizon() -> Result<()> {
+fn historical_receipts_replay_with_their_original_limits() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path();
     let path = root.join("archive.sqlite");
     let archive = Archive::open(&path)?;
     let case = fixture::seed(&archive, Format::A)?;
-    let mut old_receipt = archive.read_head(case.published, case.receipts[2], "read")?;
-    let mut query: naome_protocol::evaluation::Query = old_receipt.field("original_query")?;
-    query.budget = 100_001;
-    old_receipt
-        .fields
-        .insert("original_query".into(), serde_json::to_value(query)?);
-    let receipt = archive.document(&old_receipt, Format::A, Id::blob(PUBLIC))?;
-    archive.withdraw(case.s0)?;
-
-    let replay = invoke(&path, root, &["replay", &receipt.to_string()])?;
-    assert!(!replay.status.success());
-    let stderr = String::from_utf8_lossy(&replay.stderr);
-    assert!(stderr.contains("receipt evaluation budget"), "{stderr}");
+    let historical = archive.head(case.s0)?;
+    let recorded = archive.read_head(case.published, case.receipts[2], "read")?;
+    let original_query: naome_protocol::evaluation::Query = recorded.field("original_query")?;
+    let mut receipts = Vec::new();
+    for (budget, byte_limit) in [
+        (100_001, default_byte_limit()),
+        (100_000, default_byte_limit() + 1),
+    ] {
+        let mut query = original_query.clone();
+        query.budget = budget;
+        query.byte_limit = byte_limit;
+        let transcript = serde_json::to_value(assess(&archive, &historical, &query)?)?;
+        assert_eq!(transcript, recorded.fields["original_transcript"]);
+        // Historical writers could save this assessment with its original limits.
+        let mut receipt = recorded.clone();
+        receipt
+            .fields
+            .insert("original_query".into(), serde_json::to_value(query)?);
+        receipts.push(archive.document(&receipt, Format::A, Id::blob(PUBLIC))?);
+    }
+    let selected = archive.snapshot("historical assessment replay", [case.published].into())?;
+    let head = selected.id()?.to_string();
+    drop(archive);
+    let before = fs::read(&path)?;
+    for receipt in receipts {
+        let receipt = receipt.to_string();
+        let local = run(&path, root, &["replay", &receipt, "--require-match"])?;
+        assert_eq!(local["matches"], true);
+        assert_eq!(local["head"], case.s0.to_string());
+        assert_eq!(
+            run(
+                &path,
+                root,
+                &["replay", &receipt, "--head", &head, "--require-match"]
+            )?,
+            local
+        );
+    }
+    assert_eq!(fs::read(&path)?, before);
     Ok(())
 }
 
