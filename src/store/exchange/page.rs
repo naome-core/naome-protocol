@@ -460,8 +460,9 @@ impl Archive {
             "previous exchange page has not been acknowledged"
         );
         let witnesses = Witnesses::begin(&tx)?;
+        let mut new_witness = false;
         for (&id, data) in &page.pages {
-            witnesses.install(id, data)?;
+            new_witness |= witnesses.install(id, data)?;
         }
         let mut tree = Tree::new(&tx);
         let mut ids = Vec::new();
@@ -542,6 +543,9 @@ impl Archive {
         witnesses.finish()?;
         let mut progress = page.progress();
         if duplicate {
+            if verified && complete && new_witness {
+                crate::store::search_index::refresh_access_gaps(&tx, &key)?;
+            }
             progress.complete = complete;
             progress.continuation = if complete { None } else { cursor };
             if supplied != 0 {

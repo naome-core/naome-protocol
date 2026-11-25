@@ -744,6 +744,14 @@ fn point_only_bytes_do_not_become_independently_admitted_until_a_full_packet_arr
     assert!(receiver.resolve_head(other, id, "read").is_err());
     let snapshot = receiver.head(head)?;
     assert!(receiver.resolve(&snapshot, id, "train").is_err());
+    assert!(receiver.release(head).is_err());
+    assert!(!receiver.has_observed_release(head)?);
+    // A release registered by an older writer still cannot deliver the point-only payload.
+    receiver
+        .db
+        .execute("INSERT INTO releases VALUES(?)", [head.to_string()])?;
+    assert!(receiver.released_manifest(head).is_err());
+    assert!(receiver.released_member(head, id).is_err());
     assert!(
         !receiver
             .snapshot("independent local inventory", Default::default())?
@@ -780,11 +788,106 @@ fn point_only_bytes_do_not_become_independently_admitted_until_a_full_packet_arr
     );
     assert_eq!(receiver.resolve_head(head, id, "train")?, bytes);
     assert_eq!(receiver.resolve_head(other, id, "read")?, bytes);
+    receiver.release(head)?;
+    let mut replica = crate::store::sharing::Replica::new(head, receiver.released_manifest(head)?)?;
+    while let Some(member) = replica.next_member() {
+        replica.accept(member, receiver.released_member(head, member)?)?;
+    }
+    let replica_store = Archive::memory()?;
+    replica.commit(&replica_store)?;
+    assert_eq!(replica_store.resolve_head(head, id, "train")?, bytes);
     assert!(
         receiver
             .snapshot("independent local inventory", Default::default())?
             .objects
             .contains(&id)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_completed_page_retry_refreshes_prepared_search_gaps() -> Result<()> {
+    use crate::{
+        profile::PUBLIC,
+        search::{SearchInput, SearchOptions},
+        store::Archive,
+        wire::{Format, Id},
+    };
+    let source = Archive::memory()?;
+    let mut receiver = Archive::memory()?;
+    let public = Id::blob(PUBLIC);
+    let mut records = Vec::new();
+    for n in 0..96 {
+        let text = format!("retrywitness{n}");
+        let capture = |archive: &Archive| {
+            archive.capture(text.as_bytes(), "text/plain", text.len(), public, Format::A)
+        };
+        let id = capture(&source)?;
+        assert_eq!(capture(&receiver)?, id);
+        records.push((id, text));
+    }
+    let head = source.snapshot_id("retry witnesses", Default::default())?;
+    let complete = source.export_exchange_page(head, None, 1024)?;
+    for (_, text) in &records {
+        source.withdraw(Id::blob(text.as_bytes()))?;
+    }
+    let omitted = source.export_exchange_page(head, None, 1024)?;
+    assert!(
+        receiver
+            .import_pinned_exchange_page(head, &omitted)?
+            .complete
+    );
+    let (id, text) = records
+        .into_iter()
+        .find(|(_, text)| {
+            receiver
+                .resolve_head(head, Id::blob(text.as_bytes()), "read")
+                .is_err()
+        })
+        .expect("a payload with an omitted access witness");
+    let snapshot = receiver.head(head)?;
+    let prepared = receiver.prepare_search(&snapshot, 128, None)?;
+    assert!(prepared.index_complete && prepared.limited_coverage);
+    let options = SearchOptions::default();
+    let status = receiver.exchange_import_status(head)?;
+    let query = SearchInput::Text(&text);
+    assert!(
+        receiver
+            .search_prepared(&snapshot, query, options, None)?
+            .hits
+            .iter()
+            .all(|hit| hit.id != id)
+    );
+
+    assert!(
+        receiver
+            .import_pinned_exchange_page(head, &complete)?
+            .complete
+    );
+    assert_eq!(receiver.exchange_import_status(head)?, status);
+    assert_eq!(
+        receiver.resolve_head(head, Id::blob(text.as_bytes()), "read")?,
+        text.as_bytes()
+    );
+    let prepared = receiver.prepare_search(&snapshot, 128, None)?;
+    assert!(prepared.index_complete && !prepared.limited_coverage);
+    assert!(
+        receiver
+            .search_prepared(&snapshot, query, options, None)?
+            .hits
+            .iter()
+            .any(|hit| hit.id == id)
+    );
+    assert!(
+        receiver
+            .import_pinned_exchange_page(head, &complete)?
+            .complete
+    );
+    assert_eq!(receiver.exchange_import_status(head)?, status);
+    assert!(
+        receiver
+            .search_prepared(&snapshot, query, options, None)?
+            .index_complete
     );
     Ok(())
 }

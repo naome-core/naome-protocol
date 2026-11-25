@@ -334,10 +334,13 @@ impl<'a> InventoryReader<'a> {
                         allows(policy, purpose)
                     })
             }
-            InventoryView::Paged(manifest) => {
-                self.archive
-                    .resolve_member_in(manifest, id, purpose, &mut self.tree)
-            }
+            InventoryView::Paged(manifest) => self.archive.resolve_member_in(
+                manifest,
+                id,
+                purpose,
+                purpose == "read",
+                &mut self.tree,
+            ),
         }
     }
 
@@ -620,10 +623,9 @@ impl Archive {
     fn full_seal_includes_points(&self, head: Id, high_water: i64) -> Result<bool> {
         // New disclosures never enter archive_deposits. Only legacy admissions
         // can leave a point-only member in a full cut that predates its upgrade.
-        let mut query = self.db.prepare_cached(
-            "SELECT p.id FROM archive_point_only p CROSS JOIN archive_deposits d ON d.id=p.id
-             WHERE d.serial<=?",
-        )?;
+        let mut query = self
+            .db
+            .prepare_cached("SELECT id FROM archive_point_only WHERE legacy_serial<=?")?;
         let mut rows = query.query([high_water])?;
         let Some(first) = rows.next()? else {
             return Ok(false);
@@ -963,11 +965,13 @@ impl Archive {
         m: &Manifest,
         id: Id,
         purpose: &str,
+        point_read: bool,
     ) -> Result<(Vec<u8>, Id)> {
         self.resolve_member_in(
             m,
             id,
             purpose,
+            point_read,
             &mut super::custody::tree::Tree::new(&self.db),
         )
     }
@@ -976,13 +980,14 @@ impl Archive {
         m: &Manifest,
         id: Id,
         purpose: &str,
+        point_read: bool,
         tree: &mut super::custody::tree::Tree<'_>,
     ) -> Result<(Vec<u8>, Id)> {
         ensure!(
             tree.get(m.inventory, &id.to_string())? == Some(id),
             "outside snapshot"
         );
-        self.resolve_inventory_member(m, id, purpose, purpose == "read", tree)
+        self.resolve_inventory_member(m, id, purpose, point_read, tree)
     }
     /// The caller has just visited this member in a verified membership walk.
     pub(super) fn resolve_inventory_member(
@@ -1069,6 +1074,20 @@ impl Archive {
     }
 
     pub(crate) fn local_receipt_horizon(&self, id: Id) -> Result<Snapshot> {
+        // A linked packet can carry witnesses while relying on its enclosing cut for access.
+        // Direct replay uses only a horizon the archive already recognizes on its own.
+        let admitted: bool = self
+            .db
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM heads WHERE id=?1
+                UNION ALL SELECT 1 FROM archive_historical WHERE id=?1
+                UNION ALL SELECT 1 FROM custody_heads WHERE id=?1)",
+            )?
+            .query_row([id.to_string()], |row| row.get(0))?;
+        ensure!(
+            admitted,
+            "receipt horizon was not independently admitted; specify its enclosing snapshot"
+        );
         self.load_snapshot_packet(id, &self.resolve_local(id)?, ManifestEncoding::Canonical)
     }
 }
@@ -1108,6 +1127,14 @@ mod tests {
         assert_eq!(reader.status()?.pending_objects, 0);
         assert_eq!(reader.resolve_head(point_head, id, "read")?, bytes);
         drop(reader);
+
+        let archive = Archive::open(&path)?;
+        assert!(archive.full_seal_includes_points(cached, i64::MAX)?);
+        archive.db.execute_batch(
+            "DROP INDEX archive_point_legacy_deposit;
+             ALTER TABLE archive_point_only DROP COLUMN legacy_serial;",
+        )?;
+        drop(archive);
 
         let archive = Archive::open(&path)?;
         let rebuilt = archive.snapshot_id("old cached selection", Default::default())?;

@@ -32,7 +32,7 @@ pub struct QuestionArguments {
 #[derive(Args)]
 pub struct ReplayArguments {
     pub(super) receipt: Id,
-    /// Restrict replay to this snapshot. By default, read the receipt directly from the archive.
+    /// Select the enclosing snapshot. Direct replay requires the original horizon to be independently admitted.
     #[arg(long)]
     pub(super) head: Option<Id>,
     /// Verify a separately supplied native format mapping from the selected snapshot. Repeat for multiple mappings.

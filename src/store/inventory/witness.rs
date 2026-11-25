@@ -16,12 +16,12 @@ impl<'a> Witnesses<'a> {
         Ok(Self(db))
     }
 
-    pub fn install(&self, id: Id, page: &Page) -> Result<()> {
-        install_page(self.0, id, page)?;
+    pub fn install(&self, id: Id, page: &Page) -> Result<bool> {
+        let inserted = install_page(self.0, id, page)?;
         self.0
             .prepare_cached("INSERT OR IGNORE INTO temp.incoming_pages VALUES(?)")?
             .execute([id.to_string()])?;
-        Ok(())
+        Ok(inserted)
     }
 
     pub fn link(&self, id: Id, bytes: &[u8]) -> Result<()> {

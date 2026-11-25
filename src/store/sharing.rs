@@ -5,7 +5,7 @@ use super::{
     snapshot::save_imported_head,
 };
 use crate::{
-    profile::{Document, Kind, PROFILE, verify_attestation},
+    profile::{Document, Kind, PROFILE, allows, verify_attestation},
     wire::{Id, Record},
 };
 use anyhow::{Context, Result, ensure};
@@ -287,10 +287,13 @@ impl Archive {
         };
         include(snapshot.manifest()?, &mut total)?;
         for &id in &snapshot.objects {
+            if self.point_only(id)? {
+                return Err(ReleaseUnavailable("member requires independent admission").into());
+            }
             let size = self.size(id)?;
             total = charge_member(total, size)?;
             if id.format().is_none() && size <= 32768 {
-                let bytes = self.resolve(snapshot, id, "read")?;
+                let (bytes, _) = self.resolve_with(snapshot, id, false, |p| allows(p, "read"))?;
                 if let Some(m) = super::Manifest::from_packet(id, &bytes) {
                     include(&m, &mut total).map_err(|err| {
                         if err.is::<InvalidInventory>() {
@@ -318,7 +321,7 @@ impl Archive {
             self.size(id)? <= MAX_MEMBER_BYTES,
             "object exceeds network limit"
         );
-        let (bytes, access) = self.resolve_member(&m, id, "read")?;
+        let (bytes, access) = self.resolve_member(&m, id, "read", false)?;
         if let Some(format) = id.format() {
             ensure!(
                 Record::decode(&bytes, format)?.access == access,
@@ -360,7 +363,7 @@ impl Archive {
     fn register_release(&self, head: Id, s: &Snapshot) -> Result<()> {
         self.release_pages(head, s)?;
         for &id in &s.objects {
-            let bytes = self.resolve(s, id, "read")?;
+            let (bytes, _) = self.resolve_with(s, id, false, |p| allows(p, "read"))?;
             if let Some(format) = id.format() {
                 let record = Record::decode(&bytes, format)?;
                 if record.profile == Id::blob(PROFILE) && record.kind == Kind::Attestation as u64 {

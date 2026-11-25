@@ -510,7 +510,13 @@ impl Archive {
                         )?;
                         Self::decode_document(format, &bytes, |profile| {
                             Ok(self
-                                .resolve_member_in(&manifest, profile, purpose, &mut tree)?
+                                .resolve_member_in(
+                                    &manifest,
+                                    profile,
+                                    purpose,
+                                    purpose == "read",
+                                    &mut tree,
+                                )?
                                 .0)
                         })
                     },

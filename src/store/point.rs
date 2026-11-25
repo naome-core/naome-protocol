@@ -13,10 +13,30 @@ fn table_exists(db: &Connection, name: &str) -> Result<bool> {
 
 pub(super) fn upgrade(db: &Connection) -> Result<()> {
     if table_exists(db, "archive_point_only")? {
+        let has_legacy_serial: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('archive_point_only')
+             WHERE name='legacy_serial')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_legacy_serial {
+            db.execute_batch(
+                "ALTER TABLE archive_point_only ADD COLUMN legacy_serial INTEGER;
+                 UPDATE archive_point_only SET legacy_serial=(
+                     SELECT serial FROM archive_deposits WHERE id=archive_point_only.id
+                 );
+                 CREATE INDEX archive_point_legacy_deposit ON archive_point_only(legacy_serial)
+                 WHERE legacy_serial IS NOT NULL;",
+            )?;
+        }
         return Ok(());
     }
     db.execute_batch(
-        "CREATE TABLE archive_point_only(id TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;
+        "CREATE TABLE archive_point_only(
+             id TEXT PRIMARY KEY NOT NULL,legacy_serial INTEGER
+         ) WITHOUT ROWID;
+         CREATE INDEX archive_point_legacy_deposit ON archive_point_only(legacy_serial)
+         WHERE legacy_serial IS NOT NULL;
          DROP TRIGGER IF EXISTS archive_catalog_append;
          CREATE TRIGGER archive_catalog_append AFTER INSERT ON objects
          WHEN NOT EXISTS(SELECT 1 FROM archive_point_only WHERE id=NEW.id)
@@ -26,7 +46,8 @@ pub(super) fn upgrade(db: &Connection) -> Result<()> {
     // independently admitted. Keep its bytes, and require fresh admission.
     db.execute(
         &format!(
-            "INSERT OR IGNORE INTO archive_point_only {}",
+            "INSERT OR IGNORE INTO archive_point_only(id,legacy_serial)
+             SELECT p.id,d.serial FROM ({}) p LEFT JOIN archive_deposits d ON d.id=p.id",
             legacy_catalog(db)?
         ),
         [],
@@ -73,7 +94,7 @@ pub(super) fn visible_in_search(db: &Connection, head: &str) -> Result<bool> {
 
 pub(super) fn mark_new(db: &Connection, id: Id) -> Result<()> {
     db.prepare_cached(
-        "INSERT OR IGNORE INTO archive_point_only
+        "INSERT OR IGNORE INTO archive_point_only(id)
          SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM objects WHERE id=?1)",
     )?
     .execute([id.to_string()])?;

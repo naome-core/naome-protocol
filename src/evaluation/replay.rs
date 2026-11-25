@@ -141,7 +141,7 @@ impl Archive {
         })
     }
 
-    /// Replay an authorized local receipt directly, including before the next snapshot.
+    /// Replay a local receipt against its independently admitted original horizon.
     pub fn replay_local_assessment(&self, id: Id) -> Result<ReceiptReplay> {
         self.replay_receipt(None, id, &[])
     }

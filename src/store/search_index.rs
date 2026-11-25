@@ -37,6 +37,25 @@ pub(super) fn invalidate_access_scope(db: &rusqlite::Connection, head: &str) -> 
     Ok(())
 }
 
+pub(super) fn refresh_access_gaps(db: &rusqlite::Connection, head: &str) -> Result<()> {
+    if prepared_cache_version(db)?.is_some()
+        && db.execute(
+            "UPDATE rep_search_revision SET value=value+1
+             WHERE EXISTS(SELECT 1 FROM rep_search_heads WHERE head=?)",
+            [head],
+        )? != 0
+    {
+        // Newly proven access can fill a gap without disturbing the indexed prefix.
+        db.execute(
+            "INSERT INTO rep_search_waiting(source,head,object,ready)
+             SELECT object,head,object,1 FROM rep_search_gaps WHERE head=?
+             ON CONFLICT(source,head,object) DO UPDATE SET ready=1",
+            [head],
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum IndexPreparation {
     Existing,

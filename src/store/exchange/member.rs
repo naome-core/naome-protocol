@@ -297,7 +297,7 @@ impl Archive {
             return Ok(bytes);
         }
         Ok(self
-            .resolve_member(&self.active_manifest(head)?, id, purpose)?
+            .resolve_member(&self.active_manifest(head)?, id, purpose, purpose == "read")?
             .0)
     }
 }

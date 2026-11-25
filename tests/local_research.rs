@@ -906,6 +906,65 @@ fn historical_receipts_replay_with_their_original_limits() -> Result<()> {
 }
 
 #[test]
+fn a_detached_receipt_uses_its_verified_enclosing_snapshot() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("receipt recipient.sqlite");
+    let source = Archive::memory()?;
+    let case = fixture::seed(&source, Format::A)?;
+    let receipt = case.receipts[0];
+    let mut receiver = Archive::open(&path)?;
+    let page = source.export_exchange_page(case.published, None, 1024)?;
+    assert!(
+        receiver
+            .import_pinned_exchange_page(case.published, &page)?
+            .complete
+    );
+    assert!(receiver.replay_local_assessment(receipt).is_err());
+    assert!(
+        receiver
+            .replay_assessment(&receiver.head(case.published)?, receipt)?
+            .matches
+    );
+    drop(receiver);
+
+    let receipt = receipt.to_string();
+    let direct = invoke(&path, directory.path(), &["replay", &receipt])?;
+    assert!(!direct.status.success());
+    assert!(String::from_utf8_lossy(&direct.stderr).contains("specify its enclosing snapshot"));
+    let selected = run(
+        &path,
+        directory.path(),
+        &[
+            "replay",
+            &receipt,
+            "--head",
+            &case.published.to_string(),
+            "--require-match",
+        ],
+    )?;
+    assert_eq!(selected["head"], json!(case.s0));
+    assert_eq!(selected["matches"], true);
+
+    let mut receiver = Archive::open(&path)?;
+    let original = source.export_exchange_page(case.s0, None, 1024)?;
+    assert!(
+        receiver
+            .import_pinned_exchange_page(case.s0, &original)?
+            .complete
+    );
+    drop(receiver);
+    assert_eq!(
+        run(
+            &path,
+            directory.path(),
+            &["replay", &receipt, "--require-match"]
+        )?,
+        selected
+    );
+    Ok(())
+}
+
+#[test]
 fn explicit_replay_matches_the_materialized_view_with_a_mapping() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path();
