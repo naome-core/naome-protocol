@@ -291,7 +291,7 @@ pub enum ArchiveCommand {
     Keygen { output: PathBuf },
     /// Attest to the exact original record under a role and scope.
     #[command(
-        long_about = "Attest to the exact original record under a role and scope. Use role non-notice-occurrence and scope notice-coverage-1 to classify a readable ordinary occurrence for notice searches in partial archives."
+        long_about = "Attest to the exact original record under a role and scope. Use role notice-search-exclusion and scope notice-coverage-1 to certify that a readable record is outside direct notice discovery."
     )]
     Sign {
         head: Id,
@@ -302,7 +302,7 @@ pub enum ArchiveCommand {
     },
     /// Verify detached attestation bytes under an explicit trusted public key.
     #[command(
-        long_about = "Verify detached attestation bytes under an explicit trusted public key. For role non-notice-occurrence, the occurrence must be in the selected inventory and its bytes may be unavailable."
+        long_about = "Verify detached attestation bytes under an explicit trusted public key. For a notice-search-exclusion attestation, the target must be in the selected inventory and its bytes may be unavailable."
     )]
     Verify {
         head: Id,
@@ -405,7 +405,7 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             "calibration_identity_evaluator": evaluation::EVALUATOR_ID,
             "input_correction_evaluator": evaluation::EVALUATOR_ID,
             "notice_coverage": {
-                "role": evaluation::notice_coverage::ROLE,
+                "role": evaluation::notice_coverage::Exclusion::Record.role(),
                 "scope": evaluation::notice_coverage::SCOPE,
             },
             "replay_evaluators": evaluation::replay_evaluator_ids().collect::<Vec<_>>(),
@@ -836,17 +836,12 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
         } => {
             let db = open()?;
             let snapshot = db.active_head(head)?;
-            if role == evaluation::notice_coverage::ROLE {
+            if let Some(exclusion) = evaluation::notice_coverage::Exclusion::for_role(&role) {
                 ensure!(
                     scope == evaluation::notice_coverage::SCOPE,
                     "invalid notice coverage scope"
                 );
-                return print(db.certify_non_notice_occurrence(
-                    &snapshot,
-                    id,
-                    &signing_key(&key)?,
-                    f,
-                )?);
+                return print(exclusion.certify(&db, &snapshot, id, &signing_key(&key)?, f)?);
             }
             db.resolve(&snapshot, id, "read")?;
             print(db.document(
@@ -864,12 +859,13 @@ pub fn run(command: ArchiveCommand, db_path: PathBuf, f: Format) -> Result<()> {
             public_key,
         } => {
             let db = reader()?;
-            if role == evaluation::notice_coverage::ROLE {
+            if let Some(exclusion) = evaluation::notice_coverage::Exclusion::for_role(&role) {
                 ensure!(
                     scope == evaluation::notice_coverage::SCOPE,
                     "invalid notice coverage scope"
                 );
-                db.verify_non_notice_occurrence(
+                exclusion.verify_at(
+                    &db,
                     &db.active_head(head)?,
                     target,
                     attestation,

@@ -1,7 +1,11 @@
-use super::{NoticeSearch, Query, Receipt, notice_coverage, rules::NoticeBudget};
+use super::{
+    NoticeSearch, Query, Receipt,
+    notice_coverage::{CoverageAuthority, Exclusion, SearchRole, search_role},
+    rules::NoticeBudget,
+};
 use crate::{
     migration::Equivalence,
-    profile::{CALIBRATION_EVENT_IDENTITY, Document, Kind, verify_attestation},
+    profile::{Document, Kind, verify_attestation},
     store::{Archive, InventoryReader, Snapshot},
     wire::Id,
 };
@@ -125,22 +129,16 @@ impl ReadInventory {
     ) -> bool {
         let hidden = match store.read(snapshot, id, "read") {
             Ok(document) => {
-                match document.kind {
-                    Kind::Notice => {
+                match search_role(&document) {
+                    SearchRole::Notice => {
                         self.notices.insert(id);
                     }
-                    Kind::Attestation => {
+                    SearchRole::Attestation => {
                         if let Ok(target) = document.one("signed-original") {
                             self.attestations.entry(target).or_default().insert(id);
                         }
                     }
-                    Kind::Assessment
-                        if document
-                            .fields
-                            .get("test")
-                            .and_then(serde_json::Value::as_str)
-                            == Some(CALIBRATION_EVENT_IDENTITY) =>
-                    {
+                    SearchRole::IdentityCheck => {
                         if !retain {
                             self.skipped_identity_checks = true;
                             self.inspected.insert(id, false);
@@ -171,7 +169,7 @@ impl ReadInventory {
         query: &Query,
         out: &mut Receipt,
         budget_rule: &NoticeBudget,
-        exclusion_keys: Option<&BTreeSet<String>>,
+        coverage: Option<&CoverageAuthority>,
     ) -> Result<()> {
         let records_only = !matches!(budget_rule, NoticeBudget::Objects);
         if let Some((records, bytes)) = self.complete_scan
@@ -183,11 +181,12 @@ impl ReadInventory {
             && bytes <= query.byte_limit
         {
             out.visible_notices.extend(&self.notices);
-            if exclusion_keys.is_some() {
-                out.notice_search = Some(NoticeSearch {
-                    complete: true,
-                    ..NoticeSearch::default()
-                });
+            if let Some(coverage) = coverage {
+                out.notice_search = Some(coverage_report(
+                    coverage.version,
+                    BTreeMap::new(),
+                    BTreeSet::new(),
+                ));
             }
             return Ok(());
         }
@@ -239,18 +238,19 @@ impl ReadInventory {
         // A covered scan depends on the current recipient policy and cannot populate the
         // policy-independent cache. A cut short by budget cannot borrow cached attestations.
         let cacheable_scan = hidden.is_empty();
-        if let Some(keys) = exclusion_keys {
-            let mut report = NoticeSearch::default();
+        if let Some(coverage) = coverage {
+            let mut classified = BTreeMap::new();
             if out.frontier.is_empty() {
                 hidden.retain(|id| {
                     // Available bytes with an opaque or invalid profile still need inspection.
                     if store.readable(snapshot, *id).is_ok() {
                         return true;
                     }
-                    if let Some((signature, _)) = self.attestations(*id).find(|(_, attestation)| {
-                        notice_coverage::verify_exclusion(attestation, *id, keys).is_ok()
-                    }) {
-                        report.classified_occurrences.insert(*id, signature);
+                    if let Some((signature, _)) = self
+                        .attestations(*id)
+                        .find(|(_, attestation)| coverage.admits(attestation, *id))
+                    {
+                        classified.insert(*id, signature);
                         out.dependencies.insert(signature);
                         false
                     } else {
@@ -258,12 +258,8 @@ impl ReadInventory {
                     }
                 });
             }
-            report.complete = out.frontier.is_empty() && hidden.is_empty();
-            report
-                .unresolved_records
-                .extend(out.frontier.iter().copied());
-            report.unresolved_records.extend(hidden.iter().copied());
-            out.notice_search = Some(report);
+            let unresolved = out.frontier.union(&hidden).copied().collect();
+            out.notice_search = Some(coverage_report(coverage.version, classified, unresolved));
         }
         out.frontier.extend(hidden.iter().copied());
         ensure!(
@@ -276,6 +272,23 @@ impl ReadInventory {
         }
         Ok(())
     }
+}
+
+fn coverage_report(
+    version: Exclusion,
+    classified: BTreeMap<Id, Id>,
+    unresolved_records: BTreeSet<Id>,
+) -> NoticeSearch {
+    let mut report = NoticeSearch {
+        complete: unresolved_records.is_empty(),
+        unresolved_records,
+        ..NoticeSearch::default()
+    };
+    match version {
+        Exclusion::Occurrence => report.classified_occurrences = Some(classified),
+        Exclusion::Record => report.classified_records = Some(classified),
+    }
+    report
 }
 
 impl UnscannedRecords {

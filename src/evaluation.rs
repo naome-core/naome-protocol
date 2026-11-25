@@ -121,14 +121,17 @@ pub struct Receipt {
     /// First inclusive record in the unexamined suffix at the receipt's pinned horizon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unscanned_records_from: Option<Id>,
-    /// Coverage state when the policy delegates classification of absent occurrences.
+    /// Coverage state when the policy delegates classification of absent records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice_search: Option<NoticeSearch>,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct NoticeSearch {
     pub complete: bool,
-    pub classified_occurrences: BTreeMap<Id, Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classified_occurrences: Option<BTreeMap<Id, Id>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classified_records: Option<BTreeMap<Id, Id>>,
     pub unresolved_records: BTreeSet<Id>,
 }
 impl Receipt {
@@ -622,17 +625,12 @@ pub(crate) fn assess_with_inventory(
             "unsupported query policy"
         );
         out.dependencies.extend([q.target, q.policy]);
-        let coverage_keys = if rules.notice_coverage {
-            notice_coverage::trusted_keys(&policy)?
-        } else {
-            BTreeSet::new()
-        };
-        // Linked foreign calibration checks can depend on otherwise ordinary occurrences.
-        // Their discovery and adjudication still require the original full scan.
-        let exclusions = (!coverage_keys.is_empty()
-            && !policy.fields.contains_key("foreign_calibration_keys"))
-        .then_some(&coverage_keys);
-        inventory.search(store, s, q, out, &rules.notice_budget, exclusions)?;
+        let coverage = rules
+            .notice_coverage
+            .map(|version| notice_coverage::CoverageAuthority::from_policy(version, &policy))
+            .transpose()?
+            .flatten();
+        inventory.search(store, s, q, out, &rules.notice_budget, coverage.as_ref())?;
         let mut aliases = Equivalence::default();
         for &mapping in &q.mappings {
             aliases.add(store.verify_mapping_with(s, mapping, rules.manifests)?);
@@ -681,7 +679,7 @@ pub(crate) fn assess_with_inventory(
         } else {
             Vec::new()
         };
-        if rules.notice_coverage {
+        if rules.notice_coverage.is_some() {
             for entry in &input_corrections {
                 out.check(
                     "input correction authority",
@@ -710,7 +708,7 @@ pub(crate) fn assess_with_inventory(
                 .map(|reading| store.explain_recorded_reading(s, arg, reading, q.budget));
             let premises = recorded_premises.as_ref().unwrap_or(&evidence);
             out.frontier.extend(premises.frontier.keys());
-            if rules.notice_coverage && !premises.frontier.is_empty() {
+            if rules.notice_coverage.is_some() && !premises.frontier.is_empty() {
                 out.unknown(
                     "argument evidence",
                     "argument has missing or restricted inputs",
@@ -804,7 +802,7 @@ pub(crate) fn assess_with_inventory(
                 Err(e) => out.unknown("argument warrant", &e.to_string(), &[arg]),
             }
         }
-        if rules.notice_coverage && !q.arguments.is_empty() {
+        if rules.notice_coverage.is_some() && !q.arguments.is_empty() {
             for entry in &input_corrections {
                 if correction_exclusions.get(&entry.id) == Some(&q.arguments.len())
                     && !q
@@ -848,9 +846,11 @@ pub(crate) fn assess_with_inventory(
             for source in sources {
                 let mut fresh = false;
                 for (&id, d) in &view.inventory.documents {
-                    if d.kind == Kind::Occurrence
-                        && d.subject == source
-                        && d.scope == "notice-horizon"
+                    if d.subject == source
+                        && matches!(
+                            notice_coverage::search_role(d),
+                            notice_coverage::SearchRole::Freshness
+                        )
                         && let Ok(time) = d.field::<u64>("time")
                         && time <= now
                         && now - time <= max_age
@@ -858,7 +858,8 @@ pub(crate) fn assess_with_inventory(
                         && let Ok(inventory) = store.linked_snapshot(s, h, rules.manifests)
                         && inventory.source == source
                         && inventory.objects.is_subset(&s.objects)
-                        && let Ok(sig) = view.signed(id, "notice-horizon", "horizon")
+                        && let Ok(sig) =
+                            view.signed(id, notice_coverage::FRESHNESS_SCOPE, "horizon")
                     {
                         out.check(
                             "notice freshness",

@@ -1,4 +1,4 @@
-use super::correction::WithdrawalRules;
+use super::{correction::WithdrawalRules, notice_coverage::Exclusion};
 use crate::{profile::Document, store::ManifestEncoding};
 use anyhow::{Context, Result};
 
@@ -7,7 +7,7 @@ pub(crate) const FIXTURE_EVALUATOR_ID: &str = "rep-rust-rules-1";
 const RECORD_BUDGET_EVALUATOR_ID: &str = "rep-rust-rules-5";
 
 // The current writer selects one immutable replay policy by ID.
-pub(crate) const EVALUATOR_ID: &str = "rep-rust-rules-8";
+pub(crate) const EVALUATOR_ID: &str = "rep-rust-rules-9";
 
 #[derive(PartialEq, Eq)]
 pub(super) enum NoticeBudget {
@@ -52,7 +52,7 @@ pub(super) struct EvaluatorRules {
     ids: &'static [&'static str],
     pub(crate) manifests: ManifestEncoding,
     pub(super) notice_budget: NoticeBudget,
-    pub(super) notice_coverage: bool,
+    pub(super) notice_coverage: Option<Exclusion>,
     pub(super) withdrawal: WithdrawalRules,
     pub(super) resolve_required_withdrawals: bool,
     pub(super) physical_identity: bool,
@@ -64,7 +64,17 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         ids: &[EVALUATOR_ID],
         manifests: ManifestEncoding::Canonical,
         notice_budget: NoticeBudget::CompactRecords,
-        notice_coverage: true,
+        notice_coverage: Some(Exclusion::Record),
+        withdrawal: WithdrawalRules::Scoped,
+        resolve_required_withdrawals: true,
+        physical_identity: true,
+        corrections: CorrectionRules::ScopedWhenConfigured,
+    },
+    EvaluatorRules {
+        ids: &["rep-rust-rules-8"],
+        manifests: ManifestEncoding::Canonical,
+        notice_budget: NoticeBudget::CompactRecords,
+        notice_coverage: Some(Exclusion::Occurrence),
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
         physical_identity: true,
@@ -74,7 +84,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         ids: &["rep-rust-rules-7"],
         manifests: ManifestEncoding::Canonical,
         notice_budget: NoticeBudget::CompactRecords,
-        notice_coverage: false,
+        notice_coverage: None,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
         physical_identity: true,
@@ -84,7 +94,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         ids: &["rep-rust-rules-6"],
         manifests: ManifestEncoding::Canonical,
         notice_budget: NoticeBudget::Records,
-        notice_coverage: false,
+        notice_coverage: None,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
         physical_identity: true,
@@ -94,7 +104,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         ids: &[RECORD_BUDGET_EVALUATOR_ID],
         manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Records,
-        notice_coverage: false,
+        notice_coverage: None,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
         physical_identity: true,
@@ -104,7 +114,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         ids: &["rep-rust-rules-4"],
         manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
-        notice_coverage: false,
+        notice_coverage: None,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
         physical_identity: true,
@@ -114,7 +124,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         ids: &["rep-rust-rules-3"],
         manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
-        notice_coverage: false,
+        notice_coverage: None,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
         physical_identity: true,
@@ -124,7 +134,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         ids: &["rep-rust-rules-2"],
         manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
-        notice_coverage: false,
+        notice_coverage: None,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
         physical_identity: true,
@@ -134,7 +144,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         ids: &[FIXTURE_EVALUATOR_ID],
         manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
-        notice_coverage: false,
+        notice_coverage: None,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: true,
         physical_identity: false,
@@ -144,7 +154,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         ids: &["rep-rust-0.1.2", "rep-rust-0.1.2-dev.1"],
         manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
-        notice_coverage: false,
+        notice_coverage: None,
         withdrawal: WithdrawalRules::Scoped,
         resolve_required_withdrawals: false,
         physical_identity: false,
@@ -154,7 +164,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         ids: &["rep-rust-0.1.2-dev"],
         manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
-        notice_coverage: false,
+        notice_coverage: None,
         withdrawal: WithdrawalRules::FirstScoped,
         resolve_required_withdrawals: false,
         physical_identity: false,
@@ -164,7 +174,7 @@ const REPLAY_RULES: &[EvaluatorRules] = &[
         ids: &[V0_1_0_EVALUATOR_ID, "rep-rust-0.1.1"],
         manifests: ManifestEncoding::LegacyJson,
         notice_budget: NoticeBudget::Objects,
-        notice_coverage: false,
+        notice_coverage: None,
         withdrawal: WithdrawalRules::ScopeOnly,
         resolve_required_withdrawals: false,
         physical_identity: false,

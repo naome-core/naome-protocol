@@ -786,8 +786,8 @@ fn partial_exchange_separates_notice_coverage_from_a_missing_reading() -> Result
     let search = receipt.notice_search.as_ref().unwrap();
     assert!(search.complete);
     assert_eq!(
-        search.classified_occurrences,
-        [(omitted, coverage_signature)].into()
+        search.classified_records,
+        Some([(omitted, coverage_signature)].into())
     );
     assert!(search.unresolved_records.is_empty());
     assert!(receipt.dependencies.contains(&coverage_signature));
@@ -828,7 +828,7 @@ fn partial_exchange_separates_notice_coverage_from_a_missing_reading() -> Result
     let search = missing_notice.notice_search.unwrap();
     assert!(!search.complete && search.unresolved_records.contains(&notice));
     assert_eq!(
-        search.classified_occurrences.get(&omitted),
+        search.classified_records.as_ref().unwrap().get(&omitted),
         Some(&coverage_signature)
     );
 
