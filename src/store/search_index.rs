@@ -20,7 +20,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use cache::{INDEX_VERSION, coverage, prepared_cache_version};
 use rusqlite::{OptionalExtension, params};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use vectors::{embed_query, missing_vectors};
 
 const MAX_QUERY_PASSAGES: usize = 24;
@@ -446,12 +446,19 @@ impl Archive {
         let mut work = VectorWork::default();
         let scoped =
             inventory.has_exchange_scope()? || super::point::visible_in_search(&read, &head)?;
-        let mut checked_entries = BTreeMap::new();
+        let mut previous_entry = None;
+        let mut rejected_entry = false;
         let mut entry_allowed = |entry| {
             if scoped {
-                *checked_entries.entry(entry).or_insert_with(|| {
-                    cache::entry_readable(&read, &mut inventory, entry).unwrap_or(false)
-                })
+                if let Some((previous, allowed)) = previous_entry
+                    && previous == entry
+                {
+                    return allowed;
+                }
+                let allowed = cache::entry_readable(&read, &mut inventory, entry).unwrap_or(false);
+                previous_entry = Some((entry, allowed));
+                rejected_entry |= !allowed;
+                allowed
             } else {
                 true
             }
@@ -473,7 +480,7 @@ impl Archive {
             &mut work,
             &mut entry_allowed,
         )?;
-        report.limited_coverage |= checked_entries.values().any(|&allowed| !allowed);
+        report.limited_coverage |= rejected_entry;
         report.vector_budget_exhausted = work.bounded;
         report.vector_products = work.products;
         report.vector_rows_examined = work.rows_examined;

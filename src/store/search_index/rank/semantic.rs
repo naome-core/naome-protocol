@@ -249,61 +249,46 @@ impl Scope<'_> {
         if samples == 0 {
             return Ok(0);
         }
+        let width = (width * 4) as i64;
+        if samples < count {
+            return self.visit_sparse(width, count, samples, work, &mut score);
+        }
+        let sql = format!(
+            "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?6),p.entry {}
+             ORDER BY visible.object,visible.section,p.location,v.part",
+            scope_sql("")
+        );
+        let mut statement = self.db.prepare_cached(&sql)?;
+        let mut rows = statement.query(params![
+            self.head,
+            self.model,
+            self.options.kind.map(|kind| kind as i64),
+            self.options.subject,
+            self.options.scope,
+            width
+        ])?;
         let mut scored = 0;
-        let entry_allowed = &mut self.entry_allowed;
-        let mut visit = |row: &Row<'_>| {
-            if entry_allowed(row.get(5)?) {
+        while let Some(row) = rows.next()? {
+            work.rows_examined += 1;
+            work.vectors_loaded += 1;
+            if (self.entry_allowed)(row.get(5)?) {
                 score(row)?;
                 scored += 1;
             }
-            Ok(())
-        };
-        // Sparse scans read ordered keys first. Materialize embedding BLOBs
-        // only for sampled rows, even when the eligible inventory is large.
-        let sparse = samples < count;
-        let width = (width * 4) as i64;
-        if sparse && let Some((sample, _)) = self.positions {
-            let mut lookup=self.db.prepare_cached("SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?4),p.entry
-                FROM rep_search_positions s CROSS JOIN rep_search_vectors v ON v.model=?3 AND v.passage=s.passage AND v.part=s.part
-                CROSS JOIN rep_search_passages p ON p.id=v.passage CROSS JOIN rep_search_entries e ON e.id=p.entry
-                WHERE s.sample=?1 AND s.ordinal=?2")?;
-            for visited in 0..samples {
-                let ordinal = midpoint(visited, count, samples) as i64;
-                let mut rows = lookup.query(params![sample, ordinal, self.model, width])?;
-                let row = rows
-                    .next()?
-                    .ok_or_else(|| anyhow::anyhow!("missing prepared sample position"))?;
-                visit(row)?;
-                work.rows_examined += 1;
-                work.vectors_loaded += 1;
-            }
-            return Ok(scored);
         }
-        let (columns, index) = if sparse {
-            ("p.id,v.part", COVERING_VECTORS)
-        } else {
-            (
-                "e.object,p.id,p.location,v.part,substr(v.vector,1,?6),p.entry",
-                "",
-            )
-        };
-        let sql = format!(
-            "SELECT {columns} {} ORDER BY visible.object,visible.section,p.location,v.part",
-            scope_sql(index)
-        );
-        let mut statement = self.db.prepare_cached(&sql)?;
-        let kind = self.options.kind.map(|kind| kind as i64);
-        let bound: [&dyn rusqlite::ToSql; 6] = [
-            &self.head,
-            &self.model,
-            &kind,
-            &self.options.subject,
-            &self.options.scope,
-            &width,
-        ];
-        let mut rows = statement.query(&bound[..if sparse { 5 } else { 6 }])?;
+        Ok(scored)
+    }
+
+    fn visit_sparse(
+        &mut self,
+        width: i64,
+        count: usize,
+        samples: usize,
+        work: &mut VectorWork,
+        mut score: impl FnMut(&Row<'_>) -> Result<()>,
+    ) -> Result<usize> {
         let mut vectors = self.db.prepare_cached(
-            "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?3),p.entry
+            "SELECT e.object,p.id,p.location,v.part,substr(v.vector,1,?3)
              FROM json_each(?2) sample
              CROSS JOIN rep_search_vectors v ON v.model=?1
                 AND v.passage=json_extract(sample.value,'$[0]')
@@ -311,35 +296,91 @@ impl Scope<'_> {
              CROSS JOIN rep_search_passages p ON p.id=v.passage
              CROSS JOIN rep_search_entries e ON e.id=p.entry ORDER BY sample.key",
         )?;
+        let model = self.model;
         let mut keys = Vec::with_capacity(SAMPLE_BATCH);
-        let mut available = 0;
-        let mut visited = 0;
-        while let Some(row) = rows.next()? {
-            work.rows_examined += 1;
-            if available == midpoint(visited, count, samples) {
-                if sparse {
-                    keys.push((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?));
-                    if keys.len() == SAMPLE_BATCH {
-                        work.vectors_loaded +=
-                            visit_samples(&mut vectors, self.model, width, &keys, &mut visit)?;
-                        keys.clear();
+        let mut loaded = 0;
+        {
+            let mut load = |key| -> Result<()> {
+                keys.push(key);
+                if keys.len() == SAMPLE_BATCH {
+                    loaded += visit_samples(&mut vectors, model, width, &keys, &mut score)?;
+                    keys.clear();
+                }
+                Ok(())
+            };
+            let mut accepted = 0;
+            if let Some((sample, _)) = self.positions {
+                let mut lookup = self.db.prepare_cached(
+                    "SELECT s.passage,s.part,p.entry FROM rep_search_positions s
+                     CROSS JOIN rep_search_passages p ON p.id=s.passage
+                     WHERE s.sample=?1 AND s.ordinal=?2",
+                )?;
+                for index in 0..samples {
+                    let ordinal = midpoint(index, count, samples) as i64;
+                    let (passage, part, entry) = lookup
+                        .query_row(params![sample, ordinal], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                        })?;
+                    work.rows_examined += 1;
+                    if (self.entry_allowed)(entry) {
+                        load((passage, part))?;
+                        accepted += 1;
                     }
-                } else {
-                    visit(row)?;
-                    work.vectors_loaded += 1;
                 }
-                visited += 1;
-                if visited == samples {
-                    break;
-                }
+            } else {
+                accepted = self.scan_sparse_keys(count, samples, None, work, &mut load)?;
             }
-            available += 1;
+            if accepted < samples {
+                // Both position indexes use canonical key order. Fill denied slots
+                // with readable keys outside the original sample.
+                self.scan_sparse_keys(count, samples, Some(samples - accepted), work, &mut load)?;
+            }
         }
         if !keys.is_empty() {
-            work.vectors_loaded +=
-                visit_samples(&mut vectors, self.model, width, &keys, &mut visit)?;
+            loaded += visit_samples(&mut vectors, model, width, &keys, &mut score)?;
         }
-        Ok(scored)
+        work.vectors_loaded += loaded;
+        Ok(loaded)
+    }
+
+    fn scan_sparse_keys(
+        &mut self,
+        count: usize,
+        samples: usize,
+        refill: Option<usize>,
+        work: &mut VectorWork,
+        mut visit: impl FnMut((i64, i64)) -> Result<()>,
+    ) -> Result<usize> {
+        let sql = format!(
+            "SELECT p.id,v.part,p.entry {}
+             ORDER BY visible.object,visible.section,p.location,v.part",
+            scope_sql(COVERING_VECTORS)
+        );
+        let mut statement = self.db.prepare_cached(&sql)?;
+        let mut rows = statement.query(params![
+            self.head,
+            self.model,
+            self.options.kind.map(|kind| kind as i64),
+            self.options.subject,
+            self.options.scope
+        ])?;
+        let mut ordinal = 0;
+        let mut visited = 0;
+        let mut accepted = 0;
+        while let Some(row) = rows.next()? {
+            work.rows_examined += 1;
+            let sampled = visited < samples && ordinal == midpoint(visited, count, samples);
+            visited += usize::from(sampled);
+            if sampled != refill.is_some() && (self.entry_allowed)(row.get(2)?) {
+                visit((row.get(0)?, row.get(1)?))?;
+                accepted += 1;
+            }
+            if refill.map_or(visited == samples, |needed| accepted == needed) {
+                break;
+            }
+            ordinal += 1;
+        }
+        Ok(accepted)
     }
 }
 

@@ -517,6 +517,7 @@ impl Archive {
     fn seal_review_union(&self, parents: BTreeSet<Id>) -> Result<Id> {
         let mut objects = BTreeSet::new();
         let mut withheld = BTreeSet::new();
+        let public = Id::blob(crate::profile::PUBLIC);
         let mut access = self
             .db
             .prepare_cached("SELECT access FROM objects WHERE id=? AND data IS NOT NULL")?;
@@ -535,6 +536,10 @@ impl Archive {
                         snapshot.objects.contains(&acl)
                             && !self.point_only(id)?
                             && self.require_exchange_access(head, id, acl, false).is_ok()
+                            && (acl == id
+                                || self
+                                    .require_exchange_access(head, acl, public, false)
+                                    .is_ok())
                             && self.check_access(acl, |_| true).is_ok()
                     }
                     None => false,
@@ -599,6 +604,41 @@ impl Archive {
 mod tests {
     use super::*;
     use crate::profile::PUBLIC;
+
+    #[test]
+    fn review_members_need_an_authorized_access_descriptor() -> Result<()> {
+        let archive = Archive::memory()?;
+        let public = Id::blob(PUBLIC);
+        let acl = archive.blob(br#"{"version":1,"purposes":["train","read"]}"#, public)?;
+        let bytes = b"observed input";
+        let member = archive.blob(bytes, acl)?;
+        let snapshot = archive.seal_members_withheld(
+            "local replica review",
+            Default::default(),
+            [public, acl, member].into(),
+            &[acl].into(),
+        )?;
+        let head = snapshot.id()?;
+        assert!(archive.resolve(&snapshot, member, "train").is_err());
+        assert!(archive.resolve_head(head, member, "read").is_err());
+        assert!(archive.custody_resolve(head, member, "read").is_err());
+
+        let original = archive.snapshot_id("legacy source", Default::default())?;
+        assert_eq!(archive.resolve_head(original, member, "train")?, bytes);
+        archive.db.execute(
+            "INSERT INTO archive_member_access VALUES(?,?,?)",
+            params![
+                original.to_string(),
+                acl.to_string(),
+                Id::blob(crate::profile::READ_ONLY).to_string()
+            ],
+        )?;
+        let review = archive.seal_review_union([original].into())?;
+        assert!(archive.head(review)?.objects.contains(&member));
+        assert!(archive.resolve_head(review, member, "train").is_err());
+        assert!(archive.custody_resolve(review, member, "read").is_err());
+        Ok(())
+    }
 
     #[test]
     fn upgrade_suspends_releases_containing_historical_point_bytes() -> Result<()> {

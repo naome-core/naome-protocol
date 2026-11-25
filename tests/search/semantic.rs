@@ -367,6 +367,58 @@ fn verified_import_rechecks_prepared_text_sources_before_ranking_and_embedding()
 }
 
 #[test]
+fn sparse_semantic_search_fills_denied_slots_with_readable_vectors() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("old media vectors.sqlite");
+    let archive = Archive::open(&path)?;
+    let mut videos = Vec::new();
+    for bytes in [b"bridge first".as_slice(), b"bridge second".as_slice()] {
+        videos.push((
+            archive.capture(bytes, "video/mp4", bytes.len(), Id::blob(PUBLIC), Format::A)?,
+            Id::blob(bytes),
+        ));
+    }
+    videos.sort_unstable();
+    let allowed = videos[0].0;
+    let denied_chunk = videos[1].1;
+    let snapshot = archive.snapshot("two media observations", Default::default())?;
+    let mut model = SyntheticMedia(b"sparse scoped media vectors");
+    assert_eq!(
+        archive
+            .prepare_search(&snapshot, 100, Some(&mut model))?
+            .sample_positions_ready,
+        Some(true)
+    );
+    // Model an older prepared index whose second payload was later restricted.
+    let db = rusqlite::Connection::open(&path)?;
+    db.execute(
+        "INSERT INTO archive_point_only(id) VALUES(?)",
+        [denied_chunk.to_string()],
+    )?;
+    let budget = SearchOptions {
+        mode: SearchMode::Semantic,
+        vector_budget: 1,
+        ..Default::default()
+    };
+    for kind in [None, Some(Kind::Descriptor)] {
+        let report = archive.search_prepared(
+            &snapshot,
+            SearchInput::Text("scene"),
+            SearchOptions { kind, ..budget },
+            Some(&mut model),
+        )?;
+        assert_eq!(
+            report.hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            [allowed]
+        );
+        assert!(report.limited_coverage);
+        assert_eq!(report.vector_products, model.dimensions());
+        assert_eq!(report.vector_rows_loaded, 1);
+    }
+    Ok(())
+}
+
+#[test]
 fn old_local_prepared_media_respects_point_restrictions_before_and_after_upgrade() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("older cached media.sqlite");

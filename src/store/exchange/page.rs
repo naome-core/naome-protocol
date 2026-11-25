@@ -240,7 +240,9 @@ impl Archive {
             let descriptor = self.custody_head(head)?;
             let mut tree = Tree::new(&self.db);
             ensure!(
-                committed_access(&descriptor, member, |id| tree.read(id))? == access,
+                committed_access(&descriptor, member, |id| tree.read(id))? == access
+                    && committed_access(&descriptor, access, |id| tree.read(id))?
+                        == Id::blob(PUBLIC),
                 "member is unavailable in the source inventories of this review"
             );
         }
